@@ -1,0 +1,41 @@
+[project]
+# 开启调试模式，输出堆栈信息
+debug = true
+log_level = "INFO"
+
+[data]
+# data_lake 根目录，确定了市场数据和因子数据的存放的地点
+# 使用相对路径，相对于项目根目录
+data_lake_dir = "data_lake"
+market_data_dir = "market_data"
+factors_dir = "factors"
+
+
+# Tushare 配置
+[tushare]
+token = "f95347dd9af659ae5b6e22cb276360a976a7c383e199fd8a961505f7"
+
+# ZVT 配置
+[zvt]
+# zvt的家目录，储存元数据、缓存文件或默认的 SQLite 数据库
+zvt_home = ".zvt"
+
+# DuckDB 配置
+[duckdb]
+# 持续的 DuckDB 文件路径（可选，如果仅依赖 Parquet，也可以是 :memory:）
+db_path = "data_lake/quant.duckdb"
+
+# Qlib 配置
+[qlib]
+provider_uri = "data_lake/qlib_bin"
+region = "cn"
+
+[execution]
+# 交易网关配置
+gateway = "ctp" # or xtquant
+sim_mode = true
+
+[prefect]
+# Flow 配置
+parallel_execution = true
+max_workers = 12

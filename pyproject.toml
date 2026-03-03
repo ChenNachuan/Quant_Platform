@@ -1,0 +1,36 @@
+[project]
+name = "Quant_Platform"
+version = "0.1.0"
+description = "A high-performance quantitative trading platform based on ZVT, VectorBT, and Qlib."
+readme = "README.md"
+requires-python = "==3.10.*"
+dependencies = [
+    "zvt",
+    "vectorbt",
+    "duckdb",
+    "polars>=0.20.0",
+    "prefect>=2.16.0",
+    "qlib",
+    "torch>=2.0.0",
+    "numba",
+    "pandas",
+    "numpy",
+    "clickhouse-driver",
+    "sqlalchemy",
+    "tomli",
+    "pyarrow",
+    "pandas-stubs~=2.3.3",
+    "setuptools>=82.0.0",
+    "akshare>=1.18.25",
+]
+
+[tool.uv.sources]
+zvt = { path = "libs/zvt", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "jupyterlab",
+    "ipython"
+]
+

@@ -1,0 +1,27 @@
+strategies:
+  # 双均线移动平均策略
+  # 已启用
+  alpha_001:
+    enabled: true
+    description: "双均线移动平均策略"
+    params:
+      fast_window: 10
+      slow_window: 50
+      signal_threshold: 0.01
+
+  # RSI 策略
+  # 已禁用
+  alpha_002:
+    enabled: false
+    description: "RSI 策略"
+    params:
+      rsi_period: 14
+      entry_threshold: 30
+      exit_threshold: 70
+
+# 最大回撤，最大杠杆以及单仓限额
+execution:
+  risk_control:
+    max_drawdown: 0.2
+    max_leverage: 1.0
+    single_position_limit: 0.1
