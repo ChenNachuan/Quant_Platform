@@ -1,0 +1,14 @@
+POST http://127.0.0.1:8090/api/work/build_main_tag_sub_tag_relation
+accept: application/json
+Content-Type: application/json
+
+{
+  "main_tag": "商业航天",
+  "sub_tag_list": [
+    "航天概念",
+    "天基互联",
+    "北斗导航",
+    "通用航空"
+  ],
+  "activate": true
+}

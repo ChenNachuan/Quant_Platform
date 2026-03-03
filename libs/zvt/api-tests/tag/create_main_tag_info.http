@@ -1,0 +1,8 @@
+POST http://127.0.0.1:8090/api/work/create_main_tag_info
+accept: application/json
+Content-Type: application/json
+
+{
+  "tag": "稳定币",
+  "tag_reason": "数字货币的一种，通常与法定货币挂钩，旨在减少价格波动。"
+}
