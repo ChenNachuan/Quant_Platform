@@ -291,12 +291,20 @@ class StorageManager:
             df_to_write['timestamp'] = df_to_write.index
 
         if 'timestamp' in df_to_write.columns:
-            # Parquet 标准存储 UTC，读取时需注意
-            df_to_write['timestamp'] = pd.to_datetime(df_to_write['timestamp'])
-            
-            # 统一转为 Naive Time (移除时区信息，避免DuckDB处理复杂化)
+            # 两步标准化：统一精度为 ns，移除 tz 信息
+            # 目标格式：timestamp[ns] naive，与 DuckDB TIMESTAMP_NS 对齐
+            df_to_write['timestamp'] = pd.to_datetime(df_to_write['timestamp'], utc=False)
+
+            # 若含时区：先转换到 UTC 再剥除，保持时间值语义正确
             if df_to_write['timestamp'].dt.tz is not None:
-                df_to_write['timestamp'] = df_to_write['timestamp'].dt.tz_convert(None)
+                df_to_write['timestamp'] = (
+                    df_to_write['timestamp']
+                    .dt.tz_convert('UTC')
+                    .dt.tz_localize(None)
+                )
+
+            # 强制转换精度为 ns，防止 PyArrow 写出 us/ms 精度差异
+            df_to_write['timestamp'] = df_to_write['timestamp'].astype('datetime64[ns]')
 
             if 'year' in partition_cols:
                 # noinspection PyTypeChecker
