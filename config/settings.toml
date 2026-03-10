@@ -12,8 +12,9 @@ factors_dir = "factors"
 
 
 # Tushare 配置
-[tushare]
-token = "f95347dd9af659ae5b6e22cb276360a976a7c383e199fd8a961505f7"
+# Token 严禁明文写入此文件
+# 请在项目根目录的 .env 文件中设置：TUSHARE_TOKEN=<your_token>
+# ConfigLoader 会自动从环境变量读取并注入
 
 # ZVT 配置
 [zvt]
