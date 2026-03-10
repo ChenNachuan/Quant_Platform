@@ -30,10 +30,26 @@ class ConfigLoader:
     def load(cls) -> Dict[str, Any]:
         """
         加载全局配置文件 (单例模式)
+
+        密钥加载优先级:
+        1. 环境变量 (最高优先级)
+        2. 项目根目录 .env 文件 (本地开发)
+        3. settings.toml 中的明文值 (已清空，仅作 fallback)
         """
         if cls._config is None:
+            import os
             # 获取项目根目录（二级父目录）
             cls.PROJECT_ROOT = Path(__file__).parent.parent
+
+            # 优先加载 .env 文件（不覆盖已存在的环境变量，override=False）
+            try:
+                from dotenv import load_dotenv
+                env_path = cls.PROJECT_ROOT / ".env"
+                load_dotenv(dotenv_path=env_path, override=False)
+                if env_path.exists():
+                    logger.info(f"已从 .env 加载环境变量: {env_path}")
+            except ImportError:
+                logger.warning("python-dotenv 未安装，跳过 .env 加载。请运行: uv sync")
 
             # 设定 config 的目录
             config_path = cls.PROJECT_ROOT / "config" / "settings.toml"
@@ -48,6 +64,17 @@ class ConfigLoader:
             # 将 PROJECT_ROOT 注入到配置中，方便后续引用
             cls._config['project_root'] = str(cls.PROJECT_ROOT)
 
+            # 用环境变量覆盖 toml 中的敏感字段（优先级：env > toml）
+            tushare_token = os.environ.get('TUSHARE_TOKEN', '').strip()
+            if tushare_token:
+                cls._config.setdefault('tushare', {})['token'] = tushare_token
+                logger.info("Tushare Token 已从环境变量 TUSHARE_TOKEN 加载")
+            elif not cls._config.get('tushare', {}).get('token'):
+                logger.warning(
+                    "⚠️  未检测到 TUSHARE_TOKEN 环境变量，且 settings.toml 中 token 为空。\n"
+                    "   请在项目根目录创建 .env 文件并添加：TUSHARE_TOKEN=<your_token>"
+                )
+
             # --- 设置 ZVT_HOME 环境变量 ---
             zvt_home = cls._config.get('zvt', {}).get('zvt_home')
             if zvt_home:
@@ -58,7 +85,6 @@ class ConfigLoader:
                 if not zvt_home_path.is_absolute():
                     zvt_home_path = (cls.PROJECT_ROOT / zvt_home_path).resolve()
 
-                import os
                 # 设置环境变量，确保 ZVT 初始化时能读取到
                 os.environ['ZVT_HOME'] = str(zvt_home_path)
                 logger.info(f"设置 ZVT_HOME: {zvt_home_path}")
