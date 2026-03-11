@@ -135,10 +135,11 @@ class FactorDAG:
         deps = {}
         if hasattr(factor, 'dependencies') and factor.dependencies:
             for dep_name in factor.dependencies:
-                # 递归计算依赖
-                # 注意：这里假设依赖使用相同参数，实际可能需要参数映射
+                # 跨参数依赖：优先查 dependency_para_map，无则透传当前 para
+                # 解决因子 A(window=20) 依赖因子 B(window=5) 的参数错配问题
+                dep_para = getattr(factor, 'dependency_para_map', {}).get(dep_name, para)
                 deps[dep_name] = self.compute_with_cache(
-                    dep_name, data, registry, timeframe, para
+                    dep_name, data, registry, timeframe, dep_para
                 )
         
         # 计算

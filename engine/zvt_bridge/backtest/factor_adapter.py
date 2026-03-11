@@ -45,7 +45,8 @@ class FactorAdapter(ZVTFactor):
         keep_all_timestamp: bool = False,
         fill_method: str = 'ffill',
         effective_number: int = None,
-        need_persist: bool = False
+        need_persist: bool = False,
+        check_lookahead: bool = True   # 前视偏差检测开关
     ):
         """
         初始化适配器
@@ -55,6 +56,7 @@ class FactorAdapter(ZVTFactor):
             其他参数同 ZVTFactor
         """
         self.custom_factor = custom_factor
+        self.check_lookahead = check_lookahead
         
         # 使用 DuckDB 而不是 ZVT 默认数据源
         self.use_duckdb = True
@@ -113,7 +115,26 @@ class FactorAdapter(ZVTFactor):
                 # 调用我们自己的因子计算逻辑
                 try:
                     factor_values = self.custom_factor.compute(group)
-                    
+
+                    # 前视偏差（Look-ahead Bias）启发式检测
+                    # 原理：截断末尾 1 行重算，若历史部分值发生变化，
+                    #      说明因子访问了未来数据（如 .shift(-1)）
+                    if self.check_lookahead and len(group) > 2:
+                        try:
+                            truncated_vals = self.custom_factor.compute(group.iloc[:-1])
+                            overlap = factor_values.iloc[:-1]
+                            if len(truncated_vals) == len(overlap):
+                                if not overlap.reset_index(drop=True).round(8).equals(
+                                    truncated_vals.reset_index(drop=True).round(8)
+                                ):
+                                    warnings.warn(
+                                        f"⚠️  因子 [{self.custom_factor.name}] 疑似存在前视偏差 "
+                                        f"(Look-ahead Bias)：截断末行后历史值发生变化，"
+                                        f"请检查是否使用了 .shift(-N) 或未对齐的 rolling。"
+                                    )
+                        except Exception:
+                            pass  # 检测本身不影响主流程
+
                     # 转换为 DataFrame
                     factor_df = pd.DataFrame({
                         'timestamp': group['timestamp'],

@@ -34,7 +34,11 @@ class Factor(ABC):
     para_group: Dict[str, Dict] = {}
     
     # ==================== 依赖管理 ====================
-    dependencies: List[str] = []  # 依赖的因子列表
+    dependencies: List[str] = []           # 依赖的因子列表
+    dependency_para_map: Dict[str, Dict] = {}  # 跨参数依赖映射表
+    # 示例: dependency_para_map = {'sma': {'window': 5}}
+    # 表示本因子在计算 'sma' 依赖时强制使用 window=5，
+    # 而不是透传自身的 para。
     
     # ==================== 后处理配置 ====================
     post_process_steps: List[str] = []  # ['winsorize', 'standardize']

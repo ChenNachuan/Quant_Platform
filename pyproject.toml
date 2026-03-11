@@ -23,6 +23,7 @@ dependencies = [
     "python-dotenv~=1.2.1",
     "setuptools>=82.0.0",
     "akshare>=1.18.25",
+    "alphalens-reloaded>=0.4.3",
 ]
 
 [tool.uv.sources]

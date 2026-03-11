@@ -32,6 +32,18 @@ db_path = "data_lake/quant.duckdb"
 provider_uri = "data_lake/qlib_bin"
 region = "cn"
 
+[backtest]
+# 回测基础配置
+initial_capital = 1000000.0   # 初始资金：100 万
+
+[backtest.cost]
+# 交易成本（A 股标准）
+# 将 apply_cost=True 传入 BatchBacktestRunner 时生效
+commission_rate = 0.0003   # 双边佣金率：万三（买卖各收）
+stamp_duty      = 0.0005   # 印花税：卖出单边 0.05%
+slippage        = 0.0002   # 滑点估算：万二
+min_commission  = 5.0      # 单笔最低佣金：5 元
+
 [execution]
 # 交易网关配置
 gateway = "ctp" # or xtquant
