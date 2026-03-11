@@ -28,6 +28,10 @@ from zvt.utils.utils import zvt_env
 
 from factor_library.registry import FactorRegistry
 from engine.zvt_bridge.backtest import FactorAdapter
+from engine.simulation.models import (
+    BaseFeeModel, AShareFeeModel,
+    BaseSlippageModel, ConstantSlippageModel,
+)
 
 
 class BatchBacktestRunner:
@@ -56,18 +60,19 @@ class BatchBacktestRunner:
         end_timestamp: str,
         codes: Optional[List[str]] = None,
         level: IntervalLevel = IntervalLevel.LEVEL_1DAY,
-        apply_cost: bool = False
+        apply_cost: bool = False,
+        fee_model: Optional[BaseFeeModel] = None,
+        slippage_model: Optional[BaseSlippageModel] = None,
     ):
         """
-        初始化批量回测器
-
         Args:
             start_timestamp: 开始时间
             end_timestamp: 结束时间
-            codes: 股票代码列表，如果为 None 则使用全市场股票
+            codes: 股票代码列表，None 则全市场
             level: 时间级别
-            apply_cost: 是否扣除交易成本。开启后从 settings.toml
-                        读取 [backtest.cost] 配置进行成本估算。
+            apply_cost: 是否开启交易成本扣除
+            fee_model: 费率模型，默认 AShareFeeModel（从 settings.toml 初始化）
+            slippage_model: 滑点模型，默认 ConstantSlippageModel
         """
         if codes is None:
             print(" 未指定股票代码，加载全市场股票列表")
@@ -85,28 +90,26 @@ class BatchBacktestRunner:
         self.level = level
         self.apply_cost = apply_cost
         self.results: Dict[str, pd.DataFrame] = {}
-        # 存储 FactorAdapter 实例，供 IC 分析复用
         self._adapters: Dict[str, object] = {}
 
-        # 读取交易成本配置
-        if apply_cost:
+        # 初始化费率模型：优先用传入的实例，否则从 settings.toml 自动构建 AShareFeeModel
+        if fee_model is not None:
+            self._fee_model: Optional[BaseFeeModel] = fee_model
+        elif apply_cost:
             import sys
-            from pathlib import Path
             sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
             from infra.storage import ConfigLoader
             cfg = ConfigLoader.load()
             cost_cfg = cfg.get('backtest', {}).get('cost', {})
-            self._cost = {
-                'commission_rate': cost_cfg.get('commission_rate', 0.0003),
-                'stamp_duty':      cost_cfg.get('stamp_duty',      0.0005),
-                'slippage':        cost_cfg.get('slippage',        0.0002),
-                'min_commission':  cost_cfg.get('min_commission',  5.0),
-            }
-            print(f"\u4ea4易成本已开启: 佣金 {self._cost['commission_rate']:.4%} | "
-                  f"印花税 {self._cost['stamp_duty']:.4%} | "
-                  f"滑点 {self._cost['slippage']:.4%}")
+            self._fee_model = AShareFeeModel.from_config(cost_cfg)
+            print(f"交易成本已开启: {self._fee_model.__class__.__name__} | "
+                  f"佣金 {self._fee_model.commission_rate:.4%} | "
+                  f"印花税 {self._fee_model.stamp_duty:.4%} | "
+                  f"最低 {self._fee_model.min_commission:.0f} 元")
         else:
-            self._cost = None
+            self._fee_model = None
+
+        self._slippage_model: Optional[BaseSlippageModel] = slippage_model
 
     def run_single_factor(
         self,
@@ -273,21 +276,20 @@ class BatchBacktestRunner:
             # 胜率 (Win Rate)
             win_rate = (returns > 0).sum() / len(returns) * 100 if len(returns) > 0 else 0
 
-            # ── 交易成本估算 ──
-            # 换手率近似: 相邻持仓变化之和 / 总持仓
-            # 此处用日收益率正负变化次数做粗估：每次换手假设换仓 1/N
+            # ── 交易成本估算（调用可插拔 fee_model）──
+            # 换手次数粗估：以信号变向次数近似（每次换仓等额买卖）
+            # AShareFeeModel 区分买卖方向：卖出多收印花税 + 最低 5 元限制
             cost_drag = 0.0
-            if self._cost and len(returns) > 0:
-                # 换手次数 ≈ 信号变向次数（粗估）
-                turnover_count = (returns > 0).astype(int).diff().abs().sum()
-                # 单次换手成本率: 买入佣金 + 卖出佣金 + 卖出印花税 + 滑点
-                single_cost = (
-                    self._cost['commission_rate'] * 2
-                    + self._cost['stamp_duty']
-                    + self._cost['slippage']
-                )
-                # 总成本拖拽 = 换手次数 × 单次成本率
-                cost_drag = turnover_count * single_cost * 100
+            if self._fee_model is not None and len(returns) > 0:
+                # 假设每次换仓的成交金额约等于账户初始净值（1 个单位）
+                unit_value = equity.iloc[0]
+                turnover_count = int((returns > 0).astype(int).diff().abs().sum())
+                # 买入成本 + 卖出成本（各 turnover_count 次）
+                single_buy  = self._fee_model.calc_fee(unit_value, 'BUY')
+                single_sell = self._fee_model.calc_fee(unit_value, 'SELL')
+                total_cost  = (single_buy + single_sell) * turnover_count
+                # 将成本折算为收益率百分比
+                cost_drag = total_cost / unit_value * 100
 
             summary.append({
                 '因子': trader_name,
@@ -297,7 +299,7 @@ class BatchBacktestRunner:
                 'Sharpe Ratio': sharpe,
                 '最大回撤(%)': max_drawdown,
                 '胜率(%)': win_rate,
-                '成本拖拽(%)': cost_drag if self._cost else 0.0,
+                '成本拖拽(%)': round(cost_drag, 4),
             })
 
         summary_df = pd.DataFrame(summary)

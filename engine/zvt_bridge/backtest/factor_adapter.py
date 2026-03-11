@@ -12,6 +12,7 @@ from zvt.contract import IntervalLevel
 from zvt.domain import Stock1dHfqKdata
 
 from factor_library.base import Factor as CustomFactor
+from factor_library.universe import UniverseFilter, UniverseConfig
 
 
 class FactorAdapter(ZVTFactor):
@@ -46,7 +47,8 @@ class FactorAdapter(ZVTFactor):
         fill_method: str = 'ffill',
         effective_number: int = None,
         need_persist: bool = False,
-        check_lookahead: bool = True   # 前视偏差检测开关
+        check_lookahead: bool = True,            # 前视偏差检测开关
+        universe_filter: Optional[UniverseFilter] = None  # Universe 过滤器
     ):
         """
         初始化适配器
@@ -57,6 +59,8 @@ class FactorAdapter(ZVTFactor):
         """
         self.custom_factor = custom_factor
         self.check_lookahead = check_lookahead
+        self.universe_filter = universe_filter
+        self.universe_mask: Optional[pd.DataFrame] = None   # 计算后缓存，供外部读取
         
         # 使用 DuckDB 而不是 ZVT 默认数据源
         self.use_duckdb = True
@@ -163,7 +167,25 @@ class FactorAdapter(ZVTFactor):
                     columns='entity_id',
                     values='value'
                 )
-            
+
+                # Universe 过滤：将不在有效股票池内的因子值置为 NaN
+                # 防止停牌/ST/退市/次新股的因子值参与截面排名
+                if self.universe_filter is not None:
+                    try:
+                        self.factor_df = self.universe_filter.apply_to_factor(
+                            factor_wide=self.factor_df,
+                            kdata=df,
+                        )
+                        self.universe_mask = self.universe_filter.filter(df)
+                        n_filtered = (~self.universe_mask).sum().sum()
+                        if n_filtered > 0:
+                            import logging
+                            logging.getLogger(__name__).info(
+                                f"Universe Filter: 共过滤 {n_filtered:.0f} 个因子值（停牌/ST/新股/退市）"
+                            )
+                    except Exception as ue:
+                        warnings.warn(f"Universe 过滤失败（跳过）: {ue}")
+
         except Exception as e:
             warnings.warn(f"计算因子失败: {e}")
             import traceback
