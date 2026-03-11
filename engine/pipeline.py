@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import pandas as pd
 import numpy as np
+import vectorbt as vbt
 
 from factor_library.base import Factor
 from factor_library.universe import UniverseFilter
@@ -137,14 +138,54 @@ class DefaultRiskFilter(RiskFilter):
 
 class SimulationExecutionHandler(ExecutionHandler):
     """
-    回测执行器
-    如果是回测环境，直接原样返回权重宽表供引擎测算 PnL 即可
-    如果是实盘环境，这里应当遍历截面转化为 PositionManager.rebalance 的指令
+    权重透传执行器
+    直接原样返回权重宽表。
     """
     def execute(self, safe_weights: pd.DataFrame, kdata: pd.DataFrame) -> pd.DataFrame:
         logger.info("ExecutionHandler: 输出模拟执行权重宽表")
         return safe_weights
 
+
+class VectorBTExecutionHandler(ExecutionHandler):
+    """
+    VectorBT 向量化回测执行器。
+    将安全权重矩阵输入 VectorBT，进行高性能组合回测。
+    """
+    def __init__(self, init_cash: float = 1000000.0, fees: float = 0.001, slippage: float = 0.002):
+        self.init_cash = init_cash
+        self.fees = fees
+        self.slippage = slippage
+
+    def execute(self, safe_weights: pd.DataFrame, kdata: pd.DataFrame) -> vbt.Portfolio:
+        logger.info("ExecutionHandler: 调用 VectorBT 引擎执行回测")
+        # 提取收盘价宽表 (Date x Symbol)
+        close_df = kdata.pivot(index='timestamp', columns='entity_id', values='close')
+        
+        # 对齐索引和列
+        common_idx = safe_weights.index.intersection(close_df.index)
+        common_col = safe_weights.columns.intersection(close_df.columns)
+        
+        weights = safe_weights.loc[common_idx, common_col]
+        close_prices = close_df.loc[common_idx, common_col]
+        
+        # 填充缺失价格以防 vbt 报错
+        close_prices = close_prices.ffill()
+
+        # 使用 from_orders 目标仓位百分比模式
+        # 注意：cash_sharing=True 和 group_by=True 是跨标的共享资金池的关键
+        pf = vbt.Portfolio.from_orders(
+            close=close_prices,
+            size=weights,
+            size_type='target_percent',
+            group_by=True,
+            cash_sharing=True,
+            init_cash=self.init_cash,
+            fees=self.fees,
+            slippage=self.slippage,
+            freq='1D'
+        )
+        logger.info(f"VectorBT 回测完成。最终权益: {pf.value().iloc[-1]:,.2f}")
+        return pf
 
 # ─────────────────────────────────────────────
 # 3. 5 层流水线总装
@@ -201,6 +242,7 @@ class AlphaPipeline:
 
 __all__ = [
     'AlphaModel', 'PortfolioConstructor', 'RiskFilter', 'ExecutionHandler',
-    'FactorAlphaModel', 'EqualWeightPortfolio', 'DefaultRiskFilter', 'SimulationExecutionHandler',
+    'FactorAlphaModel', 'EqualWeightPortfolio', 'DefaultRiskFilter', 
+    'SimulationExecutionHandler', 'VectorBTExecutionHandler',
     'AlphaPipeline'
 ]
