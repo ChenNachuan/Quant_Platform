@@ -71,7 +71,7 @@ class ZvtDataSyncer:
 
         # 0. 检查 Stock 元数据
         if Stock.query_data(provider='em', codes=codes).empty:
-            logger.info(f"请求的代码缺少元数据 (StockMetadata)。正在录入股票列表数据 (ZVT)...")
+            logger.info("请求的代码缺少元数据 (StockMetadata)。正在录入股票列表数据 (ZVT)...")
             Stock.record_data(provider='em', codes=codes, sleeping_time=0.1)
 
         # 1. 获取 Raw Data (不复权)
