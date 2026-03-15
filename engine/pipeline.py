@@ -123,6 +123,35 @@ class EqualWeightPortfolio(PortfolioConstructor):
         return weights
 
 
+class QuantilePortfolio(PortfolioConstructor):
+    """
+    等分 N 组组合构建器 (N-Quantiles)
+    将所有的非 NaN 信号在每个截面均等分为 n_quantiles 组。
+    """
+    def __init__(self, n_quantiles: int = 5):
+        self.n_quantiles = n_quantiles
+        
+    def create_portfolio(self, signals: pd.DataFrame, kdata: pd.DataFrame = None) -> Dict[int, pd.DataFrame]:
+        logger.info(f"PortfolioConstructor: 构建包含 {self.n_quantiles} 个分组的等权截面组合")
+        
+        def qcut_row(row):
+            try:
+                return pd.qcut(row, q=self.n_quantiles, labels=range(1, self.n_quantiles + 1), duplicates='drop')
+            except ValueError:
+                return pd.Series(index=row.index)
+                
+        quantile_labels = signals.apply(qcut_row, axis=1)
+        
+        weights_dict = {}
+        for q in range(1, self.n_quantiles + 1):
+            mask_q = (quantile_labels == q)
+            daily_count = mask_q.sum(axis=1)
+            weights_q = mask_q.astype(float).div(daily_count.where(daily_count > 0, np.nan), axis=0).fillna(0.0)
+            weights_dict[q] = weights_q
+            
+        return weights_dict
+
+
 class DefaultRiskFilter(RiskFilter):
     """默认风控：复用既有 RiskControl 的单票上限（向量化裁剪）"""
     def __init__(self, max_weight: float = 1.0):
@@ -144,6 +173,55 @@ class SimulationExecutionHandler(ExecutionHandler):
     def execute(self, safe_weights: pd.DataFrame, kdata: pd.DataFrame) -> pd.DataFrame:
         logger.info("ExecutionHandler: 输出模拟执行权重宽表")
         return safe_weights
+
+
+class MultiVectorBTExecutionHandler(ExecutionHandler):
+    """
+    VectorBT 多分组向量化回测执行器。
+    支持将字典格式的 N 组安全权重一次性并发传递给 vbt 模拟对冲与截面测试。
+    """
+    def __init__(self, init_cash: float = 1000000.0, fees: float = 0.001, slippage: float = 0.002):
+        self.init_cash = init_cash
+        self.fees = fees
+        self.slippage = slippage
+
+    def execute(self, safe_weights_dict: Dict[int, pd.DataFrame], kdata: pd.DataFrame) -> vbt.Portfolio:
+        logger.info(f"ExecutionHandler: 调用 VectorBT 引擎并发执行 {len(safe_weights_dict)} 个分组的回测")
+        close_df = kdata.pivot(index='timestamp', columns='entity_id', values='close')
+        
+        concat_list = []
+        keys = []
+        
+        align_basis = list(safe_weights_dict.values())[0]
+        common_idx = align_basis.index.intersection(close_df.index)
+        common_col = align_basis.columns.intersection(close_df.columns)
+        
+        close_prices = close_df.loc[common_idx, common_col].ffill()
+        
+        for q, w_df in safe_weights_dict.items():
+            keys.append(f'Group_{q}')
+            concat_list.append(w_df.loc[common_idx, common_col])
+            
+        all_weights = pd.concat(concat_list, axis=1, keys=keys)
+        
+        close_dict = {}
+        for q in safe_weights_dict.keys():
+           close_dict[f'Group_{q}'] = close_prices
+           
+        broad_close = pd.concat(close_dict.values(), axis=1, keys=close_dict.keys())
+        
+        pf = vbt.Portfolio.from_orders(
+            close=broad_close,
+            size=all_weights,
+            size_type='target_percent',
+            group_by=all_weights.columns.get_level_values(0),
+            cash_sharing=True,
+            init_cash=self.init_cash,
+            fees=self.fees,
+            slippage=self.slippage,
+            freq='1D'
+        )
+        return pf
 
 
 class VectorBTExecutionHandler(ExecutionHandler):
@@ -210,7 +288,7 @@ class AlphaPipeline:
         self.risk = risk
         self.execution = execution
 
-    def run(self, kdata: pd.DataFrame) -> pd.DataFrame:
+    def run(self, kdata: pd.DataFrame) -> Any:
         """
         执行一条完整的策略流水线，返回最终的目标权重矩阵或执行记录。
         """
@@ -224,13 +302,16 @@ class AlphaPipeline:
         logger.info("[2/5] Alpha Extraction")
         signals = self.alpha.get_signals(kdata, universe_mask)
         
-        # 3. Portfolio Construction: 构建目标权重
+        # 3. Portfolio Construction: 构建目标权重 (支持单字典多组并发)
         logger.info("[3/5] Portfolio Construction")
         target_weights = self.portfolio.create_portfolio(signals, kdata)
         
         # 4. Risk Management: 风险裁剪验证
         logger.info("[4/5] Risk Filter")
-        safe_weights = self.risk.apply_risk_rules(target_weights)
+        if isinstance(target_weights, dict):
+            safe_weights = {q: self.risk.apply_risk_rules(tw) for q, tw in target_weights.items()}
+        else:
+            safe_weights = self.risk.apply_risk_rules(target_weights)
         
         # 5. Execution: 执行落地
         logger.info("[5/5] Execution")
@@ -242,7 +323,7 @@ class AlphaPipeline:
 
 __all__ = [
     'AlphaModel', 'PortfolioConstructor', 'RiskFilter', 'ExecutionHandler',
-    'FactorAlphaModel', 'EqualWeightPortfolio', 'DefaultRiskFilter', 
-    'SimulationExecutionHandler', 'VectorBTExecutionHandler',
+    'FactorAlphaModel', 'EqualWeightPortfolio', 'QuantilePortfolio', 'DefaultRiskFilter', 
+    'SimulationExecutionHandler', 'VectorBTExecutionHandler', 'MultiVectorBTExecutionHandler',
     'AlphaPipeline'
 ]

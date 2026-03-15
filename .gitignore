@@ -73,3 +73,5 @@ Thumbs.db
 *.tmp
 tmp/
 logs/
+# Test Reports
+results/*.html

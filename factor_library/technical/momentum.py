@@ -9,6 +9,72 @@ import pandas as pd
 from typing import List, Dict, Optional
 
 
+@register_factor
+class SimpleMomentum(Factor):
+    """
+    经典截面动量因子 (Simple Momentum)
+    
+    计算公式: 今日 hfq_close / N日前的 hfq_close - 1
+    方向：一般数值越大，动量越强；但在某些市场（如A股短线）可能是反转效应
+    """
+    
+    name = "simple_momentum"
+    input_type = "bar"
+    max_lookback = 250
+    applicable_market = []
+    store_time = "2026-03-11"
+    
+    para_group = {
+        "1d": {"window": [5, 10, 20, 30, 60, 120, 250]},
+    }
+    
+    dependencies = []
+    
+    post_process_steps = ['winsorize', 'standardize']
+    winsorize_params = {'lower': 0.01, 'upper': 0.99}
+    standardize_method = 'zscore'
+
+    def generate_para_space(self) -> List[Dict[str, int]]:
+        if self.timeframe not in self.para_group:
+            return []
+        return [{"window": w} for w in self.para_group[self.timeframe]["window"]]
+
+    def compute(self, data: pd.DataFrame, deps: Optional[Dict[str, pd.Series]] = None) -> pd.Series:
+        required_cols = ['close']
+        if not set(required_cols).issubset(data.columns):
+            raise KeyError(f"缺少必要列: {required_cols}")
+            
+        window = self.para.get("window", 30)
+        
+        # 处理复权（如果数据源携带）
+        if 'hfq_factor' in data.columns:
+            hfq_close = data['close'] * data['hfq_factor']
+        else:
+            hfq_close = data['close']
+            
+        return hfq_close.pct_change(periods=window, fill_method=None)
+
+    def update(self, new_data: pd.DataFrame, history: pd.Series, deps: Optional[Dict[str, pd.Series]] = None) -> pd.Series:
+        window = self.para.get('window', 30)
+        
+        if 'hfq_factor' in new_data.columns:
+            new_hfq_close = new_data['close'] * new_data['hfq_factor']
+        else:
+            new_hfq_close = new_data['close']
+            
+        # pct_change(window) 需要历史最新前 window 个周期的收盘价
+        if len(history) < window:
+            # 如果历史不够，只能重新合并计算
+            combined = pd.concat([history, new_hfq_close])
+            result = combined.pct_change(periods=window, fill_method=None)
+            return result.iloc[-len(new_data):]
+        else:
+            historic_hfq_close = history.iloc[-window:]
+            combined = pd.concat([historic_hfq_close, new_hfq_close])
+            result = combined.pct_change(periods=window, fill_method=None)
+            return result.iloc[-len(new_data):]
+
+
 @register_factor  # 特性1：装饰器自动注册
 class MomentumReturn(Factor):
     """
