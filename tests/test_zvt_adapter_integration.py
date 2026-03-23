@@ -7,11 +7,6 @@ import sys
 import pandas as pd
 from pathlib import Path
 
-# Add project root to path
-project_root = '/Users/nachuanchen/Documents/Quant'
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
 from engine.zvt_bridge.backtest import FactorAdapter
 from factor_library.base import Factor
 from infra.storage import StorageManager

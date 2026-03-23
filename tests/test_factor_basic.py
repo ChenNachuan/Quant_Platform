@@ -7,9 +7,6 @@
 import sys
 import os
 
-# 添加项目路径
-sys.path.insert(0, '/Users/nachuanchen/Documents/Quant')
-
 import pandas as pd
 import numpy as np
 

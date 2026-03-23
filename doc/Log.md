@@ -41,3 +41,23 @@
 
 - **文件**: `doc/Log.md`
 - **操作**: 创建本文件，记录上述所有 AI 编辑操作
+
+---
+
+## 2026-03-23
+
+### 7. 修复 API Token 泄露风险（P0）
+
+- **文件**: `.env.example`（新建）、`.gitignore`
+- **操作**:
+  - 新建 `.env.example`，内容为模板，Token 替换为占位符 `your_tushare_token_here`
+  - `.gitignore` 在 `.env.*` 规则后追加 `!.env.example`，确保模板文件可提交
+- **要点**: `git log --all -- .env` 确认 `.env` 从未入库，Token 未泄露历史；`.env` 本体保留本地使用，不入库
+
+### 8. 修复硬编码绝对路径（P0）
+
+- **文件**: `pyproject.toml`、`tests/test_factor_basic.py`、`tests/test_factor_library.py`、`tests/test_incremental_calculation.py`、`tests/test_storage_refactor.py`、`tests/test_zvt_adapter_integration.py`
+- **操作**:
+  - `pyproject.toml` 新增 `[tool.pytest.ini_options]`，设置 `pythonpath = ["."]` 和 `testpaths = ["tests"]`
+  - 上述 5 个测试文件删除 `sys.path.insert(0, '/Users/nachuanchen/Documents/Quant')` 硬编码块，改由 pytest 配置统一处理
+- **要点**: `test_adj_factor_recorder.py` 和 `test_kdata_recorder.py` 使用 `Path(__file__).parent` 相对路径，无需修改

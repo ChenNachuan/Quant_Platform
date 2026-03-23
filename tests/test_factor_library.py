@@ -6,7 +6,6 @@
 import pandas as pd
 import numpy as np
 import sys
-sys.path.insert(0, '/Users/nachuanchen/Documents/Quant')
 
 from factor_library import Factor, FactorRegistry, register_factor
 from factor_library.operators import ts_mean

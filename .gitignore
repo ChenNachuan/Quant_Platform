@@ -16,6 +16,7 @@ data_lake/
 # =============================================
 .env
 .env.*
+!.env.example
 config.json
 *secret*
 *api_key*
