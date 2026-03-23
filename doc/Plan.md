@@ -60,14 +60,40 @@
 
 ---
 
+## 二点五、回测正确性修复
+
+> 消除前视偏差和生存者偏差漏洞，提升回测可信度。
+
+### 2.5.1 ST 过滤前视偏差（严重）
+
+- [ ] `factor_library/universe.py:144` — `kdata.groupby('entity_id')['name'].last()` 取的是整个回测期最后一条记录的名字，对全历史生效，导致未来 ST 状态被映射回过去
+- [ ] 修复方案：改为逐截面判断，`kdata[['timestamp','entity_id','name']]` pivot 后按日过滤，或要求调用方传入含时间维度的 ST 状态表
+
+### 2.5.2 停牌缺失数据误判（中）
+
+- [ ] `factor_library/universe.py:123` — 数据源不下发停牌日行情时，pivot 后该格为 NaN，`.fillna(False)` 将缺失误判为"可交易"
+- [ ] 修复方案：改为 `.fillna(True)`（缺失数据默认视为停牌/不可交易），或用 `volume.isna()` 单独构建停牌掩码
+
+### 2.5.3 次新股/退市过滤 Python for 循环（低，性能）
+
+- [ ] `factor_library/universe.py:160,176` — 两处 `for date in dates` 循环，3000+ 交易日时性能差
+- [ ] 修复方案：用 NumPy 广播构建二维布尔矩阵，`dates_col[:, None] < list_date_row[None, :]`
+
+### 2.5.4 T 日信号用 T 日收盘价成交（设计决策，需文档说明）
+
+- [ ] `engine/pipeline.py` — VectorBT 执行层用 T 日收盘价成交 T 日信号，在 A 股日线场景下无法实现（收盘后才能算出信号）
+- [ ] 建议：在 `AlphaPipeline.run()` 中对权重矩阵默认应用 `.shift(1)`，改为 T+1 日开盘/收盘成交；或在文档中明确说明这是简化假设
+
+---
+
 ## 三、架构重构
 
 > 消除设计缺陷，拆分过重模块，修复已知 bug。
 
 ### 3.1 ConfigLoader
 
-- [ ] 添加 `ConfigLoader.reset()` 类方法，支持测试间隔离
-- [ ] 测试 fixture 中自动 reset
+- [x] 添加 `ConfigLoader.reset()` 类方法，支持测试间隔离
+- [x] 测试 fixture 中自动 reset（`tests/conftest.py`，`autouse=True`）
 
 ### 3.2 StorageManager 拆分
 
@@ -81,27 +107,26 @@ infra/
 └── storage.py     → StorageManager     (Facade，委托给上述三类)
 ```
 
-- [ ] 创建 `infra/connection.py` → `ConnectionManager`
-- [ ] 创建 `infra/writer.py` → `DataWriter`
-- [ ] 创建 `infra/query.py` → `QueryEngine`
-- [ ] `StorageManager` 保留为 Facade，委托给上述三个类
-- [ ] 更新所有引用处
+- [x] 创建 `infra/connection.py` → `ConnectionManager`
+- [x] 创建 `infra/writer.py` → `DataWriter`
+- [x] 创建 `infra/query.py` → `QueryEngine`
+- [x] `StorageManager` 保留为 Facade，委托给上述三个类
+- [x] 更新所有引用处（公开 API 不变，16 个调用方无需修改）
 
 ### 3.3 增量更新器修复
 
-- [ ] 修改 `engine/factor/incremental_updater.py`，将上游因子的增量结果作为 `deps` 传入 `factor.update()`
-- [ ] 在 `FactorDAG` 中增加 `topological_sort_for_update()` 方法，区分全量计算和增量更新的依赖顺序
-- [ ] 添加测试: `RiskAdjustedMomentum` 增量更新 vs 全量计算一致性
+- [x] 修改 `engine/factor/incremental_updater.py`，将上游因子的增量结果作为 `deps` 传入 `factor.update()`
+- [x] 在 `FactorDAG` 中增加 `topological_sort_for_update()` 方法，区分全量计算和增量更新的依赖顺序
+- [x] 添加测试: `RiskAdjustedMomentum` 增量更新 vs 全量计算一致性
+- [x] 顺带修复 `Volatility.update()` 历史窗口 off-by-one bug（`window-1` → `window`）
 
 ### 3.4 Qlib Bridge 重构
 
-- [ ] 消除 subprocess 调用，改用 Qlib Python API:
-  ```python
-  from qlib.data.dataset_dump import dump_bin
-  dump_bin(csv_path, qlib_dir, region='cn')
-  ```
-- [ ] 增量更新支持: 只导出新增日期的数据
-- [ ] 自动注册 Qlib 数据源: `qlib.init(provider_uri=...)`
+- [x] 消除 subprocess 调用，改用 Qlib Python API (`DumpDataAll` / `DumpDataUpdate`)
+- [x] 增量更新支持: `.last_dump_date` 文件追踪上次导出日期，自动增量
+- [x] 自动注册 Qlib 数据源: `qlib.init(provider_uri=...)`
+- [x] 修复 `pyproject.toml`: `"qlib"` (石油库) → `"pyqlib"` (微软量化库)
+- [x] 修复 `get_market_data()` → `get_data()`，修复单文件 CSV → 按 symbol 分文件
 
 ---
 

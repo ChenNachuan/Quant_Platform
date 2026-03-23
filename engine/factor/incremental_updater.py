@@ -53,24 +53,29 @@ class IncrementalUpdater:
     def update_all(self, date: str, codes: List[str] = None):
         """
         更新所有因子到指定日期
-        
+
         Args:
             date: 更新日期 'YYYY-MM-DD'
             codes: 指定股票列表，None表示所有
         """
         logger.info(f"开始增量更新因子: {date}")
-        
-        # 1. 获取所有因子并排序
+
+        # 1. 获取所有因子并按依赖顺序排序
         all_factors = self.registry.list_factors()
-        sorted_factors = self.dag.topological_sort(all_factors)
-        
-        # 2. 逐个更新
+        sorted_factors = self.dag.topological_sort_for_update(all_factors)
+
+        # 2. 跨因子共享的增量结果缓存: (factor_id, entity_id) -> pd.Series
+        #    保证复合因子能拿到上游因子在本次更新中的计算结果
+        incremental_cache: Dict[tuple, pd.Series] = {}
+
+        # 3. 按拓扑顺序逐个更新
         for factor_name in sorted_factors:
-            self.update_factor(factor_name, date, codes)
-            
+            self.update_factor(factor_name, date, codes, incremental_cache=incremental_cache)
+
         logger.info(f"增量更新完成: {date}")
             
-    def update_factor(self, factor_name: str, date: str, codes: List[str] = None):
+    def update_factor(self, factor_name: str, date: str, codes: List[str] = None,
+                      incremental_cache: Dict[tuple, pd.Series] = None):
         """
         更新单个因子
         """
@@ -112,13 +117,15 @@ class IncrementalUpdater:
             factor = factor_cls(timeframe='1d', para=para)
             
             try:
-                self._process_single_factor_instance(factor, date, codes)
+                self._process_single_factor_instance(factor, date, codes,
+                                                     incremental_cache=incremental_cache)
             except Exception as e:
                 logger.error(f"因子 {factor.name} 参数 {para} 更新失败: {e}")
                 import traceback
                 traceback.print_exc()
 
-    def _process_single_factor_instance(self, factor, date: str, codes: List[str]):
+    def _process_single_factor_instance(self, factor, date: str, codes: List[str],
+                                         incremental_cache: Dict[tuple, pd.Series] = None):
         """处理单个因子实例的更新"""
 
         # 因子声明的最大回溯窗口
@@ -186,9 +193,27 @@ class IncrementalUpdater:
             
             # 调用 incremental update
             try:
-                # deps=None 暂时不支持依赖
-                res_series = factor.update(new_data_df, history_df, deps=None)
-                
+                # 从 incremental_cache 中为复合因子构建 deps
+                deps = None
+                dep_names = getattr(factor, 'dependencies', None)
+                if dep_names and incremental_cache is not None:
+                    deps = {}
+                    from factor_library.registry import generate_factor_id
+                    dep_para_map = getattr(factor, 'dependency_para_map', {})
+                    for dep_name in dep_names:
+                        dep_para = dep_para_map.get(dep_name, getattr(factor, 'para', {}))
+                        dep_factor_id = generate_factor_id(dep_name, factor.timeframe, dep_para)
+                        cache_key = (dep_factor_id, entity_id)
+                        if cache_key in incremental_cache:
+                            deps[dep_name] = incremental_cache[cache_key]
+                        else:
+                            logger.warning(
+                                f"依赖因子 {dep_name} 的增量结果不在缓存中，"
+                                f"因子 {factor.get_id()} 可能计算失败"
+                            )
+
+                res_series = factor.update(new_data_df, history_df, deps=deps)
+
                 # 结果处理，将结果格式化，补充元数据
                 # res_series 是 Series, index 是 timestamp
                 if not res_series.empty:
@@ -197,6 +222,10 @@ class IncrementalUpdater:
                     res_df['timestamp'] = res_df.index
                     res_df['code'] = entity_id.split('_')[-1] # 简易提取
                     results.append(res_df)
+
+                    # 将结果存入 incremental_cache，供下游复合因子使用
+                    if incremental_cache is not None:
+                        incremental_cache[(factor.get_id(), entity_id)] = res_series
                     
             except Exception as e:
                 logger.error(f"{entity_id} 计算出错: {e}")

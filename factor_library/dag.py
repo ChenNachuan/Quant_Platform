@@ -99,7 +99,14 @@ class FactorDAG:
             raise ValueError(f"检测到循环依赖，涉及节点: {remaining}")
             
         return result
-    
+
+    def topological_sort_for_update(self, target_factors: List[str]) -> List[str]:
+        """
+        增量更新专用拓扑排序。
+        语义上与 topological_sort 相同，保留独立入口以便未来增量路径与全量路径分化。
+        """
+        return self.topological_sort(target_factors)
+
     def compute_with_cache(
         self,
         factor_name: str,

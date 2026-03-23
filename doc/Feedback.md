@@ -163,4 +163,76 @@
 
   建议按 P0→P1→P2 的优先级推进，先把工程基础打牢，再逐步补全因子库和实盘能力。
 
+  ---
+  八、Gemini 审查补充（2026-03-23 核实）
+
+  以下问题经代码核实属实，已纳入 Plan.md 二点五节。
+
+  **已确认的真实缺陷：**
+
+  1. ST 过滤前视偏差（严重）
+     `universe.py:144` 用 `.last()` 取整个回测期最后一条 name，对全历史生效。
+     若某股 2024 年被 ST，则 2015 年起就被错误剔除；若 2015 年是 ST 后来摘帽，则历史上被错误放入池。
+     → 已记录至 Plan 2.5.1
+
+  2. 停牌缺失数据误判（中）
+     `universe.py:123` 数据源不下发停牌日行情时，pivot 后为 NaN，`.fillna(False)` 误判为可交易。
+     → 已记录至 Plan 2.5.2
+
+  3. 次新股/退市 Python for 循环（低，性能）
+     `universe.py:160,176` 两处 `for date in dates` 循环，3000+ 交易日时性能差。
+     → 已记录至 Plan 2.5.3
+
+  4. T 日信号用 T 日收盘价成交（设计决策）
+     VectorBT 执行层用 T 日收盘价成交 T 日信号，A 股日线场景下无法实现。
+     属已知简化假设，需文档说明或改为 shift(1) + T+1 日成交。
+     → 已记录至 Plan 2.5.4
+
+  **Gemini 描述不准确的部分：**
+
+  - "缺陷一：严重违反强制向量化"：`FactorAlphaModel.get_signals` 的 for 循环是 `Factor.compute()` 接口约束（逐标的设计）的必然结果，不是随意写的循环。Feedback.md 三、3 已记录此问题，修复需重新设计 Factor 接口，不是简单替换。
+  - "缺陷五"的严重程度被夸大：T 日收盘成交是量化回测中常见的简化假设，不是"灾难性"缺陷，是需要文档说明的设计决策。
+
 ✻ Baked for 5m 34s
+
+---
+九、Code Review 结果（2026-03-23，claude-sonnet-4-6）
+
+本次 review 覆盖 8 个源文件 + 2 个测试文件，约 981 行新增 / 520 行删除。
+
+**P1 — 必须修复**
+
+1. SQL 注入回归（`infra/connection.py:74-96`）
+   `create_adjusted_views()` 将 `factor_col` 直接插值进 SQL，与 commit `cd63e03` 的修复方向相悖。
+   当前值虽为硬编码，但模式危险。修复：在插值前断言 `factor_col in {'qfq_factor', 'hfq_factor'}`。
+
+2. 增量缓存仅在非空时写入（`engine/factor/incremental_updater.py:222`）
+   `incremental_cache` 写入被包裹在 `if not res_series.empty:` 内。叶子因子数据不足时不写缓存，
+   下游复合因子以 `deps={}` 静默计算错误值，而非抛出异常。
+   修复：无论结果是否为空均写入缓存，让复合因子显式报错。
+
+**P2 — 应修复**
+
+3. `ImportError` 静默返回（`engine/qlib_bridge/dumper.py:204`）
+   qlib 未安装时 `dump()` 返回 `None`，调用方无法区分"无数据"与"依赖缺失"。
+   修复：改为 `raise RuntimeError`。
+
+4. `end_date` 类型检查脆弱（`engine/qlib_bridge/dumper.py:301`）
+   `hasattr(end_date, 'strftime')` 在 `df['date']` 为字符串列时静默跳过格式化。
+   修复：统一用 `pd.Timestamp(end_date).strftime('%Y-%m-%d')`。
+
+5. `project_root` 从 `data_lake_dir.parent` 反推（`infra/storage.py:440`）
+   若 `data_lake_dir` 配置为多级路径（如 `data/lake`），`.parent` 结果错误。
+   修复：在 `ConnectionManager` 中直接暴露 `project_root` 属性。
+
+6. 因子名未校验直接拼入 SQL 路径（`infra/query.py:35`）
+   `factor_names` 来自调用方，含单引号或路径分隔符时会破坏 SQL。
+   修复：插值前断言每个名称匹配 `[A-Za-z0-9_]+`。
+
+**P3 — 可选**
+
+7. `generate_factor_id` 在热路径内 import（`engine/factor/incremental_updater.py:74`）
+   移至文件顶部。
+
+8. `topological_sort_for_update` 是纯别名（`factor_library/dag.py:328`）
+   无实际逻辑，属投机性抽象。建议直接调用 `topological_sort`，待路径真正分化时再拆分。

@@ -81,9 +81,9 @@ class Volatility(Factor):
     ) -> pd.Series:
         """增量更新"""
         window = self.para['window']
-        
-        # 只取最近 window-1 条历史数据
-        recent = history.iloc[-(window-1):] if len(history) >= window-1 else history
+
+        # 需要 window 条历史数据（pct_change 会丢弃第一行，剩余 window 条 returns 才够 ts_std）
+        recent = history.iloc[-window:] if len(history) >= window else history
         combined = pd.concat([recent, new_data])
         
         # 重算

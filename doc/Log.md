@@ -90,3 +90,24 @@
 - **文件**: `tests/test_preprocessor.py`（新建）、`tests/test_pipeline.py`（新建）
 - **操作**: 新增 `PostProcessor` 的 25 个 pytest 测试（winsorize/standardize/check_validity/fillna）；新增 `pipeline.py` 纯逻辑组件测试（EqualWeightPortfolio/QuantilePortfolio/DefaultRiskFilter/SimulationExecutionHandler），用 `unittest.mock` 在 import 时 patch 掉 vectorbt 等重量级依赖
 - **要点**: 现有 `tests/test_factor_*.py` 等文件为脚本风格（模块级代码 + `sys.exit`），不适合 pytest 收集，保持原样；新增测试全部通过（25 passed）
+
+### 11. 架构重构（三、架构重构全节）
+
+**3.1 ConfigLoader.reset()**
+- **文件**: `infra/storage.py`、`tests/conftest.py`（新建）
+- **操作**: `ConfigLoader` 新增 `reset()` classmethod；`conftest.py` 添加 `autouse=True` fixture，每个测试前后自动重置单例
+
+**3.2 StorageManager 拆分**
+- **文件**: `infra/connection.py`（新建）、`infra/writer.py`（新建）、`infra/query.py`（新建）、`infra/storage.py`（重写）
+- **操作**: 将 `StorageManager` 按职责拆分为 `ConnectionManager`（DuckDB 连接 + 视图注册）、`DataWriter`（Parquet 写入）、`QueryEngine`（SQL 查询）；`StorageManager` 改为 Facade，保持公开 API 完全兼容，16 个调用方无需修改
+- **要点**: `self.conn` 和 `self.data_lake_dir` 作为透传属性保留，兼容直接访问这两个属性的测试文件
+
+**3.3 增量更新器修复**
+- **文件**: `factor_library/dag.py`、`engine/factor/incremental_updater.py`、`factor_library/technical/volatility.py`、`tests/test_risk_adjusted_momentum_incremental.py`（新建）
+- **操作**: `FactorDAG` 新增 `topological_sort_for_update()`；`IncrementalUpdater.update_all()` 引入 `incremental_cache: Dict[(factor_id, entity_id), Series]`，在拓扑顺序中传递 deps；修复 `Volatility.update()` 历史窗口 off-by-one bug（`window-1` → `window`）；新增 6 个测试全部通过
+- **要点**: 缓存键使用 `factor.get_id()`（含参数），避免多参数变体冲突；`dependency_para_map` 支持跨参数依赖解析
+
+**3.4 Qlib Bridge 重构**
+- **文件**: `pyproject.toml`、`uv.lock`、`engine/qlib_bridge/dumper.py`（重写）
+- **操作**: `pyproject.toml` 将 `"qlib"`（石油行业库）改为 `"pyqlib"`（微软量化库）；`dumper.py` 删除 subprocess，改用 `DumpDataAll`/`DumpDataUpdate` Python API；按 symbol 分文件写 CSV（符合 Qlib 格式要求）；`.last_dump_date` 文件追踪增量起点；`qlib.init()` 在构造时调用；修复 `get_market_data()` → `get_data()`
+- **要点**: `qlib.init()` 在数据目录为空时会抛异常，已用 try/except 降级为 warning；`pyqlib` 的 import 名仍为 `import qlib`
