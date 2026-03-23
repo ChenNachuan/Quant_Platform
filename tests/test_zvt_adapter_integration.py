@@ -32,7 +32,7 @@ def test_zvt_adapter_integration():
     
     # Check if data exists first
     sm = StorageManager()
-    res = sm.conn.execute(f"SELECT count(*) FROM cn_stock_1d_hfq WHERE symbol='{test_code}'").fetchone()
+    res = sm.conn.execute("SELECT count(*) FROM cn_stock_1d_hfq WHERE symbol=$1", [test_code]).fetchone()
     print(f"Data check for {test_code}: {res[0]} rows in cn_stock_1d_hfq")
     
     if res[0] == 0:

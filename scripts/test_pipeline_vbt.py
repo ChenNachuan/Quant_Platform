@@ -33,21 +33,22 @@ def run_test():
     print("加载股票数据...")
     from infra.storage import StorageManager
     storage = StorageManager()
-    
+
     # 模拟数据湖中存在的数据
     entity_ids = ['stock_sz_000001']
-    ids_str = "','".join(entity_ids)
-    
+    placeholders = ", ".join(f"${i+1}" for i in range(len(entity_ids)))
+    n = len(entity_ids)
+
     query = f"""
-        SELECT timestamp, entity_id, open, high, low, close, volume 
-        FROM cn_stock_1d_hfq 
-        WHERE entity_id IN ('{ids_str}') 
-          AND timestamp >= '2020-01-01' 
-          AND timestamp <= '2024-05-01'
+        SELECT timestamp, entity_id, open, high, low, close, volume
+        FROM cn_stock_1d_hfq
+        WHERE entity_id IN ({placeholders})
+          AND timestamp >= ${n+1}
+          AND timestamp <= ${n+2}
         ORDER BY entity_id, timestamp
     """
     try:
-        kdata = storage.query(query)
+        kdata = storage.query(query, entity_ids + ['2020-01-01', '2024-05-01'])
     except Exception as e:
         print(f"DuckDB 查询失败: {e}")
         kdata = None

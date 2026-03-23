@@ -221,9 +221,7 @@ class FactorAdapter(ZVTFactor):
         # Ensure it is a list
         if target_ids is None:
              target_ids = []
-             
-        ids_str = "','".join(target_ids)
-        
+
         # 根据时间框架选择表
         if self.level == IntervalLevel.LEVEL_1DAY:
             # 使用后复权数据作为默认源，避免因子计算受除权除息影响
@@ -232,9 +230,11 @@ class FactorAdapter(ZVTFactor):
             table_name = 'cn_stock_1h'
         else:
             table_name = 'cn_stock_1d_hfq'  # 默认日线后复权
-        
+
+        placeholders = ", ".join(f"${i+1}" for i in range(len(target_ids)))
+        params = list(target_ids)
         query = f"""
-            SELECT 
+            SELECT
                 timestamp,
                 entity_id,
                 open,
@@ -243,19 +243,21 @@ class FactorAdapter(ZVTFactor):
                 close,
                 volume
             FROM {table_name}
-            WHERE entity_id IN ('{ids_str}')
+            WHERE entity_id IN ({placeholders})
         """
-        
+
         if self.start_timestamp:
-            query += f" AND timestamp >= '{self.start_timestamp}'"
-        
+            params.append(self.start_timestamp)
+            query += f" AND timestamp >= ${len(params)}"
+
         if self.end_timestamp:
-            query += f" AND timestamp <= '{self.end_timestamp}'"
-        
+            params.append(self.end_timestamp)
+            query += f" AND timestamp <= ${len(params)}"
+
         query += " ORDER BY symbol, timestamp"
-        
+
         try:
-            df = storage.conn.execute(query).df()
+            df = storage.conn.execute(query, params).df()
             return df
         except Exception as e:
             import traceback

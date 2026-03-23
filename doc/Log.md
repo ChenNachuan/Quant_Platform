@@ -61,3 +61,16 @@
   - `pyproject.toml` 新增 `[tool.pytest.ini_options]`，设置 `pythonpath = ["."]` 和 `testpaths = ["tests"]`
   - 上述 5 个测试文件删除 `sys.path.insert(0, '/Users/nachuanchen/Documents/Quant')` 硬编码块，改由 pytest 配置统一处理
 - **要点**: `test_adj_factor_recorder.py` 和 `test_kdata_recorder.py` 使用 `Path(__file__).parent` 相对路径，无需修改
+
+### 9. 消除 SQL 注入漏洞（P0）
+
+- **文件**: `infra/storage.py`、`scripts/update_daily.py`、`engine/factor/incremental_updater.py`、`engine/zvt_bridge/backtest/factor_adapter.py`、`scripts/test_pipeline_vbt.py`、`tests/test_zvt_adapter_integration.py`
+- **操作**:
+  - `infra/storage.py:query()` 新增 `params: list | None = None` 参数，透传给 `conn.execute()`
+  - `infra/storage.py:get_factor_matrix` — `WHERE timestamp >= $1 AND timestamp <= $2`，绑定 `[start_date, end_date]`
+  - `scripts/update_daily.py` — 幂等检查改为 `WHERE timestamp = $1`，绑定 `[date_dash]`
+  - `engine/factor/incremental_updater.py` — timestamp 范围 + symbol IN 动态占位符，绑定参数列表
+  - `engine/zvt_bridge/backtest/factor_adapter.py` — entity_id IN 动态占位符 + 条件追加 timestamp 参数
+  - `scripts/test_pipeline_vbt.py` — entity_id IN + timestamp 范围参数化
+  - `tests/test_zvt_adapter_integration.py` — symbol 参数化
+- **要点**: `table_name` 来自固定字符串字面量（非用户输入），保留 f-string 拼接；所有用户/外部数据来源的值均改为 `$N` 占位符

@@ -16,9 +16,14 @@
 
 ### 1.2 SQL 注入消除
 
-- [ ] `infra/storage.py:398` — `get_factor_matrix` SQL 字符串拼接改为参数化查询
-- [ ] `scripts/update_daily.py:149` — 幂等检查 SQL 字符串拼接改为参数化查询
-- [ ] 全局搜索其他 `f"...WHERE.*'{date}'"` 模式，统一消除
+- [x] `infra/storage.py:398` — `get_factor_matrix` SQL 字符串拼接改为参数化查询
+- [x] `scripts/update_daily.py:149` — 幂等检查 SQL 字符串拼接改为参数化查询
+- [x] 全局搜索其他 `f"...WHERE.*'{date}'"` 模式，统一消除
+  - [x] `engine/factor/incremental_updater.py:135-147` — timestamp + symbol IN 参数化
+  - [x] `engine/zvt_bridge/backtest/factor_adapter.py:236-253` — entity_id IN + timestamp 参数化
+  - [x] `scripts/test_pipeline_vbt.py:41-48` — entity_id IN + timestamp 参数化
+  - [x] `tests/test_zvt_adapter_integration.py:35` — symbol 参数化
+  - [x] `infra/storage.py:query()` — 新增 `params` 参数支持参数化查询
 
 ---
 

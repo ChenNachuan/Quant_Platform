@@ -389,13 +389,13 @@ class StorageManager:
         paths_str = ", ".join([f"'{p}'" for p in path_list])
 
         sql = f"""
-            SELECT 
-                timestamp, 
-                entity_id, 
+            SELECT
+                timestamp,
+                entity_id,
                 factor_name,
                 value
             FROM read_parquet([{paths_str}], hive_partitioning=true, union_by_name=true)
-            WHERE timestamp >= '{start_date}' AND timestamp <= '{end_date}'
+            WHERE timestamp >= $1 AND timestamp <= $2
         """
 
         # 3. Pivot (Long -> Wide)
@@ -408,7 +408,7 @@ class StorageManager:
         """
 
         logger.info(f"执行因子矩阵查询 (Pivot): {factor_names}")
-        df = self.conn.execute(pivot_sql).df()
+        df = self.conn.execute(pivot_sql, [start_date, end_date]).df()
 
         # 转换为标准的 Panel Data 格式: MultiIndex(timestamp, entity_id)
         # 这样每一行由 (时间, 标的) 唯一确定，列为各因子值
@@ -418,12 +418,12 @@ class StorageManager:
 
         return df
 
-    def query(self, sql: str) -> pd.DataFrame:
+    def query(self, sql: str, params: list | None = None) -> pd.DataFrame:
         """
-        执行 SQL 查询。
+        执行 SQL 查询。params 为参数化查询的绑定值列表。
         """
         logger.debug(f"执行 SQL: {sql}")
-        return self.conn.execute(sql).df()
+        return self.conn.execute(sql, params or []).df()
 
     def get_data(self,
                  market: str = 'cn_stock',

@@ -146,8 +146,8 @@ class TushareUpdater:
             
             # Idempotency Check: 检查数据是否在目标宽表中
             try:
-                check_sql = f"SELECT count(*) as cnt FROM cn_stock_1d_hfq WHERE timestamp = '{date_dash}'"
-                res = self.storage.query(check_sql)
+                check_sql = "SELECT count(*) as cnt FROM cn_stock_1d_hfq WHERE timestamp = $1"
+                res = self.storage.query(check_sql, [date_dash])
                 if not res.empty and res.iloc[0]['cnt'] > 0:
                      logger.info(f"{date_dash} 数据已存在 ({res.iloc[0]['cnt']} 条), 自动跳过")
                      continue

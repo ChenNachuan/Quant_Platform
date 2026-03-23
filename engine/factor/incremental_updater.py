@@ -132,23 +132,25 @@ class IncrementalUpdater:
         end_date = pd.Timestamp(date)
 
         # 使用 StorageManager 加载
-        query = f"""
+        params = [start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')]
+        query = """
             SELECT timestamp, entity_id, open, high, low, close, volume
             FROM cn_stock_1d_hfq
-            WHERE timestamp >= '{start_date.strftime('%Y-%m-%d')}'
-              AND timestamp <= '{end_date.strftime('%Y-%m-%d')}'
+            WHERE timestamp >= $1
+              AND timestamp <= $2
         """
-        
+
         if codes:
             # 这里的 codes 需要转换为 entity_ids 或者 view 支持 symbol
             # cn_stock_1d_hfq 只有 entity_id 和 symbol (000001)
             # 假设 codes 是 symbol 列表
-            codes_str = "','".join(codes)
-            query += f" AND symbol IN ('{codes_str}')"
+            placeholders = ", ".join(f"${i+3}" for i in range(len(codes)))
+            query += f" AND symbol IN ({placeholders})"
+            params.extend(codes)
 
         query += " ORDER BY entity_id, timestamp"
 
-        df = self.storage.conn.execute(query).df()
+        df = self.storage.conn.execute(query, params).df()
         
         if df.empty:
             logger.warning(f"没有数据用于更新 {factor.get_id()} (date={date})")
