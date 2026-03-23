@@ -33,7 +33,6 @@ ConfigLoader.load()
 # 导入 ZVT 模块
 from zvt.domain import Stock1dKdata, Stock, Stock1dHfqKdata
 from zvt.contract.api import get_data
-from zvt.contract.api import get_data
 # 使用相对引用，更简洁
 from engine.zvt_bridge.recorders.akshare.stock_1d_kdata_recorder import register_akshare_recorders
 from engine.zvt_bridge.recorders.akshare.stock_adj_factor_recorder import register_akshare_factor_recorder

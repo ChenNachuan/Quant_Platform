@@ -33,30 +33,30 @@
 
 ### 2.1 依赖管理
 
-- [ ] 从 `dependencies` 移除未使用的: `polars`, `clickhouse-driver`, `setuptools`
-- [ ] 将 `ruff`, `pandas-stubs` 移至 `[dependency-groups] dev`
-- [ ] 放宽 Python 版本: `requires-python = ">=3.10,<3.12"`
-- [ ] 为 `torch` 添加上限: `torch>=2.0.0,<3.0.0`
-- [ ] 运行 `uv lock` 更新 lock 文件
+- [x] 从 `dependencies` 移除未使用的: `polars`, `clickhouse-driver`, `setuptools`
+- [x] 将 `ruff`, `pandas-stubs` 移至 `[dependency-groups] dev`
+- [x] 放宽 Python 版本: `requires-python = ">=3.10,<3.12"`
+- [x] 为 `torch` 添加上限: `torch>=2.0.0,<3.0.0`
+- [x] 运行 `uv lock` 更新 lock 文件
 
 ### 2.2 代码风格
 
-- [ ] 添加 `.pre-commit-config.yaml` (ruff + ruff-format)
-- [ ] 消除 `engine/zvt_bridge/data_syncer.py:36-37` 的重复 import
-- [ ] 统一日志配置: `infra/storage.py:15` 的 `basicConfig` 移至项目入口，避免多模块重复调用
+- [x] 添加 `.pre-commit-config.yaml` (ruff + ruff-format)
+- [x] 消除 `engine/zvt_bridge/data_syncer.py:36-37` 的重复 import
+- [x] 统一日志配置: `infra/storage.py:15` 的 `basicConfig` 移至项目入口，避免多模块重复调用
 
 ### 2.3 测试基础设施
 
-- [ ] 所有 `tests/test_*.py` 中的 `sys.path.insert('/Users/nachuanchen/...')` 替换为相对路径
-- [ ] 在 `pyproject.toml` 添加 pytest 配置:
+- [x] 所有 `tests/test_*.py` 中的 `sys.path.insert('/Users/nachuanchen/...')` 替换为相对路径
+- [x] 在 `pyproject.toml` 添加 pytest 配置:
   ```toml
   [tool.pytest.ini_options]
   pythonpath = ["."]
   testpaths = ["tests"]
   ```
-- [ ] 验证 `pytest tests/` 全部通过
-- [ ] 补充 `engine/pipeline.py` 测试（当前无覆盖）
-- [ ] 补充 `factor_library/preprocessor.py` 测试（当前无覆盖）
+- [x] 验证 `pytest tests/` 全部通过
+- [x] 补充 `engine/pipeline.py` 测试（当前无覆盖）
+- [x] 补充 `factor_library/preprocessor.py` 测试（当前无覆盖）
 
 ---
 

@@ -74,3 +74,19 @@
   - `scripts/test_pipeline_vbt.py` — entity_id IN + timestamp 范围参数化
   - `tests/test_zvt_adapter_integration.py` — symbol 参数化
 - **要点**: `table_name` 来自固定字符串字面量（非用户输入），保留 f-string 拼接；所有用户/外部数据来源的值均改为 `$N` 占位符
+
+### 10. 工程规范整改（二、工程规范全节）
+
+**2.1 依赖管理**
+- **文件**: `pyproject.toml`、`uv.lock`
+- **操作**: 移除 `polars`、`clickhouse-driver`、`setuptools` 直接依赖；将 `ruff`、`pandas-stubs` 移至 `[dependency-groups] dev`；放宽 Python 版本为 `>=3.10,<3.12`；`torch` 加上限 `<3.0.0`；运行 `uv lock` 更新 lock 文件
+- **要点**: `setuptools` 仍出现在 lock 文件中，因其为其他包的间接依赖，属正常现象
+
+**2.2 代码风格**
+- **文件**: `.pre-commit-config.yaml`（新建）、`engine/zvt_bridge/data_syncer.py`、`infra/storage.py`
+- **操作**: 新建 `.pre-commit-config.yaml`，配置 ruff + ruff-format hooks；删除 `data_syncer.py:36` 重复的 `from zvt.contract.api import get_data`；删除 `storage.py` 的 `logging.basicConfig()`，改由项目入口统一配置
+
+**2.3 测试基础设施**
+- **文件**: `tests/test_preprocessor.py`（新建）、`tests/test_pipeline.py`（新建）
+- **操作**: 新增 `PostProcessor` 的 25 个 pytest 测试（winsorize/standardize/check_validity/fillna）；新增 `pipeline.py` 纯逻辑组件测试（EqualWeightPortfolio/QuantilePortfolio/DefaultRiskFilter/SimulationExecutionHandler），用 `unittest.mock` 在 import 时 patch 掉 vectorbt 等重量级依赖
+- **要点**: 现有 `tests/test_factor_*.py` 等文件为脚本风格（模块级代码 + `sys.exit`），不适合 pytest 收集，保持原样；新增测试全部通过（25 passed）
