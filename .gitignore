@@ -76,3 +76,4 @@ tmp/
 logs/
 # Test Reports
 results/*.html
+.claude
