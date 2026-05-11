@@ -52,7 +52,7 @@ class SimpleMomentum(Factor):
         else:
             hfq_close = data['close']
             
-        return hfq_close.pct_change(periods=window, fill_method=None)
+        return hfq_close.pct_change(periods=window)
 
     def update(self, new_data: pd.DataFrame, history: pd.Series, deps: Optional[Dict[str, pd.Series]] = None) -> pd.Series:
         window = self.para.get('window', 30)
@@ -66,12 +66,12 @@ class SimpleMomentum(Factor):
         if len(history) < window:
             # 如果历史不够，只能重新合并计算
             combined = pd.concat([history, new_hfq_close])
-            result = combined.pct_change(periods=window, fill_method=None)
+            result = combined.pct_change(periods=window)
             return result.iloc[-len(new_data):]
         else:
             historic_hfq_close = history.iloc[-window:]
             combined = pd.concat([historic_hfq_close, new_hfq_close])
-            result = combined.pct_change(periods=window, fill_method=None)
+            result = combined.pct_change(periods=window)
             return result.iloc[-len(new_data):]
 
 
@@ -141,7 +141,7 @@ class MomentumReturn(Factor):
             raise ValueError("参数 'window' 缺失")
         
         # 特性2：使用算子库（向量化）
-        return ts_mean(data['close'].pct_change(fill_method=None), window)
+        return ts_mean(data['close'].pct_change(), window)
     
     def update(
         self,
@@ -163,7 +163,7 @@ class MomentumReturn(Factor):
         combined = pd.concat([recent_history, new_data])
         
         # 重算
-        result = ts_mean(combined['close'].pct_change(fill_method=None), window)
+        result = ts_mean(combined['close'].pct_change(), window)
         
         # 只返回新数据部分
         return result.iloc[-len(new_data):]
@@ -225,7 +225,7 @@ if __name__ == "__main__":
         print(f"\n✅ 后处理结果 (最近10条):\n{result_processed.tail(10)}")
         
         # 统计信息
-        print(f"\n📊 统计信息:")
+        print("\n📊 统计信息:")
         print(f"   - NaN比例: {result_raw.isna().sum() / len(result_raw):.2%}")
         print(f"   - 均值: {result_raw.mean():.6f}")
         print(f"   - 标准差: {result_raw.std():.6f}")

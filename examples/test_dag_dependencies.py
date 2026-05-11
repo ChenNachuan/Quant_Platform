@@ -124,7 +124,7 @@ try:
         timeframe='1d',
         para={'window': 20}
     )
-    print(f"  ✅ volatility 计算完成 (cached)")
+print(f"  ✅ volatility 计算完成 (cached)")
     
     # 计算复合因子（会从缓存读取依赖）
     result_composite = dag_auto.compute_with_cache(

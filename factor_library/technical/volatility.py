@@ -70,7 +70,7 @@ class Volatility(Factor):
             raise ValueError("参数 'window' 缺失")
         
         # 计算收益率的标准差
-        returns = data['close'].pct_change(fill_method=None)
+        returns = data['close'].pct_change()
         return ts_std(returns, window)
     
     def update(
@@ -87,7 +87,7 @@ class Volatility(Factor):
         combined = pd.concat([recent, new_data])
         
         # 重算
-        returns = combined['close'].pct_change(fill_method=None)
+        returns = combined['close'].pct_change()
         result = ts_std(returns, window)
         
         # 只返回新数据部分

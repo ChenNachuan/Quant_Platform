@@ -15,14 +15,13 @@ Universe Selection -> Alpha Model -> Portfolio Construction -> Risk Management -
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import pandas as pd
 import numpy as np
 import vectorbt as vbt
 
 from factor_library.base import Factor
 from factor_library.universe import UniverseFilter
-from execution.risk_control import RiskControl
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +130,7 @@ class QuantilePortfolio(PortfolioConstructor):
     def __init__(self, n_quantiles: int = 5):
         self.n_quantiles = n_quantiles
         
-    def create_portfolio(self, signals: pd.DataFrame, kdata: pd.DataFrame = None) -> Dict[int, pd.DataFrame]:
+    def create_portfolio(self, signals: pd.DataFrame, kdata: pd.DataFrame = None) -> dict[int, pd.DataFrame]:
         logger.info(f"PortfolioConstructor: 构建包含 {self.n_quantiles} 个分组的等权截面组合")
         
         def qcut_row(row):

@@ -17,7 +17,7 @@ TODO：
 5. deps=None 写死了，导致无法计算复合因子
 """
 import pandas as pd
-from typing import List, Dict, Optional, Union
+from typing import List, Dict
 import logging
 
 from factor_library.registry import FactorRegistry
@@ -75,54 +75,46 @@ class IncrementalUpdater:
         logger.info(f"增量更新完成: {date}")
             
     def update_factor(self, factor_name: str, date: str, codes: List[str] = None,
-                      incremental_cache: Dict[tuple, pd.Series] = None):
+                      incremental_cache: Dict[tuple, pd.Series] = None,
+                      timeframes: List[str] = None):
         """
-        更新单个因子
+        更新单个因子的所有参数组合。
+
+        Args:
+            factor_name: 因子名称
+            date: 更新日期
+            codes: 股票代码列表
+            incremental_cache: 跨因子增量缓存
+            timeframes: 要更新的时间框架列表，默认 ['1d']
         """
         logger.info(f"正在更新因子: {factor_name}")
-        
+
         factor_cls = self.registry.get(factor_name)
         if not factor_cls:
             logger.warning(f"因子 {factor_name} 未找到注册信息")
             return
-            
-        # 实例化因子 (假设只处理 1d 频率，且使用默认参数组的第一组参数用于演示)
-        # 实际生产中需要遍历 param_group
-        # 这里为了简化，我们先只更新 1d, window=20 的 Momentum
-        # 更好的做法是：Updater 应该遍历所有已实例化的因子配置？
-        # 或者我们遍历 registry 中的 para_group
-        
-        if '1d' not in factor_cls.para_group:
-            return
-            
-        para_configs = factor_cls.para_group['1d']
-        # 假设 para_group 结构: {'window': [5, 10, 20]}
-        # 我们需要生成笛卡尔积，这里简化处理，假设只有一个参数 key
-        
-        import itertools
 
-        # 获取参数名列表
-        keys = para_configs.keys()
+        if timeframes is None:
+            timeframes = ['1d']
 
-        # 获取参数值列表
-        values = para_configs.values()
+        for tf in timeframes:
+            if tf not in factor_cls.para_group:
+                continue
 
-        # 将参数值列表转换为笛卡尔积
-        for instance_values in itertools.product(*values):
+            # 使用因子自身的 generate_para_space() 获取参数组合
+            temp = factor_cls(timeframe=tf, para={})
+            para_space = temp.generate_para_space()
 
-            # 将参数名和当前组合组合成列表
-            para = dict(zip(keys, instance_values))
-            
-            # 创建实例
-            factor = factor_cls(timeframe='1d', para=para)
-            
-            try:
-                self._process_single_factor_instance(factor, date, codes,
-                                                     incremental_cache=incremental_cache)
-            except Exception as e:
-                logger.error(f"因子 {factor.name} 参数 {para} 更新失败: {e}")
-                import traceback
-                traceback.print_exc()
+            for para in para_space:
+                factor = factor_cls(timeframe=tf, para=para)
+
+                try:
+                    self._process_single_factor_instance(factor, date, codes,
+                                                         incremental_cache=incremental_cache)
+                except Exception as e:
+                    logger.error(f"因子 {factor.name} 参数 {para} 更新失败: {e}")
+                    import traceback
+                    traceback.print_exc()
 
     def _process_single_factor_instance(self, factor, date: str, codes: List[str],
                                          incremental_cache: Dict[tuple, pd.Series] = None):
