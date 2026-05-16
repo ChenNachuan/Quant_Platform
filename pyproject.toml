@@ -22,6 +22,7 @@ dependencies = [
     "alphalens-reloaded>=0.4.3",
     "jupyterlab==4.5.6",
     "scipy-stubs~=1.15.3",
+    "watchdog>=6.0.0",
 ]
 
 [tool.uv.sources]
