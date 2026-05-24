@@ -16,7 +16,7 @@ Quant_Platform 是一个面向中国 A 股市场的高性能量化投研与回�
 | 语言 | Python 3.10 | 严格版本锁定，兼容 Numba / VectorBT 生态 |
 | 包管理 | uv + uv.lock | 确定性依赖解析，可复现构建 |
 | 数据存储 | Parquet + DuckDB | 列式存储 + 列式分析引擎，Hive 分区 (`year=YYYY`) |
-| 数据源 | Tushare (主) + AKShare (辅) | 双源交叉校验，确保数据质量 |
+| 数据源 | AmazingData (Docker MCP) | 全量历史 + 实时行情，通过 MCP 协议提供 |
 | 回测引擎 | VectorBT / ZVT / Qlib | 三套引擎覆盖向量化、事件驱动、ML 三类场景 |
 | 因子分析 | Alphalens-reloaded | IC/IR/Quantile 收益评估 |
 | 任务编排 | Prefect 3.x | 日级数据更新 & 策略调度 |
@@ -64,10 +64,10 @@ Quant_Platform 是一个面向中国 A 股市场的高性能量化投研与回�
 ### 3.2 数据流
 
 ```
-Tushare / AKShare  (远程 API)
+AmazingData Docker MCP  (全量历史 + 实时行情)
         │
         ▼
-  scripts/update_daily.py   (数据采集 + 双源校验)
+  MCP 协议调用  (K线/因子/财务数据)
         │
         ▼
   data_lake/market_data/cn_stock/1d/  (Parquet, Hive 分区)
@@ -133,8 +133,7 @@ Quant/
 │   ├── factor/                # 因子回测 & 增量更新
 │   ├── qlib_bridge/           # Qlib 格式导出
 │   ├── simulation/            # A 股费率/滑点/成交模型
-│   ├── vectorbt_engine/       # Numba JIT 策略编译
-│   └── zvt_bridge/            # ZVT 数据同步 & 回测适配
+│   └── vectorbt_engine/       # Numba JIT 策略编译
 ├── execution/                 # 执行层
 │   ├── position_manager.py    # 仓位管理 (stub)
 │   ├── risk_control.py        # 风控规则
@@ -225,8 +224,8 @@ Quant/
 - 避免重复计算（缓存已计算的中间结果）
 - 支持跨参数依赖（因子 A(window=20) 可依赖因子 B(window=5)）
 
-### 5.4 为什么用 Tushare + AKShare 双源校验？
-单一数据源的风险：API 限流导致数据缺失、数据口径差异导致复权因子错误。双源抽样比对（误差率 > 0.5% 则告警）可显著降低数据质量风险。
+### 5.4 为什么选择 AmazingData 作为数据源？
+AmazingData 提供 Docker 化 MCP 服务器，支持全量历史数据和实时行情。通过 MCP 协议，数据获取标准化、可复现，且支持本地部署，避免 API 限流和网络依赖。
 
 ## 6. 快速开始
 
@@ -234,11 +233,11 @@ Quant/
 # 1. 安装依赖
 uv sync
 
-# 2. 配置 Tushare Token
-echo "TUSHARE_TOKEN=your_token" > .env
+# 2. 启动 AmazingData MCP 服务器
+cd AmazingData/docker && docker-compose up -d
 
-# 3. 拉取历史数据
-python scripts/update_daily.py --start-date 20240101
+# 3. 拉取历史数据（通过 MCP 协议）
+# 数据会自动通过 MCP 服务器获取
 
 # 4. 运行动量策略回测
 python scripts/run_momentum_strategy.py
@@ -250,9 +249,8 @@ pytest tests/
 ## 7. 项目问题与改进计划
 
 ### 已识别问题
-1. 配置管理问题：`.env` 文件中未提供默认值，导致开发环境配置不够友好
-2. 因子计算问题：`SimpleMomentum` 和 `MomentumReturn` 中的 `update` 方法实现不够高效
-3. 数据处理问题：在 `update_daily.py` 中，`fetch_daily_hfq` 方法中对 `hfq_factor` 和 `qfq_factor` 的处理逻辑需要更清晰的注释
+1. 因子计算问题：`SimpleMomentum` 和 `MomentumReturn` 中的 `update` 方法实现不够高效
+2. 数据处理问题：在 `update_daily.py` 中，`fetch_daily_hfq` 方法中对 `hfq_factor` 和 `qfq_factor` 的处理逻辑需要更清晰的注释
 4. 执行层问题：`RiskControl` 中的风控检查逻辑可以更丰富
 
 ### 已完成更改
