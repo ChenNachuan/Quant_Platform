@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: AmazingData
+Version: 1.1.6
+Summary: AmazingData
+Author: AmazingData
+Requires-Dist: pydantic (>=2.6.4)
+Requires-Dist: numba (>=0.65.0)
+Requires-Dist: scipy (>=1.17.1)
+Requires-Dist: tgw (>=1.0.8.7)
+
