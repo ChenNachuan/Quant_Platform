@@ -1,7 +1,6 @@
 """
-Version: 0.1.0
-Date: 2026-02-15
-修改内容: 初次生成后代码审计，将所有因子值存储在一起便于多因子
+Version: 0.2.0
+修改内容: 重构为三级层次结构 (asset_type/category/sub_type)
 """
 
 import tomli
@@ -19,8 +18,6 @@ class ConfigLoader:
     """
 
     # 存储已经加载的配置
-    # 前面下划线表示是在类内部使用的受保护变量
-    # Optional 说明可以是要求的对应格式的 Dict，也可以是None，并且初始化为 None
     _config: Optional[Dict[str, Any]] = None
 
     @classmethod
@@ -40,12 +37,14 @@ class ConfigLoader:
         """
         if cls._config is None:
             import os
+
             # 获取项目根目录（二级父目录）
             cls.PROJECT_ROOT = Path(__file__).parent.parent
 
             # 优先加载 .env 文件（不覆盖已存在的环境变量，override=False）
             try:
                 from dotenv import load_dotenv
+
                 env_path = cls.PROJECT_ROOT / ".env"
                 load_dotenv(dotenv_path=env_path, override=False)
                 if env_path.exists():
@@ -64,21 +63,21 @@ class ConfigLoader:
                 cls._config = tomli.load(f)
 
             # 将 PROJECT_ROOT 注入到配置中，方便后续引用
-            cls._config['project_root'] = str(cls.PROJECT_ROOT)
+            cls._config["project_root"] = str(cls.PROJECT_ROOT)
 
-            # 用环境变量覆盖 toml 中的敏感字段（优先级：env > toml）
-            tushare_token = os.environ.get('TUSHARE_TOKEN', '').strip()
+            # 使用环境变量覆盖 toml 中的敏感字段（优先级：env > toml）
+            tushare_token = os.environ.get("TUSHARE_TOKEN", "").strip()
             if tushare_token:
-                cls._config.setdefault('tushare', {})['token'] = tushare_token
+                cls._config.setdefault("tushare", {})["token"] = tushare_token
                 logger.info("Tushare Token 已从环境变量 TUSHARE_TOKEN 加载")
-            elif not cls._config.get('tushare', {}).get('token'):
+            elif not cls._config.get("tushare", {}).get("token"):
                 logger.warning(
                     "⚠️  未检测到 TUSHARE_TOKEN 环境变量，且 settings.toml 中 token 为空。\n"
                     "   请在项目根目录创建 .env 文件并添加：TUSHARE_TOKEN=<your_token>"
                 )
 
             # --- 设置 ZVT_HOME 环境变量 ---
-            zvt_home = cls._config.get('zvt', {}).get('zvt_home')
+            zvt_home = cls._config.get("zvt", {}).get("zvt_home")
             if zvt_home:
                 # 解析相对路径
                 zvt_home_path = Path(zvt_home)
@@ -88,7 +87,7 @@ class ConfigLoader:
                     zvt_home_path = (cls.PROJECT_ROOT / zvt_home_path).resolve()
 
                 # 设置环境变量，确保 ZVT 初始化时能读取到
-                os.environ['ZVT_HOME'] = str(zvt_home_path)
+                os.environ["ZVT_HOME"] = str(zvt_home_path)
                 logger.info(f"设置 ZVT_HOME: {zvt_home_path}")
 
         return cls._config
@@ -98,7 +97,7 @@ class StorageManager:
     """
     存储管理器 Facade。
     委托给 ConnectionManager / DataWriter / QueryEngine 三个职责类。
-    公开 API 与原实现完全兼容。
+    支持三级层次结构: data_lake/{asset_type}/{category}/{sub_type}
     """
 
     def __init__(self):
@@ -109,8 +108,9 @@ class StorageManager:
         self.config: Dict[str, Any] = ConfigLoader.load()
         self._cm = ConnectionManager(self.config)
         self._writer = DataWriter(self._cm.data_lake_dir)
-        self._query = QueryEngine(self._cm.conn, self._cm.data_lake_dir,
-                                  refresh_fn=self._cm.refresh_views)
+        self._query = QueryEngine(
+            self._cm.conn, self._cm.data_lake_dir, refresh_fn=self._cm.refresh_views
+        )
 
         # 保留直接属性，兼容现有调用方
         self.conn = self._cm.conn
@@ -124,25 +124,50 @@ class StorageManager:
     def create_adjusted_views(self) -> None:
         self._cm.create_adjusted_views()
 
-    # ── Write ──────────────────────────────────────────────────
-    def write_data(self, df, category='market_data', market='cn_stock',
-                   frequency='1d', partition_cols=None) -> None:
-        self._writer.write_data(df, category, market, frequency, partition_cols)
+    def list_views(self) -> list:
+        return self._cm.list_views()
 
-    def write_factor(self, df, factor_name: str, frequency: str = '1d') -> None:
+    # ── Write ──────────────────────────────────────────────────
+    def write_data(
+        self,
+        df,
+        asset_type="stock",
+        category="market_data",
+        sub_type="1d",
+        partition_cols=None,
+    ) -> None:
+        self._writer.write_data(df, asset_type, category, sub_type, partition_cols)
+
+    def write_factor(self, df, factor_name: str, frequency: str = "1d") -> None:
         self._writer.write_factor(df, factor_name, frequency)
 
     # ── Query ──────────────────────────────────────────────────
-    def get_factor_matrix(self, factor_names, start_date='2020-01-01',
-                          end_date='2029-12-31', frequency='1d'):
-        return self._query.get_factor_matrix(factor_names, start_date, end_date, frequency)
+    def get_factor_matrix(
+        self,
+        factor_names,
+        start_date="2020-01-01",
+        end_date="2029-12-31",
+        frequency="1d",
+    ):
+        return self._query.get_factor_matrix(
+            factor_names, start_date, end_date, frequency
+        )
 
     def query(self, sql: str, params: list | None = None):
         return self._query.query(sql, params)
 
-    def get_data(self, market='cn_stock', frequency='1d', codes=None,
-                 start_date=None, end_date=None):
-        return self._query.get_data(market, frequency, codes, start_date, end_date)
+    def get_data(
+        self,
+        asset_type="stock",
+        category="market_data",
+        sub_type="1d",
+        codes=None,
+        start_date=None,
+        end_date=None,
+    ):
+        return self._query.get_data(
+            asset_type, category, sub_type, codes, start_date, end_date
+        )
 
     # ── Lifecycle ──────────────────────────────────────────────
     def close(self) -> None:
@@ -169,4 +194,3 @@ if __name__ == "__main__":
         print("\n=== 测试成功完成 ===")
     except Exception as e:
         logger.error(f"测试失败: {e}")
-

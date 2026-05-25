@@ -7,8 +7,47 @@ log_level = "INFO"
 # data_lake 根目录，确定了市场数据和因子数据的存放的地点
 # 使用相对路径，相对于项目根目录
 data_lake_dir = "data_lake"
-market_data_dir = "market_data"
 factors_dir = "factors"
+
+# DataLake 品种 → 数据类型 → 子类型 定义
+# 路径格式: data_lake/{asset_type}/{category}/{sub_type}/year=YYYY/*.parquet
+# 视图命名: {asset_type}_{category}_{sub_type}
+# 覆盖 AmazingData 全部可获取数据
+[data.asset_types]
+
+[data.asset_types.stock]
+market_data = ["1d", "min1", "min3", "min5", "min15", "min30", "min60", "snapshot", "week", "month", "year"]
+financials = ["balance_sheet", "cash_flow", "income", "profit_express", "profit_notice", "share_holder", "holder_num", "equity_structure", "equity_pledge_freeze", "equity_restricted", "dividend", "right_issue"]
+margin = ["summary", "detail"]
+trading_activity = ["long_hu_bang", "block_trading"]
+reference = ["stock_basic", "backward_factor", "adj_factor", "code_list", "history_stock_status"]
+
+[data.asset_types.index]
+market_data = ["1d", "min1", "min5", "snapshot"]
+reference = ["code_list"]
+
+[data.asset_types.etf]
+market_data = ["1d", "min1", "min5", "snapshot"]
+reference = ["code_list"]
+
+[data.asset_types.bond]
+market_data = ["1d", "min1", "min5", "snapshot"]
+reference = ["code_list"]
+
+[data.asset_types.convertible_bond]
+market_data = ["1d", "min1", "min5", "snapshot"]
+reference = ["code_list"]
+
+[data.asset_types.future]
+market_data = ["1d", "min1", "min5", "min15", "min30", "min60", "snapshot", "week", "month", "year"]
+reference = ["code_list"]
+
+[data.asset_types.option]
+market_data = ["1d", "min1", "min5", "min15", "min30", "min60", "snapshot", "snapshot_option"]
+reference = ["basic_info", "std_specs", "mon_ctr_specs", "code_list"]
+
+[data.asset_types.hk_connect]
+market_data = ["snapshot"]
 
 
 # Tushare 配置
