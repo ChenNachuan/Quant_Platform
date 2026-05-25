@@ -1,0 +1,11 @@
+services:
+  amazingdata:
+    image: docker-amazingdata
+    stdin_open: true
+    tty: true
+    env_file:
+      - /Users/nachuan/AmazingData/docker/.env
+    volumes:
+      - .:/opt/project
+      - ./data_lake:/data
+      - ./scripts:/scripts

@@ -234,7 +234,7 @@ AmazingData 提供 Docker 化 MCP 服务器，支持全量历史数据和实时�
 uv sync
 
 # 2. 启动 AmazingData MCP 服务器
-cd AmazingData/docker && docker-compose up -d
+cd ~/AmazingData/docker && docker-compose up -d
 
 # 3. 拉取历史数据（通过 MCP 协议）
 # 数据会自动通过 MCP 服务器获取

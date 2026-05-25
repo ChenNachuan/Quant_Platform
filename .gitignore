@@ -96,7 +96,6 @@ sslkeys.log
 # =============================================
 # Docker 敏感文件
 # =============================================
-AmazingData/docker/.env
 # Test Reports
 results/*.html
 .claude
