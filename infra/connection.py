@@ -32,7 +32,6 @@ class ConnectionManager:
         logger.info(f"DuckDB 连接已建立: {db_path}")
 
         self.refresh_views()
-        self.create_adjusted_views()
 
     def refresh_views(self) -> None:
         """扫描 data_lake 三级层次结构，注册 DuckDB 视图。
@@ -79,43 +78,6 @@ class ConnectionManager:
                     logger.debug(f"注册视图: {view_name}")
 
         logger.info(f"共注册 {registered} 个视图")
-
-    def create_adjusted_views(self) -> None:
-        """创建前复权/后复权视图（基于 stock_market_data_1d）。"""
-        logger.info("正在创建复权视图...")
-        base_view = "stock_market_data_1d"
-        try:
-            self.conn.execute(f"DESCRIBE {base_view}")
-        except Exception:
-            logger.warning(f"基础视图 {base_view} 不存在，跳过复权视图创建")
-            return
-
-        for view_name, factor_col in [
-            ("stock_market_data_1d_qfq", "qfq_factor"),
-            ("stock_market_data_1d_hfq", "hfq_factor"),
-        ]:
-            try:
-                self.conn.execute(f"""
-                    CREATE OR REPLACE VIEW {view_name} AS
-                    SELECT
-                        timestamp,
-                        code as symbol,
-                        entity_id,
-                        open  * {factor_col} AS open,
-                        high  * {factor_col} AS high,
-                        low   * {factor_col} AS low,
-                        close * {factor_col} AS close,
-                        CASE WHEN {factor_col} > 0 THEN volume / {factor_col} ELSE volume END AS volume,
-                        turnover,
-                        {factor_col},
-                        year,
-                        month(timestamp) as month
-                    FROM {base_view}
-                    WHERE {factor_col} IS NOT NULL
-                """)
-                logger.debug(f"已创建视图: {view_name}")
-            except Exception as e:
-                logger.warning(f"创建视图 {view_name} 失败: {e}")
 
     def list_views(self) -> List[str]:
         """列出所有已注册的视图名称。"""
