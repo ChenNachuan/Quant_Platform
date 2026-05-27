@@ -71,7 +71,7 @@ def main():
         STOCK_DAILY_DIR.mkdir(parents=True, exist_ok=True)
         total_rows = 0
 
-        for y, m, begin, end in month_range(2022, 7, 2026, 4):
+        for y, m, begin, end in month_range(2013, 1, 2026, 4):
             logger.info(f"[{y}-{m:02d}] 拉取 {begin}~{end} ...")
             try:
                 result = market_data.query_kline(
