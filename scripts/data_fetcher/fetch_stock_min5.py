@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-股票日线数据全量拉取（按月获取，避免 OOM）
+股票5分钟K线数据全量拉取（按月获取，避免 OOM）
 
-docker-compose run --rm amazingdata python3 /scripts/data_fetcher/fetch_stock_daily.py
+docker-compose run --rm amazingdata python3 /scripts/data_fetcher/fetch_stock_min5.py
 """
 
 import os
@@ -14,7 +14,7 @@ from calendar import monthrange
 import time
 import pandas as pd
 
-STOCK_DAILY_DIR = Path("/data/stock/market_data/1d")
+STOCK_MIN5_DIR = Path("/data/stock/market_data/min5")
 HIST_CODE_PATH = "/data/stock/"
 
 logging.basicConfig(
@@ -69,10 +69,10 @@ def main():
         logger.info(f"获取到 {len(codes)} 个股票代码")
 
         # 按月拉取
-        STOCK_DAILY_DIR.mkdir(parents=True, exist_ok=True)
+        STOCK_MIN5_DIR.mkdir(parents=True, exist_ok=True)
         total_rows = 0
 
-        for y, m, begin, end in month_range(2013, 1, 2026, 4):
+        for y, m, begin, end in month_range(2013, 1, now.year, now.month):
             logger.info(f"[{y}-{m:02d}] 拉取 {begin}~{end} ...")
             try:
                 t0 = time.time()
@@ -84,7 +84,7 @@ def main():
                         batch,
                         begin_date=begin,
                         end_date=end,
-                        period=ad.constant.Period.day.value,
+                        period=ad.constant.Period.min5.value,
                     )
                     if isinstance(batch_result, dict):
                         result.update(batch_result)
@@ -122,7 +122,7 @@ def main():
                 if frames:
                     new_data = pd.concat(frames, ignore_index=True)
 
-                    year_dir = STOCK_DAILY_DIR / f"year={y}"
+                    year_dir = STOCK_MIN5_DIR / f"year={y}"
                     year_dir.mkdir(parents=True, exist_ok=True)
                     out = year_dir / f"month={m:02d}.parquet"
 
