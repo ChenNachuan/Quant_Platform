@@ -3,6 +3,7 @@ Qlib 数据转储器
 将数据湖 (Parquet/DuckDB) 中的数据转换为 Qlib 专用的 Binary 格式。
 使用 Qlib Python API 替代 subprocess 调用。
 """
+
 import logging
 import shutil
 from pathlib import Path
@@ -24,7 +25,7 @@ class QlibDumper:
     def __init__(self):
         self.storage = StorageManager()
 
-        provider_uri = self.storage.config.get('qlib', {}).get('provider_uri')
+        provider_uri = self.storage.config.get("qlib", {}).get("provider_uri")
         if not provider_uri:
             raise ValueError("配置文件中缺少 'qlib.provider_uri'")
 
@@ -37,7 +38,8 @@ class QlibDumper:
     def _init_qlib(self) -> None:
         try:
             import qlib
-            region = self.storage.config.get('qlib', {}).get('region', 'cn')
+
+            region = self.storage.config.get("qlib", {}).get("region", "cn")
             qlib.init(provider_uri=str(self.qlib_dir), region=region)
             logger.info(f"Qlib 已初始化: provider_uri={self.qlib_dir}, region={region}")
         except ImportError:
@@ -71,9 +73,13 @@ class QlibDumper:
             start_date = self._get_last_dump_date()
 
         is_incremental = start_date is not None
-        logger.info(f"正在查询存储数据 (start_date={start_date}, incremental={is_incremental})...")
+        logger.info(
+            f"正在查询存储数据 (start_date={start_date}, incremental={is_incremental})..."
+        )
 
-        df = self.storage.get_data(market='cn_stock', frequency='1d', start_date=start_date)
+        df = self.storage.get_data(
+            market="cn_stock", frequency="1d", start_date=start_date
+        )
         if df.empty:
             logger.info("无新数据需要转储")
             return
@@ -81,9 +87,9 @@ class QlibDumper:
         # get_data() 返回 MultiIndex(timestamp, entity_id)，重置为普通列
         df = df.reset_index()
 
-        df = df.rename(columns={'entity_id': 'symbol', 'timestamp': 'date'})
+        df = df.rename(columns={"entity_id": "symbol", "timestamp": "date"})
 
-        required = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
+        required = ["symbol", "date", "open", "high", "low", "close", "volume"]
         for col in required:
             if col not in df.columns:
                 logger.warning(f"缺失字段 '{col}'，自动填充为 0")
@@ -93,8 +99,8 @@ class QlibDumper:
         csv_dir.mkdir(exist_ok=True)
         try:
             # Qlib 要求每只股票一个 CSV 文件，文件名为 {symbol}.csv
-            for symbol, group in df.groupby('symbol'):
-                group[['date', 'open', 'high', 'low', 'close', 'volume']].to_csv(
+            for symbol, group in df.groupby("symbol"):
+                group[["date", "open", "high", "low", "close", "volume"]].to_csv(
                     csv_dir / f"{symbol}.csv", index=False
                 )
 
@@ -107,9 +113,9 @@ class QlibDumper:
                 include_fields="open,high,low,close,volume",
             ).dump()
 
-            end_date = df['date'].max()
-            if hasattr(end_date, 'strftime'):
-                end_date = end_date.strftime('%Y-%m-%d')
+            end_date = df["date"].max()
+            if hasattr(end_date, "strftime"):
+                end_date = end_date.strftime("%Y-%m-%d")
             self._save_last_dump_date(str(end_date))
             logger.info(f"Qlib 转储完成，最新日期: {end_date}")
 

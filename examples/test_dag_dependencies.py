@@ -3,7 +3,10 @@ DAG 依赖测试
 演示复合因子的自动依赖调度
 """
 import sys
-sys.path.insert(0, '/Users/nachuanchen/Documents/Quant')
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 import numpy as np
@@ -13,9 +16,9 @@ print("DAG 依赖调度测试")
 print("="*60)
 
 # 导入因子（会自动注册）
-from factor_library.technical.momentum import MomentumReturn
-from factor_library.technical.volatility import Volatility
-from factor_library.technical.risk_adjusted_momentum import RiskAdjustedMomentum
+from factor_library.stock.technical.momentum import MomentumReturn
+from factor_library.stock.technical.volatility import Volatility
+from factor_library.stock.technical.risk_adjusted_momentum import RiskAdjustedMomentum
 
 from factor_library.registry import FactorRegistry
 from factor_library.dag import FactorDAG
@@ -124,7 +127,7 @@ try:
         timeframe='1d',
         para={'window': 20}
     )
-print(f"  ✅ volatility 计算完成 (cached)")
+    print(f"  ✅ volatility 计算完成 (cached)")
     
     # 计算复合因子（会从缓存读取依赖）
     result_composite = dag_auto.compute_with_cache(

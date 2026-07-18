@@ -1,0 +1,97 @@
+# -*- coding: utf-8 -*-
+"""
+股票波动率因子
+"""
+from factor_library.base import Factor
+from factor_library.registry import register_factor
+from factor_library.operators import ts_std
+import pandas as pd
+from typing import List, Dict, Optional
+
+
+@register_factor
+class StockVolatility(Factor):
+    """
+    股票波动率因子
+
+    公式：std(pct_change(close, 1), window)
+    方向：数值越大，波动越剧烈，风险越高
+
+    用途：
+    - 风险管理
+    - 作为其他复合因子的输入
+    """
+
+    # 元数据
+    name = "stock_volatility"
+    input_type = "bar"
+    max_lookback = 250
+    applicable_market = ["CN_STOCK"]
+    store_time = "20260217"
+    
+    # 参数空间
+    para_group = {
+        "1d": {"window": [10, 20, 30, 60]},
+        "1h": {"window": [20, 50, 100]}
+    }
+    
+    # 无依赖
+    dependencies = []
+    
+    # 后处理配置
+    post_process_steps = ['winsorize', 'standardize']
+    winsorize_params = {'lower': 0.01, 'upper': 0.99}
+    standardize_method = 'zscore'
+    
+    def generate_para_space(self) -> List[Dict[str, int]]:
+        """生成参数空间"""
+        if self.timeframe not in self.para_group:
+            return []
+        group = self.para_group[self.timeframe]
+        return [{"window": w} for w in group["window"]]
+    
+    def compute(self, data: pd.DataFrame, deps: Optional[Dict[str, pd.Series]] = None) -> pd.Series:
+        """
+        计算因子
+        
+        Args:
+            data: OHLCV数据
+            deps: 无依赖
+        
+        Returns:
+            波动率序列
+        """
+        # 防御性检查
+        if 'close' not in data.columns:
+            raise KeyError("缺少必要列: close")
+        
+        window = self.para.get("window")
+        if window is None:
+            raise ValueError("参数 'window' 缺失")
+        
+        # 计算收益率的标准差
+        returns = data['close'].pct_change()
+        return ts_std(returns, window)
+    
+    def update(
+        self,
+        new_data: pd.DataFrame,
+        history: pd.Series,
+        deps: Optional[Dict[str, pd.Series]] = None
+    ) -> pd.Series:
+        """增量更新"""
+        window = self.para['window']
+
+        # 需要 window 条历史数据（pct_change 会丢弃第一行，剩余 window 条 returns 才够 ts_std）
+        recent = history.iloc[-window:] if len(history) >= window else history
+        combined = pd.concat([recent, new_data])
+        
+        # 重算
+        returns = combined['close'].pct_change()
+        result = ts_std(returns, window)
+        
+        # 只返回新数据部分
+        return result.iloc[-len(new_data):]
+
+
+__all__ = ['StockVolatility']

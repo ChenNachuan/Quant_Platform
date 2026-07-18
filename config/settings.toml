@@ -39,7 +39,7 @@ market_data = ["1d", "min1", "min5", "snapshot"]
 reference = ["code_list"]
 
 [data.asset_types.future]
-market_data = ["1d", "min1", "min5", "min15", "min30", "min60", "snapshot", "week", "month", "year"]
+market_data = ["1d", "min1", "min5", "min15", "min30", "min60", "tick_l2", "snapshot", "week", "month", "year"]
 reference = ["code_list"]
 
 [data.asset_types.option]

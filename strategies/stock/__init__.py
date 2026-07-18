@@ -1,0 +1,3 @@
+"""
+Stock trading strategies module.
+"""

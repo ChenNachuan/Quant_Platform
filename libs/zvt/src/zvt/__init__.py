@@ -3,7 +3,6 @@ import importlib
 import json
 import logging
 import os
-import pkgutil
 import pprint
 import shutil
 from logging.handlers import RotatingFileHandler
@@ -113,8 +112,6 @@ def init_env(zvt_home: str, **kwargs) -> dict:
     init_resources(resource_path=resource_path)
     # init config
     init_config(current_config=zvt_config, **kwargs)
-    # init plugin
-    # init_plugins()
 
     return zvt_env
 
@@ -123,6 +120,10 @@ def init_resources(resource_path, force_overwrite=True):
     package_name = "zvt"
     package_dir = os.path.join(os.path.dirname(__file__), "resources")
     from zvt.utils.file_utils import list_all_files
+
+    if not os.path.exists(package_dir):
+        os.makedirs(package_dir, exist_ok=True)
+        return
 
     files: List[str] = list_all_files(package_dir, ext=None)
     for source_file in files:
@@ -229,18 +230,5 @@ old_db_to_provider_dir(zvt_env["data_path"])
 
 # register to meta
 import zvt.contract as zvt_contract
-import zvt.recorders as zvt_recorders
-import zvt.factors as zvt_factors
-
-import platform
-
-if platform.system() == "Windows":
-    try:
-        import zvt.recorders.qmt as qmt_recorder
-    except Exception as e:
-        logger.error("QMT not work", e)
-else:
-    logger.warning("QMT need run in Windows!")
-
 
 __all__ = ["zvt_env", "zvt_config", "init_log", "init_env", "init_config", "__version__"]

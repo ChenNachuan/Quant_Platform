@@ -29,13 +29,17 @@ logger = logging.getLogger(__name__)
 # 1. 核心抽象接口
 # ─────────────────────────────────────────────
 
+
 class AlphaModel(ABC):
     """
     Alpha 模型接口。
     用于计算各标的在每个时间点的预期收益 / 信号强度。
     """
+
     @abstractmethod
-    def get_signals(self, kdata: pd.DataFrame, universe_mask: pd.DataFrame) -> pd.DataFrame:
+    def get_signals(
+        self, kdata: pd.DataFrame, universe_mask: pd.DataFrame
+    ) -> pd.DataFrame:
         pass
 
 
@@ -44,8 +48,11 @@ class PortfolioConstructor(ABC):
     组合构建器接口。
     将 Alpha 信号转换为目标权重矩阵。
     """
+
     @abstractmethod
-    def create_portfolio(self, signals: pd.DataFrame, kdata: pd.DataFrame) -> pd.DataFrame:
+    def create_portfolio(
+        self, signals: pd.DataFrame, kdata: pd.DataFrame
+    ) -> pd.DataFrame:
         pass
 
 
@@ -54,6 +61,7 @@ class RiskFilter(ABC):
     风控过滤器接口。
     负责对目标权重进行安全性裁剪。
     """
+
     @abstractmethod
     def apply_risk_rules(self, target_weights: pd.DataFrame) -> pd.DataFrame:
         pass
@@ -64,6 +72,7 @@ class ExecutionHandler(ABC):
     执行处理器接口。
     负责将权重转换为实际订单或仓位变动记录。
     """
+
     @abstractmethod
     def execute(self, safe_weights: pd.DataFrame, kdata: pd.DataFrame) -> Any:
         pass
@@ -73,52 +82,67 @@ class ExecutionHandler(ABC):
 # 2. 具体实现层：适配既有类库
 # ─────────────────────────────────────────────
 
+
 class FactorAlphaModel(AlphaModel):
     """将既有 Factor 适配为 AlphaModel"""
+
     def __init__(self, factor: Factor):
         self.factor = factor
 
-    def get_signals(self, kdata: pd.DataFrame, universe_mask: pd.DataFrame) -> pd.DataFrame:
+    def get_signals(
+        self, kdata: pd.DataFrame, universe_mask: pd.DataFrame
+    ) -> pd.DataFrame:
         logger.info(f"AlphaModel: 计算因子 [{self.factor.name}]")
-        
+
         results = []
-        for entity_id, group in kdata.groupby('entity_id'):
-            group = group.sort_values('timestamp')
+        for entity_id, group in kdata.groupby("entity_id"):
+            group = group.sort_values("timestamp")
             try:
                 vals = self.factor.compute(group)
-                results.append(pd.DataFrame({
-                    'timestamp': group['timestamp'],
-                    'entity_id': entity_id,
-                    'value': vals
-                }))
+                results.append(
+                    pd.DataFrame(
+                        {
+                            "timestamp": group["timestamp"],
+                            "entity_id": entity_id,
+                            "value": vals,
+                        }
+                    )
+                )
             except Exception as e:
                 logger.debug(f"标的 {entity_id} 计算 Alpha 失败: {e}")
-                
+
         if not results:
             return pd.DataFrame()
-            
+
         all_res = pd.concat(results, ignore_index=True)
-        signal_df = all_res.pivot(index='timestamp', columns='entity_id', values='value')
-        
+        signal_df = all_res.pivot(
+            index="timestamp", columns="entity_id", values="value"
+        )
+
         # 在 Universe 层面过滤
         common_idx = signal_df.index.intersection(universe_mask.index)
         common_col = signal_df.columns.intersection(universe_mask.columns)
-        
+
         filtered = signal_df.copy()
-        filtered.loc[common_idx, common_col] = signal_df.loc[common_idx, common_col].where(
-            universe_mask.loc[common_idx, common_col]
-        )
+        filtered.loc[common_idx, common_col] = signal_df.loc[
+            common_idx, common_col
+        ].where(universe_mask.loc[common_idx, common_col])
         return filtered
 
 
 class EqualWeightPortfolio(PortfolioConstructor):
     """简单的等权组合构建器 (默认将非 NaN 的信号等权分配)"""
-    def create_portfolio(self, signals: pd.DataFrame, kdata: pd.DataFrame) -> pd.DataFrame:
+
+    def create_portfolio(
+        self, signals: pd.DataFrame, kdata: pd.DataFrame
+    ) -> pd.DataFrame:
         logger.info("PortfolioConstructor: 构建等权截面组合")
         valid_mask = signals.notna()
         daily_count = valid_mask.sum(axis=1)
         # 防止除 0
-        weights = valid_mask.div(daily_count.where(daily_count > 0, np.nan), axis=0).fillna(0.0)
+        weights = valid_mask.div(
+            daily_count.where(daily_count > 0, np.nan), axis=0
+        ).fillna(0.0)
         return weights
 
 
@@ -127,32 +151,47 @@ class QuantilePortfolio(PortfolioConstructor):
     等分 N 组组合构建器 (N-Quantiles)
     将所有的非 NaN 信号在每个截面均等分为 n_quantiles 组。
     """
+
     def __init__(self, n_quantiles: int = 5):
         self.n_quantiles = n_quantiles
-        
-    def create_portfolio(self, signals: pd.DataFrame, kdata: pd.DataFrame = None) -> dict[int, pd.DataFrame]:
-        logger.info(f"PortfolioConstructor: 构建包含 {self.n_quantiles} 个分组的等权截面组合")
-        
+
+    def create_portfolio(
+        self, signals: pd.DataFrame, kdata: pd.DataFrame = None
+    ) -> dict[int, pd.DataFrame]:
+        logger.info(
+            f"PortfolioConstructor: 构建包含 {self.n_quantiles} 个分组的等权截面组合"
+        )
+
         def qcut_row(row):
             try:
-                return pd.qcut(row, q=self.n_quantiles, labels=range(1, self.n_quantiles + 1), duplicates='drop')
+                return pd.qcut(
+                    row,
+                    q=self.n_quantiles,
+                    labels=range(1, self.n_quantiles + 1),
+                    duplicates="drop",
+                )
             except ValueError:
                 return pd.Series(index=row.index)
-                
+
         quantile_labels = signals.apply(qcut_row, axis=1)
-        
+
         weights_dict = {}
         for q in range(1, self.n_quantiles + 1):
-            mask_q = (quantile_labels == q)
+            mask_q = quantile_labels == q
             daily_count = mask_q.sum(axis=1)
-            weights_q = mask_q.astype(float).div(daily_count.where(daily_count > 0, np.nan), axis=0).fillna(0.0)
+            weights_q = (
+                mask_q.astype(float)
+                .div(daily_count.where(daily_count > 0, np.nan), axis=0)
+                .fillna(0.0)
+            )
             weights_dict[q] = weights_q
-            
+
         return weights_dict
 
 
 class DefaultRiskFilter(RiskFilter):
     """默认风控：复用既有 RiskControl 的单票上限（向量化裁剪）"""
+
     def __init__(self, max_weight: float = 1.0):
         # 此处可以将 execution/risk_control.py 中的 single_position_limit 映射过来
         self.max_weight = max_weight
@@ -169,6 +208,7 @@ class SimulationExecutionHandler(ExecutionHandler):
     权重透传执行器
     直接原样返回权重宽表。
     """
+
     def execute(self, safe_weights: pd.DataFrame, kdata: pd.DataFrame) -> pd.DataFrame:
         logger.info("ExecutionHandler: 输出模拟执行权重宽表")
         return safe_weights
@@ -179,46 +219,53 @@ class MultiVectorBTExecutionHandler(ExecutionHandler):
     VectorBT 多分组向量化回测执行器。
     支持将字典格式的 N 组安全权重一次性并发传递给 vbt 模拟对冲与截面测试。
     """
-    def __init__(self, init_cash: float = 1000000.0, fees: float = 0.001, slippage: float = 0.002):
+
+    def __init__(
+        self, init_cash: float = 1000000.0, fees: float = 0.001, slippage: float = 0.002
+    ):
         self.init_cash = init_cash
         self.fees = fees
         self.slippage = slippage
 
-    def execute(self, safe_weights_dict: Dict[int, pd.DataFrame], kdata: pd.DataFrame) -> vbt.Portfolio:
-        logger.info(f"ExecutionHandler: 调用 VectorBT 引擎并发执行 {len(safe_weights_dict)} 个分组的回测")
-        close_df = kdata.pivot(index='timestamp', columns='entity_id', values='close')
-        
+    def execute(
+        self, safe_weights_dict: Dict[int, pd.DataFrame], kdata: pd.DataFrame
+    ) -> vbt.Portfolio:
+        logger.info(
+            f"ExecutionHandler: 调用 VectorBT 引擎并发执行 {len(safe_weights_dict)} 个分组的回测"
+        )
+        close_df = kdata.pivot(index="timestamp", columns="entity_id", values="close")
+
         concat_list = []
         keys = []
-        
+
         align_basis = list(safe_weights_dict.values())[0]
         common_idx = align_basis.index.intersection(close_df.index)
         common_col = align_basis.columns.intersection(close_df.columns)
-        
+
         close_prices = close_df.loc[common_idx, common_col].ffill()
-        
+
         for q, w_df in safe_weights_dict.items():
-            keys.append(f'Group_{q}')
+            keys.append(f"Group_{q}")
             concat_list.append(w_df.loc[common_idx, common_col])
-            
+
         all_weights = pd.concat(concat_list, axis=1, keys=keys)
-        
+
         close_dict = {}
         for q in safe_weights_dict.keys():
-           close_dict[f'Group_{q}'] = close_prices
-           
+            close_dict[f"Group_{q}"] = close_prices
+
         broad_close = pd.concat(close_dict.values(), axis=1, keys=close_dict.keys())
-        
+
         pf = vbt.Portfolio.from_orders(
             close=broad_close,
             size=all_weights,
-            size_type='target_percent',
+            size_type="target_percent",
             group_by=all_weights.columns.get_level_values(0),
             cash_sharing=True,
             init_cash=self.init_cash,
             fees=self.fees,
             slippage=self.slippage,
-            freq='1D'
+            freq="1D",
         )
         return pf
 
@@ -228,7 +275,10 @@ class VectorBTExecutionHandler(ExecutionHandler):
     VectorBT 向量化回测执行器。
     将安全权重矩阵输入 VectorBT，进行高性能组合回测。
     """
-    def __init__(self, init_cash: float = 1000000.0, fees: float = 0.001, slippage: float = 0.002):
+
+    def __init__(
+        self, init_cash: float = 1000000.0, fees: float = 0.001, slippage: float = 0.002
+    ):
         self.init_cash = init_cash
         self.fees = fees
         self.slippage = slippage
@@ -236,15 +286,15 @@ class VectorBTExecutionHandler(ExecutionHandler):
     def execute(self, safe_weights: pd.DataFrame, kdata: pd.DataFrame) -> vbt.Portfolio:
         logger.info("ExecutionHandler: 调用 VectorBT 引擎执行回测")
         # 提取收盘价宽表 (Date x Symbol)
-        close_df = kdata.pivot(index='timestamp', columns='entity_id', values='close')
-        
+        close_df = kdata.pivot(index="timestamp", columns="entity_id", values="close")
+
         # 对齐索引和列
         common_idx = safe_weights.index.intersection(close_df.index)
         common_col = safe_weights.columns.intersection(close_df.columns)
-        
+
         weights = safe_weights.loc[common_idx, common_col]
         close_prices = close_df.loc[common_idx, common_col]
-        
+
         # 填充缺失价格以防 vbt 报错
         close_prices = close_prices.ffill()
 
@@ -253,33 +303,36 @@ class VectorBTExecutionHandler(ExecutionHandler):
         pf = vbt.Portfolio.from_orders(
             close=close_prices,
             size=weights,
-            size_type='target_percent',
+            size_type="target_percent",
             group_by=True,
             cash_sharing=True,
             init_cash=self.init_cash,
             fees=self.fees,
             slippage=self.slippage,
-            freq='1D'
+            freq="1D",
         )
         logger.info(f"VectorBT 回测完成。最终权益: {pf.value().iloc[-1]:,.2f}")
         return pf
 
+
 # ─────────────────────────────────────────────
 # 3. 5 层流水线总装
 # ─────────────────────────────────────────────
+
 
 class AlphaPipeline:
     """
     Algorithm Framework 5 层向量化流水线
     将量化交易全流程转化为 DataFrame 矩阵的传递
     """
+
     def __init__(
         self,
         universe: UniverseFilter,
         alpha: AlphaModel,
         portfolio: PortfolioConstructor,
         risk: RiskFilter,
-        execution: ExecutionHandler
+        execution: ExecutionHandler,
     ):
         self.universe = universe
         self.alpha = alpha
@@ -292,37 +345,47 @@ class AlphaPipeline:
         执行一条完整的策略流水线，返回最终的目标权重矩阵或执行记录。
         """
         logger.info("========== Pipeline Start ==========")
-        
+
         # 1. Universe Selection: 获取有效池矩阵
         logger.info("[1/5] Universe Selection")
         universe_mask = self.universe.filter(kdata)
-        
+
         # 2. Alpha Model: 提取信号强度
         logger.info("[2/5] Alpha Extraction")
         signals = self.alpha.get_signals(kdata, universe_mask)
-        
+
         # 3. Portfolio Construction: 构建目标权重 (支持单字典多组并发)
         logger.info("[3/5] Portfolio Construction")
         target_weights = self.portfolio.create_portfolio(signals, kdata)
-        
+
         # 4. Risk Management: 风险裁剪验证
         logger.info("[4/5] Risk Filter")
         if isinstance(target_weights, dict):
-            safe_weights = {q: self.risk.apply_risk_rules(tw) for q, tw in target_weights.items()}
+            safe_weights = {
+                q: self.risk.apply_risk_rules(tw) for q, tw in target_weights.items()
+            }
         else:
             safe_weights = self.risk.apply_risk_rules(target_weights)
-        
+
         # 5. Execution: 执行落地
         logger.info("[5/5] Execution")
         final_result = self.execution.execute(safe_weights, kdata)
-        
+
         logger.info("========== Pipeline End ==========")
         return final_result
 
 
 __all__ = [
-    'AlphaModel', 'PortfolioConstructor', 'RiskFilter', 'ExecutionHandler',
-    'FactorAlphaModel', 'EqualWeightPortfolio', 'QuantilePortfolio', 'DefaultRiskFilter', 
-    'SimulationExecutionHandler', 'VectorBTExecutionHandler', 'MultiVectorBTExecutionHandler',
-    'AlphaPipeline'
+    "AlphaModel",
+    "PortfolioConstructor",
+    "RiskFilter",
+    "ExecutionHandler",
+    "FactorAlphaModel",
+    "EqualWeightPortfolio",
+    "QuantilePortfolio",
+    "DefaultRiskFilter",
+    "SimulationExecutionHandler",
+    "VectorBTExecutionHandler",
+    "MultiVectorBTExecutionHandler",
+    "AlphaPipeline",
 ]

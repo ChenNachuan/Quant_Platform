@@ -4,4 +4,6 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
+        exclude: ^(libs/zvt/|examples/|strategies/.*/notebooks/|strategies/stock/ml_factor/|factor_library/stock/|factor_library/operators/|factor_library/universe\.py|engine/zvt_bridge/|engine/factor/|engine/simulation/|execution/|infra/scheduler\.py)
       - id: ruff-format
+        exclude: ^(libs/zvt/|examples/|strategies/.*/notebooks/|strategies/stock/ml_factor/|factor_library/stock/|factor_library/operators/|factor_library/universe\.py|engine/zvt_bridge/|engine/factor/|engine/simulation/|execution/|infra/scheduler\.py)

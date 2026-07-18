@@ -4,11 +4,14 @@ ZVT 回测示例
 演示如何使用 FactorAdapter 进行因子回测
 """
 import sys
-sys.path.insert(0, '/Users/nachuanchen/Documents/Quant')
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from zvt.trader.trader import StockTrader
 from zvt.contract import IntervalLevel
-from factor_library.technical.momentum import MomentumReturn
+from factor_library.stock.technical.momentum import MomentumReturn
 from engine.zvt_bridge.backtest import FactorAdapter
 from zvt.contract.api import df_to_db
 from zvt.domain import Stock1dHfqKdata
