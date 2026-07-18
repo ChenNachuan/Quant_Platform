@@ -263,6 +263,9 @@ def fetch_months(
     retry_delay=5,
     request_timeout=60,
     flush_every=50,
+    end_year=None,
+    end_month=None,
+    end_day=None,
 ):
     """通用的按月增量拉取主循环（每 flush_every 个批次写盘一次，避免 OOM）。
 
@@ -285,8 +288,18 @@ def fetch_months(
         return
 
     now = datetime.now()
-    end_year, end_month = now.year, now.month
-    today_int = int(now.strftime("%Y%m%d"))
+    requested_end_year = int(end_year) if end_year is not None else now.year
+    requested_end_month = int(end_month) if end_month is not None else now.month
+    if end_day is None:
+        requested_end_day = (
+            now.day
+            if (requested_end_year, requested_end_month) == (now.year, now.month)
+            else monthrange(requested_end_year, requested_end_month)[1]
+        )
+    else:
+        requested_end_day = int(end_day)
+    end_year, end_month = requested_end_year, requested_end_month
+    today_int = end_year * 10000 + end_month * 100 + requested_end_day
     logger.info(
         f"数据范围: {start_year}-{start_month:02d} 到 {end_year}-{end_month:02d} (今天: {today_int})"
     )
@@ -301,7 +314,7 @@ def fetch_months(
     for y, m, begin, end in month_range(
         start_year, start_month, end_year, end_month, today_int
     ):
-        is_current_month = (y, m) == (end_year, end_month)
+        is_current_month = (y, m) == (now.year, now.month)
         if not is_current_month and is_month_complete(data_dir, y, m):
             skipped_months += 1
             continue
@@ -333,7 +346,10 @@ def fetch_months(
                 result = {}
                 gc.collect()
 
-            # 优先重试上次失败的代码
+            active_codes = list(codes(y, m) if callable(codes) else codes)
+
+            # 优先重试上次失败且当月有效的代码
+            prev_failed = [code for code in prev_failed if code in active_codes]
             if prev_failed:
                 retry_batches = (len(prev_failed) + batch_size - 1) // batch_size
                 logger.info(
@@ -367,7 +383,7 @@ def fetch_months(
                 _flush()
 
             # 全量拉取，跳过已在重试阶段成功获取的代码
-            remaining_codes = [c for c in codes if c not in already_fetched]
+            remaining_codes = [c for c in active_codes if c not in already_fetched]
             num_batches = (len(remaining_codes) + batch_size - 1) // batch_size
             logger.info(
                 f"[{y}-{m:02d}] 全量拉取 {len(remaining_codes)} 个代码（跳过已重试 {len(already_fetched)} 个），分 {num_batches} 批次处理"
