@@ -154,6 +154,22 @@ class TestValidateFuturesTicker:
         assert validate_futures_ticker("IF2406.XX") is False
 
 
+class TestTrailingNewlineRegression:
+    """$ matched before a trailing newline; \\Z does not (folded-in fix)."""
+
+    def test_equity_trailing_newline_rejected(self):
+        assert validate_equity_ticker("600000.SH\n") is False
+
+    def test_futures_trailing_newline_rejected(self):
+        assert validate_futures_ticker("IF2406.CFFEX\n") is False
+
+    def test_equity_without_newline_still_passes(self):
+        assert validate_equity_ticker("600000.SH") is True
+
+    def test_futures_without_newline_still_passes(self):
+        assert validate_futures_ticker("IF2406.CFFEX") is True
+
+
 class TestExchangeMap:
     def test_ine_maps_to_ine(self):
         assert EXCHANGE_MAP["INE"] == "ine"
