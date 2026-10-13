@@ -609,4 +609,4 @@
 2. `uv run ruff check .` 退出码 0。
 3. `python -c "from core import types, asset_rules"` 可导入、无副作用、无 IO。
 4. `grep -rnE "(^|[[:space:]])(import|from)[[:space:]]+(data|research|execution|ops)\b" core/` **无输出**（红线 3）。必须能命中函数体内的缩进 `from data.x import y`——实测 `^` 单锚会漏掉它，故用 `(^|[[:space:]])`。
-5. 测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`（与 `design/execution/fee_model.md:22-23` 同源），断言 `ASSET_RULES["etf"]["stamp_tax"] is False`；双向对拍留待 S7-T2。
+5. 免印花税场内基金前缀表 `STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES = ("51","56","58","15","16")` 在 `core/asset_rules.py` 单源定义并导出（含深市 LOF `16`；`design/core/asset_rules.md` 旧写的 `51/15/16` 已按缺口 #17 裁决订正），断言 `ASSET_RULES["etf"]["stamp_tax"] is False` 且前缀表逐项一致；与 `FeeModel` 的双向对拍留待 S7-T2。

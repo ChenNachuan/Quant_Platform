@@ -19,6 +19,7 @@ artifacts/
 .env
 .env.*
 !.env.example
+config/.env
 config.json
 *secret*
 *api_key*
