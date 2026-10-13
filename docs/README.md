@@ -5,6 +5,7 @@
 ## 平台设计（design/）
 
 - [架构总纲](design/ARCHITECTURE.md) —— 唯一权威架构文档：五域骨架、三步主链、选型定稿、跨域契约、迁移阶段
+- [实施路线图](ROADMAP.md) —— 施工顺序：阶段序列与 DoD、黄金样本五步验证、迁移路径、流程约定、设计缺口清单
 - 五域模块文档（文件名与未来代码模块同名）：
   - [core/](design/core/) —— config · logging · testing · asset_rules · registry · types
   - [data/](design/data/) —— source_adapter · ingestion · dqc_* · quarantine_raw · calendar_adjustment · data_revision · storage_* · data_api · l2_data
