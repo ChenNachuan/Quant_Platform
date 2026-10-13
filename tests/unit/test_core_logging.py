@@ -73,6 +73,79 @@ class TestJsonFormatter:
         assert "+" in ts or "Z" in ts  # UTC offset
 
 
+class TestFinding1MessageAsctimeFiltered:
+    """Regression: console Formatter mutates record.message / .asctime onto
+    the shared LogRecord; those must not leak as extras into JSONL (Finding 1)."""
+
+    def test_message_and_asctime_not_in_output(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        setup_logging()
+        logging.info("hello world", extra={"job_name": "nightly"})
+        # Flush handlers so the file is written
+        for h in logging.getLogger().handlers:
+            h.flush()
+        log_files = list((tmp_path / "logs").glob("app_*.jsonl"))
+        assert len(log_files) == 1
+        lines = log_files[0].read_text().strip().splitlines()
+        assert len(lines) == 1
+        payload = json.loads(lines[0])
+        assert "message" not in payload, "message must not leak as extra"
+        assert "asctime" not in payload, "asctime must not leak as extra"
+        assert payload["msg"] == "hello world"
+        assert payload["job_name"] == "nightly"
+
+
+class TestFinding2FixedFieldsProtected:
+    """Regression: extras must not overwrite contract fields or inject
+    ``exception`` without ``exc_info`` (Finding 2)."""
+
+    def test_extra_cannot_overwrite_fixed_fields(self):
+        formatter = JsonFormatter()
+        record = _make_record()
+        record.funcName = "real_func"
+        record.ts = "FAKE_TS"
+        record.level = "FAKE_LEVEL"
+        record.func = "FAKE_FUNC"
+        payload = json.loads(formatter.format(record))
+        assert payload["ts"] != "FAKE_TS"
+        assert payload["level"] != "FAKE_LEVEL"
+        assert payload["func"] != "FAKE_FUNC"
+        assert payload["level"] == "INFO"
+        assert payload["func"] == "real_func"
+
+    def test_extra_cannot_inject_exception_without_exc_info(self):
+        formatter = JsonFormatter()
+        record = _make_record()
+        record.exception = "fake traceback"
+        payload = json.loads(formatter.format(record))
+        assert "exception" not in payload
+
+    def test_exception_still_present_with_exc_info(self):
+        formatter = JsonFormatter()
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            record = _make_record()
+            record.exc_info = __import__("sys").exc_info()
+        record.exception = "fake traceback"  # extra tries to override
+        payload = json.loads(formatter.format(record))
+        assert "ValueError" in payload["exception"]
+        assert payload["exception"] != "fake traceback"
+
+
+class TestFinding3NonSerializableExtra:
+    """Regression: non-serializable extra must not silently drop the record."""
+
+    def test_non_serializable_extra_stringified(self):
+        formatter = JsonFormatter()
+        record = _make_record()
+        record.custom_obj = object()  # not JSON-serializable
+        line = formatter.format(record)
+        payload = json.loads(line)  # must not raise
+        assert payload["msg"] == "hello"
+        assert "custom_obj" in payload
+
+
 class TestSetupLogging:
     def test_creates_log_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

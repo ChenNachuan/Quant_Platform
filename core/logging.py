@@ -11,14 +11,19 @@ import os
 from datetime import datetime, timezone
 
 # Standard LogRecord attributes that are not user "extras".
+# Includes ``message`` / ``asctime`` which Python's Formatter mutates onto
+# the shared record when the console handler runs first (Finding 1).
 _STANDARD_RECORD_ATTRS = frozenset(
     {
         "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
         "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
         "created", "msecs", "relativeCreated", "thread", "threadName",
-        "processName", "process", "taskName",
+        "processName", "process", "taskName", "message", "asctime",
     }
 )
+
+# Contract fields that extras must never overwrite (Finding 2).
+_CONTRACT_FIELDS = frozenset({"ts", "level", "module", "func", "msg", "exception"})
 
 
 class JsonFormatter(logging.Formatter):
@@ -28,19 +33,19 @@ class JsonFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        payload: dict = {
-            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
-            "module": record.module,
-            "func": record.funcName,
-            "msg": record.getMessage(),
-        }
+        payload: dict = {}
         for key, value in record.__dict__.items():
-            if key not in _STANDARD_RECORD_ATTRS:
+            if key not in _STANDARD_RECORD_ATTRS and key not in _CONTRACT_FIELDS:
                 payload[key] = value
+        # Fixed fields always win over extras (Finding 2).
+        payload["ts"] = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
+        payload["level"] = record.levelname
+        payload["module"] = record.module
+        payload["func"] = record.funcName
+        payload["msg"] = record.getMessage()
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def setup_logging(level: str = "INFO") -> None:

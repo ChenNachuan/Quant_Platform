@@ -88,15 +88,22 @@ class TestConfigSnapshot:
         assert len(file_hash) == 64  # sha256 hex digest
 
     def test_secrets_not_in_snapshot(self, tmp_path):
-        """Red line 8: load_secrets values never appear in config_snapshot."""
+        """Red line 8: secrets never appear in config_snapshot output.
+
+        Snapshots the .env file itself (not config.toml) so the assertion is
+        meaningful — if the hash leaked file content, secrets would appear.
+        """
         env_file = tmp_path / ".env"
-        env_file.write_text("API_KEY=super_secret_value_xyz\n")
-        cfg_file = tmp_path / "config.toml"
-        cfg_file.write_text('log_level = "INFO"\n')
+        secret_value = "super_secret_value_xyz"
+        env_file.write_text(f"API_KEY={secret_value}\n")
         secrets = load_secrets(str(env_file))
-        snap = config_snapshot(str(cfg_file))
+        assert secrets["API_KEY"] == secret_value  # load_secrets reads it
+        snap = config_snapshot(str(env_file))  # snapshot the .env file itself
         for value in secrets.values():
-            assert value not in snap
+            assert value not in snap, f"secret value leaked into snapshot: {value}"
+        # Only the hash is present, not raw content
+        file_hash = snap.split("@", 1)[1]
+        assert len(file_hash) == 64  # sha256 hex digest
 
     def test_snapshot_changes_with_content(self, tmp_path):
         cfg_file = tmp_path / "config.toml"
