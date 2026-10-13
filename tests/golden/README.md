@@ -36,7 +36,8 @@ Daily close = `close` of the **last 5-minute bar** of the day, by `trade_time`.
 
 ## Source
 
-5-minute ETF bars from `~/Downloads/5m_etf/{2024,2025}/*.parquet`.
+5-minute ETF bars fetched with `akshare==1.18.40` (pin from `pyproject.toml`),
+saved to `~/Downloads/5m_etf/{2024,2025}/*.parquet`.
 Columns: `code` / `trade_time` / `open` / `high` / `low` / `close` / `vol` /
 `amount` / `vwap` / `date`. Each parquet file is one trading day.
 
