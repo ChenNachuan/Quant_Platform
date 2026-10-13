@@ -58,6 +58,8 @@
 - **T2 `core/config.py` + `core/logging.py`** —— 三层配置加载（TOML 全局 / 策略级 / `.env`）+ JSONL 日志与 `logs/runs/` 三 schema。
 - **T3 `core/registry.py`** —— `FactorRegistry` + `@register_factor` + `list_factor_meta()`（代码即注册表）。
 
+> **键名约定（本阶段）**：`ASSET_RULES` 用 `stock` / `etf`，照 `design/core/asset_rules.md` 写，本阶段即可开工。与 `data_api.load_bars(..., asset_type="equity")` 的 `equity` 映射**在 S3 定**，不在 S1 猜——见 §7 缺口 #12。两个执行者都不要假设对方做映射。
+
 **DoD 与验证**
 
 | 命令 | 通过判据 |
@@ -65,8 +67,8 @@
 | `uv run pytest tests/unit/test_core_*.py -q` | 全绿；至少覆盖 `load_config` 策略级覆盖全局同名键、`get_asset_rules("unknown")` 抛 `KeyError`、`load_secrets` 不进 `config_snapshot` |
 | `uv run ruff check .` | 退出码 0 |
 | `python -c "from core import types, config, logging, registry, asset_rules"` | 可导入、无副作用 |
-| `grep -rnE "^import (data\|research\|execution\|ops)\|^from (data\|research\|execution\|ops)" core/` | **无输出**（红线 3） |
-| 一致性断言 | `get_asset_rules("etf")["stamp_tax"] is False` 且与 `FeeModel._is_etf` 前缀表 `("51","56","58","15","16")` 一致；FeeModel 未落地前先做前缀表单向断言，落地后补双向对拍（`core/testing.md` 一致性校验点） |
+| `grep -rnE "(^\|[[:space:]])(import\|from)[[:space:]]+(data\|research\|execution\|ops)\b" core/` | **无输出**（红线 3）。`^` 单锚会漏掉缩进 import，必须允许行首空白；更严可换 AST 导入检查 |
+| 一致性断言 | 测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`（与 `design/execution/fee_model.md:22-23` 同源），断言 `ASSET_RULES["etf"]["stamp_tax"] is False`。与 `FeeModel._is_etf` 的**双向对拍留待 S7-T2**（FeeModel 届时才落地）。前缀表两份文档不一致，见 §7 缺口 #17——本阶段按 `fee_model.md` 的 5 元组写测试 |
 | `.gitignore` | 含 `config/.env`（红线 8） |
 
 ---
@@ -224,6 +226,7 @@
 - `research/cross_sectional_backtest.md` 的 `simulate_single_trade` 与 `execution/broker.md` 的 `submit_orders()` 内部三步职责重叠，且两者都自称薄壳的一部分；`research/ ↔ execution/` 依赖方向与总纲 §2.1 硬规则冲突。见 §7 缺口 #1 / #2。**Orchestrator 裁决前，T4 只做 `Broker` + SimBroker，`cs_portfolio_sim` 挂起。**
 - 涨跌停拒单归属（风控七规则 vs `pre_check` vs 六道关）未定，见 §7 缺口 #3。T2 可先实现七规则，涨跌停检查位留接口。
 - `get_latest_price` / `get_prices` / `get_daily_volume` 签名未定，见 §7 缺口 #10。三处调用方共用，T3/T4 开工前定一份。
+- 成交价基准双口径未选定，见 §7 缺口 #5。T4 撮合前定一份，S8 手算与 SimBroker 必须同口径。
 
 **DoD 与验证**
 
@@ -545,6 +548,8 @@
 ## 7. 设计缺口清单
 
 > 以下均为**梳理中发现的自相矛盾 / 缺失契约 / 不可验证之处**。本计划**不裁决**，逐条登记待 Orchestrator 定夺。每条标出处。
+>
+> **登记规程**：发现新缺口就在本表**追加一行**，编号顺延（不重排旧号），填「缺口 / 出处 / 影响阶段」三栏；**不要自行改写设计文档或在实现里绕过**，登记后待 Orchestrator 裁决。裁决落地时在该行标注裁决出处，不删行。
 
 | # | 缺口 | 出处 | 影响阶段 |
 |---|---|---|---|
@@ -564,6 +569,7 @@
 | 14 | **ensemble 权重口径两处同源未定。** `factor_combiner`「ensemble 的权重如何进 FactorCombiner」与 `ml_signal`「ensemble 权重公式（validation ICIR 归一化细节）」是同一个问题的两个入口，均未定稿。 | `design/research/factor_combiner.md`；`design/research/ml_signal.md` | S11 |
 | 15 | **`baseline_spec.py` 在仓库中不存在。** 总纲 §6 与 `core/testing.md` 都要求「保留作期货 ALSTM 策略自身回归基准」，但 `316261b` 树中 `find . -name baseline_spec.py` 无结果（`strategies/futures/alstm/` 下只有 `config.py / data.py / train.py / reporting.py / README.md`）。保留对象缺失，V3 回归基准无从谈起。 | `design/ARCHITECTURE.md` §6；`design/core/testing.md`；仓库实况 | S13、V3 |
 | 16 | **`pyproject.toml` 依赖与选型定稿表不一致。** 描述仍写 "based on ZVT, VectorBT, and Qlib"，依赖含 `zvt` / `vectorbt` / `pyqlib` / `prefect==3.6.22`；§4 定稿为 pandas 自研 + SimBroker/QmtBroker、调度 = APScheduler、三套桥接归档。属迁移收口项，本计划只登记不改。 | `pyproject.toml`；`design/ARCHITECTURE.md` §4 | S13 / M3 |
+| 17 | **ETF 免印花税前缀表两份设计文档不一致。** `fee_model.md` 写 5 元组 `("51","56","58","15","16")`；`asset_rules.md` 写「前缀（51/15/16 免印花税）」，少了 56/58。两者都自称「同源一致」，但彼此对不上；执行者照哪个写测试必须先来问。 | `design/core/asset_rules.md` 差异落层表注（前缀 51/15/16）vs `design/execution/fee_model.md` `_is_etf`（51/56/58/15/16） | S1、S7 |
 
 ---
 
@@ -599,8 +605,8 @@
 
 **完成判据**（Test 复跑这五条）：
 
-1. `uv run pytest tests/unit/test_core_types.py tests/unit/test_core_asset_rules.py -q` 全绿，至少覆盖：`get_asset_rules("unknown")` 抛 `KeyError`、`get_asset_rules("etf")["stamp_tax"] is False`、stock 前缀 `60/00/30/68/8` → `price_limits` 映射正确、Order/Trade/Position/Account/JournalEntry 五 dataclass + 三枚举可构造。
+1. `uv run pytest tests/unit/test_core_types.py tests/unit/test_core_asset_rules.py -q` 全绿，至少覆盖：`get_asset_rules("unknown")` 抛 `KeyError`、`get_asset_rules("etf")["stamp_tax"] is False`、stock 前缀 → `price_limits` 映射正确（期望值内联如下，源 `design/core/asset_rules.md:56-60`：`60/00` → `main 0.10`、`30` → `gem 0.20`、`68` → `star 0.20`、`8` → `bse 0.30`；另 `st_limit = 0.05`）、Order/Trade/Position/Account/JournalEntry 五 dataclass + 三枚举可构造。
 2. `uv run ruff check .` 退出码 0。
 3. `python -c "from core import types, asset_rules"` 可导入、无副作用、无 IO。
-4. `grep -rnE "^(import|from) (data|research|execution|ops)" core/` **无输出**（红线 3）。
-5. 一致性：`ASSET_RULES["etf"]["stamp_tax"] is False` 与 `FeeModel._is_etf` 前缀表 `("51","56","58","15","16")` 同源一致（FeeModel 未落地前做前缀表单向断言，落地后补双向对拍）。
+4. `grep -rnE "(^|[[:space:]])(import|from)[[:space:]]+(data|research|execution|ops)\b" core/` **无输出**（红线 3）。必须能命中函数体内的缩进 `from data.x import y`——实测 `^` 单锚会漏掉它，故用 `(^|[[:space:]])`。
+5. 测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`（与 `design/execution/fee_model.md:22-23` 同源），断言 `ASSET_RULES["etf"]["stamp_tax"] is False`；双向对拍留待 S7-T2。
