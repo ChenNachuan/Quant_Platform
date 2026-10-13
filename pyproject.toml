@@ -32,10 +32,16 @@ zvt = { path = "libs/zvt", editable = true }
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "unit: function-level, fast (10s budget)",
+    "integration: pipeline-level (60s budget)",
+    "golden: end-to-end golden sample (300s budget)",
+]
 
 [dependency-groups]
 dev = [
     "pytest",
+    "hypothesis",
     "jupyterlab",
     "ipython",
     "ruff>=0.15.6",
