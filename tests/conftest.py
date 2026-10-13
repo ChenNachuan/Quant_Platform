@@ -43,13 +43,18 @@ def pytest_configure(config):
         )
 
 
-def _layer_of_path(path) -> str | None:
-    """Return the layer name for a test path, or None if outside the skeleton."""
+def _layer_of_path(path) -> str:
+    """Return the layer name for a test path.
+
+    Paths under ``tests/unit/``, ``tests/integration/``, or ``tests/golden/``
+    map to their directory.  Legacy root-level files (``tests/test_*.py``)
+    default to ``unit`` — they are function-level and fast.
+    """
     parts = Path(path).parts
     for layer in LAYER_MARKERS:
         if layer in parts:
             return layer
-    return None
+    return "unit"
 
 
 # ---------------------------------------------------------------------------
@@ -103,15 +108,6 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             )
             warnings.warn(msg, stacklevel=1)
             terminalreporter.write_line(f"  WARNING: {msg}")
-
-    unmarked = [
-        item.nodeid for item in _collected if _layer_of_path(item.fspath) is None
-    ]
-    if unmarked:
-        terminalreporter.write_line(
-            f"  NOTE: {len(unmarked)} test(s) outside the three-layer skeleton "
-            f"(no layer marker)"
-        )
 
 
 # ---------------------------------------------------------------------------

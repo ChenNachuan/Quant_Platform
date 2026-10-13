@@ -47,3 +47,18 @@ class TestGoldenDirectoryLayout:
         golden_dir = Path(__file__).parent
         assert not (golden_dir / "golden_prices.parquet").exists()
         assert not (golden_dir / "golden_expected.json").exists()
+
+
+class TestMarkerCompleteness:
+    """DoD row 6: every collected test carries a layer marker (unit/integration/golden)."""
+
+    def test_every_test_has_layer_marker(self, request):
+        layer_markers = ("unit", "integration", "golden")
+        unmarked = [
+            item.nodeid
+            for item in request.session.items
+            if not any(item.get_closest_marker(m) for m in layer_markers)
+        ]
+        assert not unmarked, (
+            f"{len(unmarked)} test(s) missing layer marker: {unmarked}"
+        )
