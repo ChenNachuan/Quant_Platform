@@ -34,6 +34,14 @@ ASSET_RULES: dict[str, dict] = {
         "st_limit": None,
         "short": False,
     },
+    AssetType.FUND.value: {
+        "t_plus": 1,
+        "lot_size": 100,
+        "stamp_tax": False,  # listed fund (LOF etc.) exempt
+        "price_limits": {"main": 0.10},  # LOF trades like stock, +/-10%
+        "st_limit": None,
+        "short": False,
+    },
     # AssetType.BOND:   V2 reserved (T+0, no stamp tax)
     # AssetType.FUTURES: V3 reserved (margin + daily mark-to-market)
     # AssetType.OPTION:  V4 reserved

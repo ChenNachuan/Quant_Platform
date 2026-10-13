@@ -17,15 +17,17 @@ from core.types import (
     QualityFlag,
     QualitySeverity,
     Trade,
+    EQUITY_TYPES,
 )
 
 
 class TestAssetType:
-    def test_closed_enum_five_members(self):
-        assert len(AssetType) == 5
+    def test_closed_enum_six_members(self):
+        assert len(AssetType) == 6
         assert set(AssetType) == {
             AssetType.STOCK,
             AssetType.ETF,
+            AssetType.FUND,
             AssetType.BOND,
             AssetType.FUTURES,
             AssetType.OPTION,
@@ -43,9 +45,13 @@ class TestAssetType:
     def test_values(self):
         assert AssetType.STOCK.value == "stock"
         assert AssetType.ETF.value == "etf"
+        assert AssetType.FUND.value == "fund"
         assert AssetType.BOND.value == "bond"
         assert AssetType.FUTURES.value == "futures"
         assert AssetType.OPTION.value == "option"
+
+    def test_equity_types(self):
+        assert EQUITY_TYPES == {AssetType.STOCK, AssetType.ETF, AssetType.FUND}
 
 
 class TestQualityFlag:

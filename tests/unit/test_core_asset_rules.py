@@ -19,6 +19,9 @@ class TestGetAssetRules:
     def test_etf_stamp_tax_false(self):
         assert get_asset_rules("etf")["stamp_tax"] is False
 
+    def test_fund_stamp_tax_false(self):
+        assert get_asset_rules("fund")["stamp_tax"] is False
+
     def test_stock_stamp_tax_true(self):
         assert get_asset_rules("stock")["stamp_tax"] is True
 
@@ -29,14 +32,21 @@ class TestGetAssetRules:
         assert rules["price_limits"]["star"] == 0.20  # 68
         assert rules["price_limits"]["bse"] == 0.30  # 8
 
+    def test_fund_price_limits(self):
+        rules = get_asset_rules("fund")
+        assert rules["price_limits"]["main"] == 0.10  # LOF like stock, +/-10%
+
     def test_stock_st_limit(self):
         assert get_asset_rules("stock")["st_limit"] == 0.05
 
     def test_etf_st_limit_none(self):
         assert get_asset_rules("etf")["st_limit"] is None
 
+    def test_fund_st_limit_none(self):
+        assert get_asset_rules("fund")["st_limit"] is None
+
     def test_t_plus_lot_size_short(self):
-        for asset in ("stock", "etf"):
+        for asset in ("stock", "etf", "fund"):
             rules = get_asset_rules(asset)
             assert rules["t_plus"] == 1
             assert rules["lot_size"] == 100
@@ -75,5 +85,5 @@ class TestIsStampTaxExemptListedFund:
 
 class TestAssetRulesKeys:
     def test_keys_match_asset_type_values(self):
-        expected = {AssetType.STOCK.value, AssetType.ETF.value}
+        expected = {AssetType.STOCK.value, AssetType.ETF.value, AssetType.FUND.value}
         assert set(ASSET_RULES.keys()) == expected

@@ -20,9 +20,14 @@ class AssetType(str, Enum):
 
     STOCK = "stock"
     ETF = "etf"
+    FUND = "fund"  # LOF and other listed funds, stamp_tax False
     BOND = "bond"  # V2 reserved
     FUTURES = "futures"  # V3 reserved
     OPTION = "option"  # V4 reserved
+
+
+# Single merge point for the future data_api equity mapping (gap #12).
+EQUITY_TYPES: set[AssetType] = {AssetType.STOCK, AssetType.ETF, AssetType.FUND}
 
 
 class QualityFlag(IntFlag):
