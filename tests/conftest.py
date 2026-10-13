@@ -16,8 +16,9 @@ Test doubles:
     QMT broker      SimBroker (V1's only impl) — Broker lands at S7
 
 Hard rules enforced by autouse fixtures:
-    * no test may open a network socket
+    * no test may open a network socket (TCP or UDP, connect or DNS)
     * no test may read the real ``config/.env`` (use a ``tmp_path`` fake)
+    * the ``ConfigLoader`` singleton is reset around every test
 """
 
 import builtins
@@ -29,11 +30,11 @@ from pathlib import Path
 import pytest
 
 from core.testing import TIME_BUDGET_SECONDS
+from tests._layer import LAYER_MARKERS, layer_of_path
 
 # ---------------------------------------------------------------------------
 # Marker registration
 # ---------------------------------------------------------------------------
-LAYER_MARKERS = ("unit", "integration", "golden")
 
 
 def pytest_configure(config):
@@ -43,31 +44,9 @@ def pytest_configure(config):
         )
 
 
-def _layer_of_path(path) -> str:
-    """Return the layer name for a test path.
-
-    Classification looks only at components under ``tests/`` so that a
-    checkout living in a directory named ``unit`` / ``integration`` /
-    ``golden`` is never misclassified.  Paths under ``tests/unit/``,
-    ``tests/integration/``, or ``tests/golden/`` map to their directory.
-    Legacy root-level files (``tests/test_*.py``) default to ``unit`` —
-    they are function-level and fast.
-    """
-    parts = Path(path).parts
-    if "tests" in parts:
-        parts = parts[parts.index("tests") + 1 :]
-    for layer in LAYER_MARKERS:
-        if layer in parts:
-            return layer
-    return "unit"
-
-
 # ---------------------------------------------------------------------------
-# Collection: auto-assign layer markers, remember items for the summary
+# Collection: auto-assign layer markers
 # ---------------------------------------------------------------------------
-_collected: list = []
-
-
 def pytest_collection_modifyitems(config, items):
     """Give every test its layer marker from directory location.
 
@@ -75,11 +54,9 @@ def pytest_collection_modifyitems(config, items):
     single place that stamps them.  Legacy root-level files (``tests/test_*.py``)
     default to the ``unit`` layer.
     """
-    _collected.clear()
-    _collected.extend(items)
     for item in items:
-        layer = _layer_of_path(item.fspath)
-        if layer and not any(m.name == layer for m in item.iter_markers()):
+        layer = layer_of_path(item.fspath)
+        if not any(m.name == layer for m in item.iter_markers()):
             item.add_marker(getattr(pytest.mark, layer))
 
 
@@ -91,7 +68,7 @@ _layer_elapsed: dict[str, float] = {layer: 0.0 for layer in LAYER_MARKERS}
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
-    layer = _layer_of_path(item.fspath)
+    layer = layer_of_path(item.fspath)
     start = time.perf_counter()
     yield
     _layer_elapsed[layer] += time.perf_counter() - start
@@ -115,11 +92,28 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 
 # ---------------------------------------------------------------------------
+# Test isolation: reset the ConfigLoader singleton around every test
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def reset_config_loader():
+    """Clear the ConfigLoader singleton before and after every test.
+
+    ``StorageManager`` caches ``ConfigLoader._config`` for the process;
+    without this reset, later tests see stale config.
+    """
+    from infra.storage import ConfigLoader
+
+    ConfigLoader.reset()
+    yield
+    ConfigLoader.reset()
+
+
+# ---------------------------------------------------------------------------
 # Hard rule: no network
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
-    """Block outbound socket connections for every test."""
+    """Block all outbound network access for every test (TCP, UDP, DNS)."""
 
     def _blocked(*_args, **_kwargs):
         raise RuntimeError(
@@ -130,12 +124,16 @@ def _no_network(monkeypatch):
     monkeypatch.setattr("socket.socket.connect", _blocked)
     monkeypatch.setattr("socket.socket.connect_ex", _blocked)
     monkeypatch.setattr("socket.create_connection", _blocked)
+    monkeypatch.setattr("socket.socket.sendto", _blocked)
+    monkeypatch.setattr("socket.getaddrinfo", _blocked)
+    monkeypatch.setattr("socket.gethostbyname", _blocked)
+    monkeypatch.setattr("socket.gethostbyname_ex", _blocked)
 
 
 # ---------------------------------------------------------------------------
 # Hard rule: no real config/.env reads
 # ---------------------------------------------------------------------------
-_REAL_ENV_PATH = Path(__file__).resolve().parent.parent / "config" / ".env"
+_REAL_ENV_PATH = (Path(__file__).resolve().parent.parent / "config" / ".env").resolve()
 
 
 @pytest.fixture(autouse=True)
@@ -143,13 +141,16 @@ def _no_real_env(monkeypatch):
     """Forbid opening the real ``config/.env``.
 
     Secrets tests write a fake ``.env`` under ``tmp_path`` and pass that path
-    explicitly — the default ``config/.env`` is never read.
+    explicitly — the default ``config/.env`` is never read.  Both the target
+    and the resolved real path are compared so a symlink at ``config/.env``
+    pointing at a secret file is also blocked.
     """
     real_open = builtins.open
 
     def _guarded_open(file, *args, **kwargs):
         try:
-            if Path(file).resolve() == _REAL_ENV_PATH:
+            resolved = Path(file).resolve()
+            if resolved == _REAL_ENV_PATH:
                 raise RuntimeError(
                     "reading the real config/.env is forbidden in tests — "
                     "write a fake under tmp_path and pass that path"
@@ -186,11 +187,26 @@ class _Clock:
         return self.today()
 
 
+def _trading_days(start: date, count: int) -> list[date]:
+    """Return ``count`` consecutive weekdays starting from ``start``."""
+    days: list[date] = []
+    d = start
+    while len(days) < count:
+        if d.weekday() < 5:  # Mon–Fri
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
 @pytest.fixture
 def fixed_dates() -> list[date]:
-    """Deterministic 60-day date sequence starting 2024-01-02 (clock double)."""
-    start = date(2024, 1, 2)
-    return [start + timedelta(days=i) for i in range(60)]
+    """Deterministic 60-trading-day date sequence starting 2024-01-02 (clock double).
+
+    Weekends are skipped — this is an A-share platform, and a clock double
+    that lands on Sat/Sun will make T+1 settlement and date-keyed joins
+    disagree with production.
+    """
+    return _trading_days(date(2024, 1, 2), 60)
 
 
 @pytest.fixture

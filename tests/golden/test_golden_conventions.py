@@ -8,6 +8,7 @@ assert the constants and layout the golden tests will depend on.
 import pytest
 
 from core.testing import TOLERANCE, TIME_BUDGET_SECONDS
+from tests._layer import layer_of_path
 
 pytestmark = pytest.mark.golden
 
@@ -56,8 +57,6 @@ class TestLayerPathClassification:
     """
 
     def test_classification_scoped_to_tests_components(self):
-        from tests.conftest import _layer_of_path
-
         cases = [
             ("/home/dev/Quant_Platform/tests/golden/test_x.py", "golden"),
             ("/home/dev/unit/Quant_Platform/tests/golden/test_x.py", "golden"),
@@ -65,4 +64,4 @@ class TestLayerPathClassification:
             ("/home/dev/integration/Quant_Platform/tests/golden/test_x.py", "golden"),
         ]
         for path, expected in cases:
-            assert _layer_of_path(path) == expected, f"{path} -> {expected}"
+            assert layer_of_path(path) == expected, f"{path} -> {expected}"

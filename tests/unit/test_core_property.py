@@ -21,13 +21,16 @@ from core.types import AssetType, QualityFlag
 # ---------------------------------------------------------------------------
 # Isolation for registry tests
 # ---------------------------------------------------------------------------
+def _clear_registries():
+    FactorRegistry._store.clear()
+    RuleRegistry._store.clear()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_registries():
-    FactorRegistry._store.clear()
-    RuleRegistry._store.clear()
+    _clear_registries()
     yield
-    FactorRegistry._store.clear()
-    RuleRegistry._store.clear()
+    _clear_registries()
 
 
 # ===========================================================================
@@ -62,8 +65,11 @@ class TestLoadConfigOverride:
         ),
     )
     def test_strategy_overrides_global_same_keys(self, shared, strat_extra, glob_extra):
+        # Give shared keys different values in each layer so the property
+        # actually tests override direction (same values would make
+        # global-wins and strategy-wins merge orders indistinguishable).
         strategy = {**shared, **strat_extra}
-        global_cfg = {**shared, **glob_extra}
+        global_cfg = {**{k: v + 10_000 for k, v in shared.items()}, **glob_extra}
 
         orig_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,7 +86,9 @@ class TestLoadConfigOverride:
 
         # Strategy values win on every same-named key.
         for k, v in shared.items():
-            assert merged[k] == v
+            assert merged[k] == v, (
+                f"strategy should override global on {k}: got {merged[k]}, want {v}"
+            )
         # Strategy-only keys join.
         for k, v in strat_extra.items():
             assert merged[k] == v
@@ -152,6 +160,7 @@ class TestRegistryDuplicateName:
         )
     )
     def test_factor_registry_reregister_raises(self, name):
+        _clear_registries()  # hypothesis runs many examples per call
         class First:
             pass
 
@@ -173,6 +182,7 @@ class TestRegistryDuplicateName:
         )
     )
     def test_rule_registry_reregister_raises(self, name):
+        _clear_registries()  # hypothesis runs many examples per call
         class First:
             pass
 
@@ -210,7 +220,7 @@ def test_fee_non_negative_and_sell_ge_buy(price, shares):
 @pytest.mark.skip(reason="module lands at S5: winsorize / zscore (PostProcessor)")
 @given(seed=st.integers(min_value=0, max_value=2**31 - 1))
 def test_zscore_cross_section_mean_std(seed):
-    """zscore 后 mean≈0, std≈1 (per cross-section).  Subject: S5 PostProcessor."""
+    """After zscore, mean≈0 and std≈1 per cross-section.  Subject: S5 PostProcessor."""
     from research.postprocess import zscore  # noqa: F811  (lands at S5)
 
     import numpy as np
