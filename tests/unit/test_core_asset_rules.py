@@ -7,9 +7,9 @@ from core.asset_rules import (
     ASSET_RULES,
     CALENDAR_EXCHANGES,
     EXCHANGE_MAP,
-    STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES,
+    STAMP_TAX_EXEMPT_PREFIXES,
     get_asset_rules,
-    is_stamp_tax_exempt_listed_fund,
+    is_stamp_tax_exempt_prefix,
     validate_equity_ticker,
     validate_futures_ticker,
 )
@@ -59,33 +59,57 @@ class TestGetAssetRules:
 
 
 class TestStampTaxExemptPrefixes:
-    def test_exact_five(self):
-        assert STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES == ("51", "56", "58", "15", "16")
+    """STAMP_TAX_EXEMPT_PREFIXES is derived from ASSET_PREFIXES + ASSET_RULES."""
 
-    def test_five_members(self):
-        assert len(STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES) == 5
+    def test_derived_set_nonempty(self):
+        assert isinstance(STAMP_TAX_EXEMPT_PREFIXES, frozenset)
+        assert len(STAMP_TAX_EXEMPT_PREFIXES) > 0
 
-    def test_shanghai_and_shenzhen(self):
-        assert "51" in STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES  # Shanghai ETF
-        assert "56" in STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES  # Shanghai ETF new segment
-        assert "58" in STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES  # Shanghai STAR ETF
-        assert "15" in STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES  # Shenzhen ETF
-        assert "16" in STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES  # Shenzhen LOF/ETF
+    def test_contains_all_etf_and_fund_prefixes(self):
+        for p, at in ASSET_PREFIXES.items():
+            exempt = not ASSET_RULES[at.value]["stamp_tax"]
+            assert (p in STAMP_TAX_EXEMPT_PREFIXES) == exempt, (
+                f"prefix {p} ({at.value}) mismatch: exempt={exempt}"
+            )
+
+    def test_stock_prefixes_not_exempt(self):
+        for p in ("60", "00", "30", "68", "83", "87", "43"):
+            assert p not in STAMP_TAX_EXEMPT_PREFIXES
 
 
-class TestIsStampTaxExemptListedFund:
-    def test_etf_prefixes(self):
-        assert is_stamp_tax_exempt_listed_fund("510300") is True
-        assert is_stamp_tax_exempt_listed_fund("560000") is True
-        assert is_stamp_tax_exempt_listed_fund("588000") is True
-        assert is_stamp_tax_exempt_listed_fund("159915") is True
-        assert is_stamp_tax_exempt_listed_fund("160119") is True  # Shenzhen LOF
+class TestStampTaxCrossCheck:
+    """Lock the gap: every prefix in ASSET_PREFIXES must agree with its
+    ASSET_RULES stamp_tax via STAMP_TAX_EXEMPT_PREFIXES (asset_rules.md:82)."""
+
+    def test_per_prefix_exemption_agrees_with_rules(self):
+        for p, at in ASSET_PREFIXES.items():
+            rules_exempt = not ASSET_RULES[at.value]["stamp_tax"]
+            in_derived = p in STAMP_TAX_EXEMPT_PREFIXES
+            assert rules_exempt == in_derived, (
+                f"prefix {p} ({at.value}): rules say exempt={rules_exempt} "
+                f"but derived set says {in_derived}"
+            )
+
+    def test_predicate_agrees_with_derived_set(self):
+        for p in ASSET_PREFIXES:
+            ticker = f"{p}00000"  # fake 6-digit code with that prefix
+            assert is_stamp_tax_exempt_prefix(ticker) == (p in STAMP_TAX_EXEMPT_PREFIXES)
+
+
+class TestIsStampTaxExemptPrefix:
+    def test_exempt_prefixes(self):
+        assert is_stamp_tax_exempt_prefix("510300") is True  # ETF
+        assert is_stamp_tax_exempt_prefix("560000") is True  # ETF
+        assert is_stamp_tax_exempt_prefix("588000") is True  # ETF
+        assert is_stamp_tax_exempt_prefix("159915") is True  # ETF
+        assert is_stamp_tax_exempt_prefix("160119") is True  # LOF
+        assert is_stamp_tax_exempt_prefix("501050") is True  # Shanghai LOF (prefix 50)
 
     def test_stock_not_exempt(self):
-        assert is_stamp_tax_exempt_listed_fund("600000") is False
-        assert is_stamp_tax_exempt_listed_fund("000001") is False
-        assert is_stamp_tax_exempt_listed_fund("300750") is False
-        assert is_stamp_tax_exempt_listed_fund("688001") is False
+        assert is_stamp_tax_exempt_prefix("600000") is False
+        assert is_stamp_tax_exempt_prefix("000001") is False
+        assert is_stamp_tax_exempt_prefix("300750") is False
+        assert is_stamp_tax_exempt_prefix("688001") is False
 
 
 class TestAssetRulesKeys:

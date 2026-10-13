@@ -9,14 +9,6 @@ import re
 from core.types import AssetType
 
 # ---------------------------------------------------------------------------
-# Stamp-tax-exempt listed-fund prefixes (gap #17)
-# ---------------------------------------------------------------------------
-# Shanghai 51/56/58 + Shenzhen 15/16.  Single source of truth —
-# ``execution/fee_model.py`` must import from here.  ``16`` covers Shenzhen LOF
-# as well as ETF.  Supersedes the old 51/15/16 in ``design/core/asset_rules.md``.
-STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES: tuple[str, ...] = ("51", "56", "58", "15", "16")
-
-# ---------------------------------------------------------------------------
 # ASSET_RULES — per-asset trading rules
 # ---------------------------------------------------------------------------
 ASSET_RULES: dict[str, dict] = {
@@ -63,12 +55,12 @@ def get_asset_rules(asset_type: str) -> dict:
     return ASSET_RULES[asset_type]
 
 
-def is_stamp_tax_exempt_listed_fund(ticker: str) -> bool:
-    """Return True when *ticker* is a stamp-tax-exempt listed fund.
+def is_stamp_tax_exempt_prefix(ticker: str) -> bool:
+    """Return True when *ticker*'s two-digit prefix is stamp-tax-exempt.
 
-    Matches Shanghai ETF segments (51/56/58) and Shenzhen ETF/LOF (15/16).
+    Checks against :data:`STAMP_TAX_EXEMPT_PREFIXES` (derived from the tables).
     """
-    return ticker[:2] in STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES
+    return ticker[:2] in STAMP_TAX_EXEMPT_PREFIXES
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +87,18 @@ ASSET_PREFIXES: dict[str, AssetType] = {
     "87": AssetType.STOCK,
     "43": AssetType.STOCK,  # V2 old third-board transfer
 }
+
+# ---------------------------------------------------------------------------
+# STAMP_TAX_EXEMPT_PREFIXES — derived, not maintained by hand (gap #17)
+# ---------------------------------------------------------------------------
+# Derived from ASSET_PREFIXES + ASSET_RULES: a prefix is stamp-tax-exempt
+# when its asset type's rules say stamp_tax is False.  Adding a prefix to
+# ASSET_PREFIXES is the single edit that makes this set follow.
+# ``execution/fee_model.py`` must import from here, not copy.
+STAMP_TAX_EXEMPT_PREFIXES: frozenset[str] = frozenset(
+    p for p, at in ASSET_PREFIXES.items()
+    if not ASSET_RULES[at.value]["stamp_tax"]
+)
 
 # ---------------------------------------------------------------------------
 # EXCHANGE_MAP — exchange code -> calendar / storage exchange name
