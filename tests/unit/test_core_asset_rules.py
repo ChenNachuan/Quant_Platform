@@ -1,12 +1,17 @@
-"""Tests for core.asset_rules — lookup table, prefix table, predicate."""
+"""Tests for core.asset_rules — lookup table, prefix table, validators."""
 
 import pytest
 
 from core.asset_rules import (
+    ASSET_PREFIXES,
     ASSET_RULES,
+    CALENDAR_EXCHANGES,
+    EXCHANGE_MAP,
     STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES,
     get_asset_rules,
     is_stamp_tax_exempt_listed_fund,
+    validate_equity_ticker,
+    validate_futures_ticker,
 )
 from core.types import AssetType
 
@@ -87,3 +92,69 @@ class TestAssetRulesKeys:
     def test_keys_match_asset_type_values(self):
         expected = {AssetType.STOCK.value, AssetType.ETF.value, AssetType.FUND.value}
         assert set(ASSET_RULES.keys()) == expected
+
+
+class TestValidateEquityTicker:
+    # Golden-sample ETFs (AGENTS.md §6) + representative stocks
+    def test_golden_sample_tickers_pass(self):
+        for t in ("510300.SH", "510500.SH", "588000.SH", "511010.SH", "159915.SZ"):
+            assert validate_equity_ticker(t), f"{t} should pass"
+
+    def test_shanghai_lof_passes_as_fund(self):
+        assert validate_equity_ticker("501050.SH") is True
+        assert ASSET_PREFIXES["50"] is AssetType.FUND
+
+    def test_invalid_tickers_fail(self):
+        assert validate_equity_ticker("999999.SH") is False  # unknown prefix
+        assert validate_equity_ticker("510300.XX") is False  # unknown exchange
+        assert validate_equity_ticker("510300") is False  # missing exchange
+
+    def test_various_stocks_pass(self):
+        for t in ("600000.SH", "000001.SZ", "300750.SZ", "688001.SH", "830799.BJ"):
+            assert validate_equity_ticker(t), f"{t} should pass"
+
+
+class TestValidateFuturesTicker:
+    def test_futures_shapes_pass(self):
+        for t in ("IF2406.CFFEX", "SC2412.INE", "AU2412.SHFE", "T2406.CFFEX"):
+            assert validate_futures_ticker(t), f"{t} should pass"
+
+    def test_futures_not_in_equity_prefixes(self):
+        # Futures product codes are NOT two-digit numeric prefixes
+        assert "IF" not in ASSET_PREFIXES
+        assert "SC" not in ASSET_PREFIXES
+        assert "AU" not in ASSET_PREFIXES
+
+    def test_invalid_futures_fail(self):
+        assert validate_futures_ticker("510300.SH") is False
+        assert validate_futures_ticker("IF2406.XX") is False
+
+
+class TestExchangeMap:
+    def test_ine_maps_to_ine(self):
+        assert EXCHANGE_MAP["INE"] == "ine"
+
+    def test_nine_keys(self):
+        assert len(EXCHANGE_MAP) == 9
+
+    def test_calendar_exchanges(self):
+        assert CALENDAR_EXCHANGES == set(EXCHANGE_MAP.values())
+
+    def test_all_values_are_lowercase(self):
+        for v in EXCHANGE_MAP.values():
+            assert v == v.lower()
+
+
+class TestAssetPrefixes:
+    def test_b_share_prefixes_absent(self):
+        # 90/20 deliberately excluded (V1 scope is stock + ETF)
+        assert "90" not in ASSET_PREFIXES
+        assert "20" not in ASSET_PREFIXES
+
+    def test_fund_prefixes(self):
+        assert ASSET_PREFIXES["50"] is AssetType.FUND
+        assert ASSET_PREFIXES["16"] is AssetType.FUND
+
+    def test_etf_prefixes(self):
+        for p in ("51", "56", "58", "15"):
+            assert ASSET_PREFIXES[p] is AssetType.ETF
