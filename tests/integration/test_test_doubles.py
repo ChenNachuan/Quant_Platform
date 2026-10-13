@@ -89,6 +89,34 @@ class TestEnvGuard:
         fake.write_text("API_KEY=test123\n")
         assert fake.read_text().strip() == "API_KEY=test123"
 
+    def test_late_symlink_is_caught(self, tmp_path):
+        """A symlink planted at config/.env AFTER module load must be caught.
+
+        Regression: resolving _REAL_ENV_PATH at module load meant a symlink
+        placed after import resolved to its target and never matched the
+        stale pre-resolved path — the guard must resolve both sides at
+        check time.  The symlink is planted at the real ``config/.env``
+        location because monkey-patching the module constant would hit a
+        different module object (pytest's plugin namespace vs
+        ``tests.conftest``) and would not exercise the running guard.
+        """
+        from pathlib import Path
+
+        real_env = Path(__file__).resolve().parent.parent.parent / "config" / ".env"
+        secret = tmp_path / "secret.env"
+        secret.write_text("KEY=real_secret\n")
+
+        # config/.env must not already exist (checked in; this test owns it).
+        assert not real_env.exists(), "config/.env unexpectedly exists"
+
+        # Plant the symlink LATE, after conftest module load.
+        real_env.symlink_to(secret)
+        try:
+            with pytest.raises(RuntimeError, match="forbidden"):
+                open(real_env)
+        finally:
+            real_env.unlink()
+
 
 class TestBudgetsRegistered:
     """The three layer budgets are the documented values."""

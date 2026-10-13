@@ -133,7 +133,7 @@ def _no_network(monkeypatch):
 # ---------------------------------------------------------------------------
 # Hard rule: no real config/.env reads
 # ---------------------------------------------------------------------------
-_REAL_ENV_PATH = (Path(__file__).resolve().parent.parent / "config" / ".env").resolve()
+_REAL_ENV_PATH = Path(__file__).resolve().parent.parent / "config" / ".env"
 
 
 @pytest.fixture(autouse=True)
@@ -141,16 +141,17 @@ def _no_real_env(monkeypatch):
     """Forbid opening the real ``config/.env``.
 
     Secrets tests write a fake ``.env`` under ``tmp_path`` and pass that path
-    explicitly — the default ``config/.env`` is never read.  Both the target
-    and the resolved real path are compared so a symlink at ``config/.env``
-    pointing at a secret file is also blocked.
+    explicitly — the default ``config/.env`` is never read.  Both sides are
+    resolved at check time (not at module load) so a symlink planted at
+    ``config/.env`` after import is caught too.
     """
     real_open = builtins.open
 
     def _guarded_open(file, *args, **kwargs):
         try:
             resolved = Path(file).resolve()
-            if resolved == _REAL_ENV_PATH:
+            real_resolved = _REAL_ENV_PATH.resolve()
+            if resolved == real_resolved:
                 raise RuntimeError(
                     "reading the real config/.env is forbidden in tests — "
                     "write a fake under tmp_path and pass that path"
