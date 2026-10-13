@@ -126,10 +126,10 @@ CALENDAR_EXCHANGES: set[str] = set(EXCHANGE_MAP.values())
 # ---------------------------------------------------------------------------
 # A-share equity: ``{code}.{exch}`` where code is exactly 6 digits and its
 # two-digit prefix is in ASSET_PREFIXES.  Replaces the retired L13 regex.
-_equity_re = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$")
+_equity_re = re.compile(r"^(\d{6})\.(SH|SZ|BJ)\Z")
 
 # Futures: product letters + month digits, e.g. IF2406, T2406, SC2412.
-_futures_re = re.compile(r"^([A-Z]{1,2})\d{4}\.(CFFEX|SHFE|DCE|CZCE|INE|GFEX)$")
+_futures_re = re.compile(r"^([A-Z]{1,2})\d{4}\.(CFFEX|SHFE|DCE|CZCE|INE|GFEX)\Z")
 
 
 def validate_equity_ticker(ticker: str) -> bool:
