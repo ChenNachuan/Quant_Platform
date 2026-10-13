@@ -46,11 +46,16 @@ def pytest_configure(config):
 def _layer_of_path(path) -> str:
     """Return the layer name for a test path.
 
-    Paths under ``tests/unit/``, ``tests/integration/``, or ``tests/golden/``
-    map to their directory.  Legacy root-level files (``tests/test_*.py``)
-    default to ``unit`` — they are function-level and fast.
+    Classification looks only at components under ``tests/`` so that a
+    checkout living in a directory named ``unit`` / ``integration`` /
+    ``golden`` is never misclassified.  Paths under ``tests/unit/``,
+    ``tests/integration/``, or ``tests/golden/`` map to their directory.
+    Legacy root-level files (``tests/test_*.py``) default to ``unit`` —
+    they are function-level and fast.
     """
     parts = Path(path).parts
+    if "tests" in parts:
+        parts = parts[parts.index("tests") + 1 :]
     for layer in LAYER_MARKERS:
         if layer in parts:
             return layer
@@ -64,11 +69,11 @@ _collected: list = []
 
 
 def pytest_collection_modifyitems(config, items):
-    """Give every skeleton test its layer marker from directory location.
+    """Give every test its layer marker from directory location.
 
     Existing tests under ``tests/unit/`` predate marker usage; this is the
-    single place that stamps them.  Tests outside the three layer directories
-    (legacy root-level files) get no marker and are reported at session end.
+    single place that stamps them.  Legacy root-level files (``tests/test_*.py``)
+    default to the ``unit`` layer.
     """
     _collected.clear()
     _collected.extend(items)
@@ -89,8 +94,7 @@ def pytest_runtest_protocol(item, nextitem):
     layer = _layer_of_path(item.fspath)
     start = time.perf_counter()
     yield
-    if layer is not None:
-        _layer_elapsed[layer] += time.perf_counter() - start
+    _layer_elapsed[layer] += time.perf_counter() - start
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

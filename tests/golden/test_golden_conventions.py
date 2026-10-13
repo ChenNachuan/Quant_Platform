@@ -5,8 +5,6 @@ lands at S2-T2 (QUANT-11) and is deliberately absent here.  These tests
 assert the constants and layout the golden tests will depend on.
 """
 
-from pathlib import Path
-
 import pytest
 
 from core.testing import TOLERANCE, TIME_BUDGET_SECONDS
@@ -35,20 +33,6 @@ class TestBudgets:
         assert TIME_BUDGET_SECONDS["integration"] < TIME_BUDGET_SECONDS["golden"]
 
 
-class TestGoldenDirectoryLayout:
-    """The golden directory exists but contains no fixture files yet (S2-T2)."""
-
-    def test_golden_dir_exists(self):
-        golden_dir = Path(__file__).parent
-        assert golden_dir.is_dir()
-
-    def test_no_fixture_files_yet(self):
-        """S2-T2 deliverables are explicitly absent from this PR."""
-        golden_dir = Path(__file__).parent
-        assert not (golden_dir / "golden_prices.parquet").exists()
-        assert not (golden_dir / "golden_expected.json").exists()
-
-
 class TestMarkerCompleteness:
     """DoD row 6: every collected test carries a layer marker (unit/integration/golden)."""
 
@@ -62,3 +46,23 @@ class TestMarkerCompleteness:
         assert not unmarked, (
             f"{len(unmarked)} test(s) missing layer marker: {unmarked}"
         )
+
+
+class TestLayerPathClassification:
+    """_layer_of_path classifies from components under tests/, not the absolute path.
+
+    A checkout living in a directory named ``unit`` / ``integration`` /
+    ``golden`` must not be misclassified.
+    """
+
+    def test_classification_scoped_to_tests_components(self):
+        from tests.conftest import _layer_of_path
+
+        cases = [
+            ("/home/dev/Quant_Platform/tests/golden/test_x.py", "golden"),
+            ("/home/dev/unit/Quant_Platform/tests/golden/test_x.py", "golden"),
+            ("/home/dev/golden/Quant_Platform/tests/test_legacy.py", "unit"),
+            ("/home/dev/integration/Quant_Platform/tests/golden/test_x.py", "golden"),
+        ]
+        for path, expected in cases:
+            assert _layer_of_path(path) == expected, f"{path} -> {expected}"
