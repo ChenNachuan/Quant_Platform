@@ -77,14 +77,29 @@ def _quality_flag_column() -> Column:
 # ---------------------------------------------------------------------------
 # Safe date / datetime coercion (code-review findings 1 & 2)
 # ---------------------------------------------------------------------------
+# Strings that look like missing values.  pandas' date parser silently maps
+# these to NaT ("" / "NaN" / "nan" / "NaT"), while "null" / "  " raise.  Both
+# halves of that split are wrong: garbage is an error, only real nulls pass.
+# QUANT-15 #3.
+_MISSING_LOOKING_TOKENS = frozenset({
+    "", "nan", "nat", "none", "null", "na", "n/a", "n.a.", "<na>", "<nat>",
+})
+
+
 def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
-    """Reject numeric dtypes and numeric/tz-aware elements in object columns.
+    """Reject numeric dtypes, tz-aware elements, and missing-looking strings
+    in object columns.
 
     Pandera's built-in ``coerce=True`` treats integer values as epoch
     seconds, so ``20240115`` silently becomes ``date(1970, 1, 1)``.  The
     first iteration of this guard only checked ``dtype.kind in "iub"``,
     which missed float64 (``20240115.0``) and object-dtype integers.
     Reject *values*, not just dtypes.
+
+    QUANT-15 #3: strings like ``""`` / ``"NaN"`` / ``"nan"`` / ``"NaT"``
+    silently became ``NaT`` while ``"null"`` / ``"  "`` raised.  All
+    missing-looking garbage is now rejected uniformly; real nulls
+    (``None`` / ``NaN`` / ``NaT``) still pass through ``dropna()``.
     """
     if series.dtype.kind in "iufb":
         if series.isna().all():
@@ -104,13 +119,27 @@ def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
                 )
             if getattr(val, "tzinfo", None) is not None:
                 raise ValueError(f"tz-aware value {val!r} in {kind} column not allowed")
+            if isinstance(val, str):
+                token = val.strip().lower()
+                if token in _MISSING_LOOKING_TOKENS:
+                    raise ValueError(
+                        f"missing-looking string {val!r} in {kind} column not allowed; "
+                        "pass None/NaN/NaT for missing values"
+                    )
 
 
 def _safe_date_parser(series: pd.Series) -> pd.Series:
-    """Convert to ``datetime.date``, rejecting numeric and tz-aware input.
+    """Convert to ``datetime.date``, rejecting numeric, tz-aware and
+    missing-looking input.
 
     Accepts only datetime64 / date / string.  Nulls are preserved as
     ``NaT`` so ``nullable=True`` columns pass through unchanged.
+
+    QUANT-15 #1: tz-annotated strings (``"2024-01-15 23:00:00+00:00"``) must
+    not silently take the literal date part — that is 2024-01-16 in Beijing.
+    We reject rather than convert: the design uses naive Beijing time, and
+    silently picking a timezone is exactly the kind of coercion this module
+    exists to prevent.
     """
     _reject_numeric_and_bad_objects(series, "date")
     mask = series.isna()
@@ -120,6 +149,12 @@ def _safe_date_parser(series: pd.Series) -> pd.Series:
             converted = pd.to_datetime(series[~mask], errors="raise")
         except (ValueError, TypeError) as exc:
             raise ValueError(f"cannot parse date column: {exc}") from exc
+        if getattr(converted.dtype, "tz", None) is not None:
+            raise ValueError(
+                "tz-aware input to date column not allowed "
+                "(design uses naive Beijing time); "
+                "pass a naive ISO date string or datetime.date"
+            )
         result[~mask] = converted.dt.date
     result[mask] = pd.NaT
     return result
@@ -414,7 +449,7 @@ INDUSTRY_SCHEMA = _table(
         "classification": Column(str, checks=_classification_check, nullable=False),
         "effective_date": _date_column(),
     },
-    unique=["ticker"],
+    unique=["ticker", "classification"],
 )
 
 # --- 10. corporate_actions — 10 cols, PK(ticker, ex_date, event_type) -----

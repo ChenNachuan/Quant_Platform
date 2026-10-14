@@ -292,6 +292,15 @@ def write_parquet_atomic(
         try:
             kwargs = {**PARQUET_WRITE_CONFIG, **parquet_kwargs}
             validated.to_parquet(tmp, **kwargs)
+            # fsync the tmp so its data is durable before the rename is
+            # visible.  Exception-atomicity is already guaranteed by
+            # os.replace; this is **durability** — without it a power cut
+            # can leave a present-but-truncated target (QUANT-15 #5).
+            fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
             os.replace(tmp, target)
         except BaseException:
             # Never leave a half-written file or a stray .tmp behind.

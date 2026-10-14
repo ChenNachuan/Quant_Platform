@@ -117,22 +117,30 @@ fi
 # on Linux `stat -f` means --file-system, so `-f %d` errors but still prints a
 # dump to stdout and a trailing fallback appends the real device id onto it —
 # the two sides then never compare equal and the guard silently never fires.
-device_of() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; }
+device_of() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null || true; }
 
 if [[ "${BACKUP_ALLOW_LOCAL_DEST:-0}" != "1" ]]; then
     dest_dev="$(device_of "${dest_abs}")"
     parent_dev="$(device_of "$(dirname "${dest_abs}")")"
     src_dev="$(device_of "${src_abs}")"
 
+    # Fail closed: if device_of cannot determine any device, the guards
+    # below would short-circuit on empty and silently skip — letting
+    # rsync --delete run without a mount-point or same-device check.
+    # Refuse rather than run a destructive sync unchecked (QUANT-15 #4).
+    if [[ -z "${dest_dev}" || -z "${parent_dev}" || -z "${src_dev}" ]]; then
+        die "cannot determine filesystem device (stat failed); refusing to run rsync --delete; set BACKUP_ALLOW_LOCAL_DEST=1 to override: ${DEST}"
+    fi
+
     # A same-device comparison against SRC does not mean "the disk is
     # mounted": if data_platform has its own volume and the external disk is
     # not mounted, the mountpoint falls back to the root filesystem — a
     # different device from SRC — and the comparison would pass.  Require
     # DEST to actually be a mount point.
-    if [[ -n "${dest_dev}" && -n "${parent_dev}" && "${dest_dev}" == "${parent_dev}" ]]; then
+    if [[ "${dest_dev}" == "${parent_dev}" ]]; then
         die "destination is not a mount point (is the external disk mounted there?); set BACKUP_ALLOW_LOCAL_DEST=1 to override: ${DEST}"
     fi
-    if [[ -n "${src_dev}" && -n "${dest_dev}" && "${src_dev}" == "${dest_dev}" ]]; then
+    if [[ "${src_dev}" == "${dest_dev}" ]]; then
         die "destination is on the same filesystem as source; set BACKUP_ALLOW_LOCAL_DEST=1 to override: ${DEST}"
     fi
 fi
