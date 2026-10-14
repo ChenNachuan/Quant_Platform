@@ -110,8 +110,8 @@ def _valid_row(table: str) -> dict:
             "announce_date": date(2024, 1, 10),
             "record_date": date(2024, 1, 14),
             "detail": "10派2.00",
-            "cash_dividend": 0.2, "stock_dividend": None,
-            "rights_price": None, "rights_ratio": None,
+            "cash_dividend": 0.2, "stock_dividend": float("nan"),
+            "rights_price": float("nan"), "rights_ratio": float("nan"),
         },
         "continuous": {
             "trade_date": D, "dominant_contract": "IF2601.CFFEX",
@@ -223,6 +223,27 @@ class TestWrongTypeRejected:
         with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
             SCHEMA["bars_daily"].validate(df)
 
+    def test_non_integral_float_for_int_rejected(self):
+        """Regression: coerce=True used to silently truncate 10.5 -> 10."""
+        df = _valid_df("bars_daily")
+        df["volume"] = 10.5
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["bars_daily"].validate(df)
+
+    def test_non_integral_float_quality_flag_rejected(self):
+        """Regression: coerce=True used to silently truncate 31.9 -> 31."""
+        df = _valid_df("bars_daily")
+        df["quality_flag"] = 31.9
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["bars_daily"].validate(df)
+
+    def test_integral_float_for_int_rejected(self):
+        """Float dtype in int column is rejected even when value is integral."""
+        df = _valid_df("bars_daily")
+        df["volume"] = 10.0
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["bars_daily"].validate(df)
+
 
 # ---------------------------------------------------------------------------
 # Rejection: wrong nullability
@@ -242,13 +263,13 @@ class TestWrongNullabilityRejected:
 
     def test_null_in_nullable_accepted(self):
         df = _valid_df("bars_daily")
-        df["turnover"] = None
+        df["turnover"] = float("nan")
         result = SCHEMA["bars_daily"].validate(df)
         assert pd.isna(result["turnover"].iloc[0])
 
     def test_null_in_nullable_pe_accepted(self):
         df = _valid_df("fundamental")
-        df["pe_ttm"] = None
+        df["pe_ttm"] = float("nan")
         result = SCHEMA["fundamental"].validate(df)
         assert pd.isna(result["pe_ttm"].iloc[0])
 
@@ -365,7 +386,7 @@ class TestFactorSchema:
         df = pd.DataFrame({
             "ticker": ["600519.SH"],
             "date": [D],
-            "momentum_20d": [None],
+            "momentum_20d": [float("nan")],
         })
         result = schema.validate(df)
         assert pd.isna(result["momentum_20d"].iloc[0])

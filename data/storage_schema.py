@@ -20,7 +20,10 @@ so that ``union_by_name=true`` reads of pre-addition files still validate.
 Implementation decisions (QUANT-12 §5, documented in the PR description):
 
 - ``trade_date`` datetime→date conversion happens **before** validation
-  (``coerce=True``): the schema asserts the stored type (``date``).
+  via column-level ``coerce=True`` on date/datetime columns only: the schema
+  asserts the stored type (``date``).  Numeric columns use ``coerce=False``
+  so non-integral floats in integer columns raise instead of silently
+  truncating (Review fix 2026-10-14).
 - Dates are ``datetime.date`` / Parquet ``DATE``, **not** VARCHAR.
 - Schema changes are recorded in ``schema_changelog.jsonl`` alongside git log.
 - Factor value column is named per-factor via :func:`factor_schema`;
@@ -118,14 +121,19 @@ TABLE_FAMILY: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _table(columns: dict, **kwargs) -> DataFrameSchema:
-    """Build a table schema with the standard coerce / strict policy."""
-    return DataFrameSchema(columns, coerce=True, strict=True, **kwargs)
+    """Build a table schema with the standard coerce / strict policy.
+
+    Schema-level coercion is **off** so that integer columns reject
+    non-integral floats instead of silently truncating them.  Date and
+    datetime columns carry ``coerce=True`` individually (§5 decision 1).
+    """
+    return DataFrameSchema(columns, coerce=False, strict=True, **kwargs)
 
 
 # --- 1. bars_daily — 14 cols, PK(ticker, trade_date) ------------------------
 BARS_DAILY_SCHEMA = _table({
     "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
     "open": Column(float, checks=_ohlcv_checks, nullable=False),
     "high": Column(float, checks=_ohlcv_checks, nullable=False),
     "low": Column(float, checks=_ohlcv_checks, nullable=False),
@@ -143,8 +151,8 @@ BARS_DAILY_SCHEMA = _table({
 # --- 2. bars_minute — 10 cols, no adjfactor, PK(ticker, trade_date, datetime)
 BARS_MINUTE_SCHEMA = _table({
     "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, nullable=False),
-    "datetime": Column(pa.DateTime, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
+    "datetime": Column(pa.DateTime, coerce=True, nullable=False),
     "open": Column(float, checks=_ohlcv_checks, nullable=False),
     "high": Column(float, checks=_ohlcv_checks, nullable=False),
     "low": Column(float, checks=_ohlcv_checks, nullable=False),
@@ -157,7 +165,7 @@ BARS_MINUTE_SCHEMA = _table({
 # --- 3. bars_daily_futures — 11 cols, settle/open_interest, no adjfactor ----
 BARS_DAILY_FUTURES_SCHEMA = _table({
     "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
     "open": Column(float, checks=_ohlcv_checks, nullable=False),
     "high": Column(float, checks=_ohlcv_checks, nullable=False),
     "low": Column(float, checks=_ohlcv_checks, nullable=False),
@@ -174,8 +182,8 @@ BARS_DAILY_FUTURES_SCHEMA = _table({
 # independent columns each, not list-typed.  7 base + 20 book + quality_flag.
 _tick_base: dict = {
     "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, nullable=False),
-    "datetime": Column(pa.DateTime, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
+    "datetime": Column(pa.DateTime, coerce=True, nullable=False),
     "last_price": Column(float, checks=_ohlcv_checks, nullable=False),
     "volume": Column(int, checks=_non_negative_checks, nullable=False),
     "amount": Column(float, checks=_non_negative_checks, nullable=False),
@@ -197,7 +205,7 @@ TICK_FUTURES_L2_SCHEMA = _table({
 # --- 5. fundamental — 11 cols, valuation ratios nullable -------------------
 FUNDAMENTAL_SCHEMA = _table({
     "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
     "total_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
     "float_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
     "pe_ttm": Column(float, nullable=True),
@@ -221,7 +229,7 @@ def factor_schema(value_column: str = "value") -> DataFrameSchema:
     """
     return _table({
         "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-        "date": Column(pa.Date, nullable=False),
+        "date": Column(pa.Date, coerce=True, nullable=False),
         value_column: Column(float, nullable=True),
     })
 
@@ -231,7 +239,7 @@ FACTOR_SCHEMA = factor_schema()
 
 # --- 7. calendar — 1 col, per-exchange file -------------------------------
 CALENDAR_SCHEMA = _table({
-    "trade_date": Column(pa.Date, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
 })
 
 # --- 8. contract_specs — 12 cols, futures contract metadata ---------------
@@ -241,8 +249,8 @@ CONTRACT_SPECS_SCHEMA = _table({
     "exchange": Column(str, nullable=False),
     "contract_multiplier": Column(float, checks=_ohlcv_checks, nullable=False),
     "price_tick": Column(float, checks=_ohlcv_checks, nullable=False),
-    "list_date": Column(pa.Date, nullable=False),
-    "expire_date": Column(pa.Date, nullable=False),
+    "list_date": Column(pa.Date, coerce=True, nullable=False),
+    "expire_date": Column(pa.Date, coerce=True, nullable=False),
     "delivery_month": Column(str, nullable=False),
     "price_limit_pct": Column(float, checks=_ohlcv_checks, nullable=False),
     "margin_rate": Column(float, checks=_ohlcv_checks, nullable=True),
@@ -257,16 +265,16 @@ INDUSTRY_SCHEMA = _table({
     "industry_l2": Column(str, nullable=False),
     "industry_l3": Column(str, nullable=True),
     "classification": Column(str, checks=_classification_check, nullable=False),
-    "effective_date": Column(pa.Date, nullable=False),
+    "effective_date": Column(pa.Date, coerce=True, nullable=False),
 })
 
 # --- 10. corporate_actions — 10 cols, PK(ticker, ex_date, event_type) -----
 CORPORATE_ACTIONS_SCHEMA = _table({
     "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "ex_date": Column(pa.Date, nullable=False),
+    "ex_date": Column(pa.Date, coerce=True, nullable=False),
     "event_type": Column(str, checks=_event_type_check, nullable=False),
-    "announce_date": Column(pa.Date, nullable=True),
-    "record_date": Column(pa.Date, nullable=True),
+    "announce_date": Column(pa.Date, coerce=True, nullable=True),
+    "record_date": Column(pa.Date, coerce=True, nullable=True),
     "detail": Column(str, nullable=False),
     "cash_dividend": Column(float, checks=_non_negative_checks, nullable=True),
     "stock_dividend": Column(float, checks=_non_negative_checks, nullable=True),
@@ -276,7 +284,7 @@ CORPORATE_ACTIONS_SCHEMA = _table({
 
 # --- 11. continuous — 11 cols, per-symbol file, no quality_flag -----------
 CONTINUOUS_SCHEMA = _table({
-    "trade_date": Column(pa.Date, nullable=False),
+    "trade_date": Column(pa.Date, coerce=True, nullable=False),
     "dominant_contract": Column(str, checks=_futures_ticker_check, nullable=False),
     "open": Column(float, checks=_ohlcv_checks, nullable=False),
     "high": Column(float, checks=_ohlcv_checks, nullable=False),
