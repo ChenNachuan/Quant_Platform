@@ -406,18 +406,36 @@ class TestCleanupExpired:
         return path
 
     def test_dry_run_default_deletes_nothing(self, tmp_path):
-        """DoD: cleanup_expired(dry_run=True) — file count unchanged."""
+        """A bare call must never delete — this pins the *default*, not the kwarg.
+
+        §3 forbids a 「不传就删」 path, so the unguarded call is the one that
+        has to hold.  Passing ``dry_run=True`` here would pass even if the
+        default flipped (Review finding 2).
+        """
         today = date(2024, 6, 1)
         old = self._make(tmp_path, "raw/src/eq/2020-01-01.parquet", mtime_days=400)
         recent = self._make(tmp_path, "raw/src/eq/2024-05-01.parquet", mtime_days=10)
+        before = sorted(p.name for p in tmp_path.rglob("*") if p.is_file())
+
+        removed = cleanup_expired(tmp_path, today=today)
+
+        after = sorted(p.name for p in tmp_path.rglob("*") if p.is_file())
+        assert before == after, "a bare cleanup_expired call must not change the file count"
+        assert old.exists() and recent.exists()
+        # it still reports what it *would* delete
+        assert removed == [old]
+
+    def test_explicit_dry_run_true_deletes_nothing(self, tmp_path):
+        """DoD row: cleanup_expired(dry_run=True) deletes nothing."""
+        today = date(2024, 6, 1)
+        old = self._make(tmp_path, "raw/src/eq/2020-01-01.parquet", mtime_days=400)
         before = sorted(p.name for p in tmp_path.rglob("*") if p.is_file())
 
         removed = cleanup_expired(tmp_path, dry_run=True, today=today)
 
         after = sorted(p.name for p in tmp_path.rglob("*") if p.is_file())
         assert before == after, "dry_run=True must not change the file count"
-        assert old.exists() and recent.exists()
-        # it still reports what it *would* delete
+        assert old.exists()
         assert removed == [old]
 
     def test_dry_run_false_deletes_only_expired(self, tmp_path):
@@ -511,13 +529,25 @@ class TestCleanupStaleResidue:
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
         os.utime(stale, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_tmp(tmp_path, max_age_hours=1)
+        removed = cleanup_stale_tmp(tmp_path, max_age_hours=1, dry_run=False)
 
         assert not stale.exists()
         assert fresh.exists(), "a live write's .tmp must not be swept"
         assert removed == [stale]
 
-    def test_stale_tmp_dry_run_deletes_nothing(self, tmp_path):
+    def test_stale_tmp_default_deletes_nothing(self, tmp_path):
+        """A bare call must never delete — pins the default, not the kwarg."""
+        stale = tmp_path / "2024-01-15.parquet.tmp"
+        stale.write_bytes(b"old")
+        old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
+        os.utime(stale, (old_stamp, old_stamp))
+
+        removed = cleanup_stale_tmp(tmp_path, max_age_hours=1)
+
+        assert stale.exists()
+        assert removed == [stale]
+
+    def test_stale_tmp_explicit_dry_run_true_deletes_nothing(self, tmp_path):
         stale = tmp_path / "2024-01-15.parquet.tmp"
         stale.write_bytes(b"old")
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
@@ -534,7 +564,7 @@ class TestCleanupStaleResidue:
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
         os.utime(data, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_tmp(tmp_path, max_age_hours=1)
+        removed = cleanup_stale_tmp(tmp_path, max_age_hours=1, dry_run=False)
 
         assert data.exists(), "only .tmp residue is swept"
         assert removed == []
@@ -547,13 +577,25 @@ class TestCleanupStaleResidue:
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
         os.utime(stale, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_locks(tmp_path, max_age_hours=1)
+        removed = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
 
         assert not stale.exists()
         assert fresh.exists()
         assert removed == [stale]
 
-    def test_stale_lock_dry_run_deletes_nothing(self, tmp_path):
+    def test_stale_lock_default_deletes_nothing(self, tmp_path):
+        """A bare call must never delete — pins the default, not the kwarg."""
+        stale = tmp_path / "2024-01-15.parquet.lock"
+        stale.write_bytes(b"old")
+        old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
+        os.utime(stale, (old_stamp, old_stamp))
+
+        removed = cleanup_stale_locks(tmp_path, max_age_hours=1)
+
+        assert stale.exists()
+        assert removed == [stale]
+
+    def test_stale_lock_explicit_dry_run_true_deletes_nothing(self, tmp_path):
         stale = tmp_path / "2024-01-15.parquet.lock"
         stale.write_bytes(b"old")
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
@@ -570,7 +612,7 @@ class TestCleanupStaleResidue:
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
         os.utime(data, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_locks(tmp_path, max_age_hours=1)
+        removed = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
 
         assert data.exists()
         assert removed == []

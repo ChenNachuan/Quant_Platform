@@ -361,7 +361,7 @@ def cleanup_stale_tmp(
     max_age_hours: float = STALE_MAX_AGE_HOURS,
     *,
     now: datetime | None = None,
-    dry_run: bool = False,
+    dry_run: bool = True,
 ) -> list[Path]:
     """Remove ``.tmp`` residue older than *max_age_hours*.
 
@@ -369,6 +369,10 @@ def cleanup_stale_tmp(
     is the other sweeper (§48: 残留 vs 过期).  A live write's tmp is younger
     than the write itself, so a single one-hour threshold is safe for every
     table (§5 decision 1).
+
+    ``dry_run`` defaults to **True**, like the other two ``cleanup_*``: a bare
+    call reports and deletes nothing, so there is no 「不传就删」 path (§3).
+    Production callers pass ``dry_run=False`` explicitly.
     """
     root = Path(root)
     removed: list[Path] = []
@@ -388,7 +392,7 @@ def cleanup_stale_locks(
     max_age_hours: float = STALE_MAX_AGE_HOURS,
     *,
     now: datetime | None = None,
-    dry_run: bool = False,
+    dry_run: bool = True,
 ) -> list[Path]:
     """Remove ``.lock`` residue older than *max_age_hours*.
 
@@ -396,6 +400,10 @@ def cleanup_stale_locks(
     cosmetic.  Kept separate from :func:`cleanup_stale_tmp` on purpose (§5
     decision 4): deleting a live lock breaks mutual exclusion, so it must
     never share a code path with a safe delete.
+
+    ``dry_run`` defaults to **True**, like the other two ``cleanup_*``: a bare
+    call reports and deletes nothing (§3).  Production callers pass
+    ``dry_run=False`` explicitly.
     """
     root = Path(root)
     removed: list[Path] = []
