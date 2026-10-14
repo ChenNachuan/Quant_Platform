@@ -380,27 +380,47 @@ class TestFileLock:
             assert removed == []
             assert lock.lock_path.exists(), "a held lock must never be deleted"
 
-    def test_cleanup_deletes_an_unheld_stale_lock(self, tmp_path):
+    def test_cleanup_never_unlinks_an_unheld_stale_lock(self, tmp_path):
+        """Lock files are never unlinked — not even a stale, unheld one.
+
+        Unlinking re-opens the two-holders race: FileLock.__enter__ does
+        os.open() before flock(), so a writer can hold the old inode without
+        having flocked yet.  This assertion is the mutation killer — if the
+        unlink branch comes back, the suite goes red here.
+        """
         lock_path = tmp_path / "2024-01-15.parquet.lock"
         lock_path.write_bytes(b"")
         old_stamp = (datetime.now() - timedelta(hours=5)).timestamp()
         os.utime(lock_path, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
+        found = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
 
-        assert removed == [lock_path]
-        assert not lock_path.exists()
+        assert found == [lock_path], "it is reported as residue"
+        assert lock_path.exists(), "but it must never be unlinked"
 
-    def test_cleanup_dry_run_reports_but_keeps_unheld_lock(self, tmp_path):
+    def test_cleanup_dry_run_reports_and_keeps_unheld_lock(self, tmp_path):
         lock_path = tmp_path / "2024-01-15.parquet.lock"
         lock_path.write_bytes(b"")
         old_stamp = (datetime.now() - timedelta(hours=5)).timestamp()
         os.utime(lock_path, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_locks(tmp_path, max_age_hours=1)
+        found = cleanup_stale_locks(tmp_path, max_age_hours=1)
 
-        assert removed == [lock_path]
+        assert found == [lock_path]
         assert lock_path.exists()
+
+    def test_cleanup_reports_not_held_and_ignores_fresh_locks(self, tmp_path):
+        stale = tmp_path / "2024-01-15.parquet.lock"
+        stale.write_bytes(b"")
+        fresh = tmp_path / "2024-01-16.parquet.lock"
+        fresh.write_bytes(b"")
+        old_stamp = (datetime.now() - timedelta(hours=5)).timestamp()
+        os.utime(stale, (old_stamp, old_stamp))
+
+        found = cleanup_stale_locks(tmp_path, max_age_hours=1)
+
+        assert found == [stale]
+        assert stale.exists() and fresh.exists()
 
     def test_different_targets_do_not_conflict(self, tmp_path):
         a = tmp_path / "2024-01-15.parquet"
@@ -637,7 +657,12 @@ class TestCleanupStaleResidue:
         assert data.exists(), "only .tmp residue is swept"
         assert removed == []
 
-    def test_stale_lock_deleted_fresh_lock_kept(self, tmp_path):
+    def test_stale_lock_reported_fresh_lock_ignored(self, tmp_path):
+        """Lock files are never unlinked, even with dry_run=False.
+
+        The sweep only *reports* residue; unlinking would hand out a second
+        exclusive holder because FileLock opens before it flocks.
+        """
         stale = tmp_path / "2024-01-15.parquet.lock"
         stale.write_bytes(b"old")
         fresh = tmp_path / "2024-01-16.parquet.lock"
@@ -645,11 +670,11 @@ class TestCleanupStaleResidue:
         old_stamp = (datetime.now() - timedelta(hours=3)).timestamp()
         os.utime(stale, (old_stamp, old_stamp))
 
-        removed = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
+        found = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
 
-        assert not stale.exists()
+        assert found == [stale]
+        assert stale.exists(), "the stale lock must be left in place"
         assert fresh.exists()
-        assert removed == [stale]
 
     def test_stale_lock_default_deletes_nothing(self, tmp_path):
         """A bare call must never delete — pins the default, not the kwarg."""
@@ -851,6 +876,15 @@ def _run_backup(src: Path, dest: Path, **env: str) -> subprocess.CompletedProces
     )
 
 
+def _real_rsync() -> str:
+    """Absolute path of the real rsync, for stubs that need to call it."""
+    import shutil as _shutil
+
+    path = _shutil.which("rsync")
+    assert path is not None, "rsync must be on PATH to test scripts/backup.sh"
+    return path
+
+
 def _make_data_platform(root: Path) -> Path:
     src = root / "data_platform"
     (src / "asset" / "bars_daily").mkdir(parents=True)
@@ -980,3 +1014,148 @@ class TestBackupScript:
         assert result.returncode == 0, result.stderr
         assert "counts match" in result.stdout
         assert "mismatch" not in result.stdout
+
+    def test_same_device_guard_fires_without_override(self, tmp_path):
+        """The same-device guard must actually fire — the whole point of it.
+
+        A `stat` portability bug once made this guard silently dead on Linux.
+        src and dest under one tmp_path are the same device, so without the
+        override the script must refuse.
+        """
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        result = _run_backup(src, dest, BACKUP_ALLOW_LOCAL_DEST="0")
+
+        assert result.returncode == 2
+        assert "same filesystem" in result.stderr
+        assert "BACKUP_ALLOW_LOCAL_DEST=1" in result.stderr
+
+    def test_device_of_returns_a_single_clean_token(self, tmp_path):
+        """A path-tainted or dump-polluted device id would make the two sides
+        never compare equal, disabling the guard."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        # Run just the device_of probe by asking the script to refuse on the
+        # same-device check and confirming the two ids it compared were clean.
+        result = _run_backup(src, dest, BACKUP_ALLOW_LOCAL_DEST="0")
+        assert result.returncode == 2
+        assert "dump" not in result.stderr.lower()
+        # the error names the DEST path only — no stray stat output in it
+        assert "Filesystem" not in result.stderr
+
+    def test_fresh_external_disk_with_fs_metadata_accepted(self, tmp_path):
+        """A freshly formatted external disk is never empty.
+
+        ext4 has lost+found; macOS has .Spotlight-V100 / .fseventsd / .Trashes.
+        The documented deployment is "rsync to a mounted external disk", so
+        the first backup must not be refused as a foreign tree.
+        """
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "fresh_disk"
+        dest.mkdir()
+        for name in (
+            "lost+found",
+            ".Spotlight-V100",
+            ".fseventsd",
+            ".Trashes",
+            ".TemporaryItems",
+            ".DS_Store",
+        ):
+            (dest / name).mkdir()
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 0, result.stderr
+        assert (dest / "asset" / "bars_daily" / "2024-01-15.parquet").exists()
+        assert "counts match" in result.stdout
+
+    def test_foreign_content_still_refused_after_fs_metadata(self, tmp_path):
+        """Ignoring fs metadata must not turn into ignoring everything."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "mostly_metadata"
+        dest.mkdir()
+        (dest / "lost+found").mkdir()
+        (dest / ".fseventsd").mkdir()
+        victim = dest / "important" / "notes.txt"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"do not delete me")
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "does not look like a previous backup" in result.stderr
+        assert victim.exists()
+
+    def test_count_tolerates_file_copied_mid_sync(self, tmp_path, monkeypatch):
+        """SRC is a live Parquet tree: a file landing mid-sync must not make a
+        successful backup report FAIL (second-review re-run medium 1).
+
+        dest_count ends up above the pre-sync src_count, which the old
+        equality check called a mismatch.
+        """
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "# real rsync, then a concurrent write lands in SRC and gets copied\n"
+            f'REAL="{_real_rsync()}"\n'
+            '"$REAL" "$@"\n'
+            f'echo late > "{src}/asset/bars_daily/2024-01-16.parquet"\n'
+            f'echo late > "{dest}/asset/bars_daily/2024-01-16.parquet"\n'
+        )
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "counts match" in result.stdout
+
+    def test_count_tolerates_file_landing_after_sync_listing(self, tmp_path):
+        """A file that lands too late to be copied must not FAIL either."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f'REAL="{_real_rsync()}"\n'
+            '"$REAL" "$@"\n'
+            f'echo late > "{src}/asset/bars_daily/2024-01-17.parquet"\n'
+        )
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "counts match" in result.stdout
+
+    def test_partial_sync_still_fails_the_lower_bound(self, tmp_path):
+        """The moving-target tolerance must not swallow real data loss."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "# copy only one of the two source files — a partial sync\n"
+            f'mkdir -p "{dest}/asset/bars_daily"\n'
+            f'cp "{src}/asset/bars_daily/2024-01-15.parquet" "{dest}/asset/bars_daily/"\n'
+        )
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 1
+        assert "lost files" in result.stderr

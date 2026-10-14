@@ -398,8 +398,9 @@ def _try_exclusive_lock(path: Path) -> int | None:
     """Acquire ``flock(LOCK_EX | LOCK_NB)`` on *path*, returning the fd.
 
     Returns ``None`` when the lock is already held or the file is gone.  The
-    caller owns a returned fd and must unlock and close it — and should hold
-    it across any unlink so no writer can slip in on the old inode.
+    caller owns a returned fd and must unlock and close it.  This is a
+    *probe* — it distinguishes live writers from residue.  It is not, and
+    must never become, a prelude to unlinking the lock file.
     """
     try:
         fd = os.open(path, os.O_RDWR)
@@ -420,26 +421,38 @@ def cleanup_stale_locks(
     now: datetime | None = None,
     dry_run: bool = True,
 ) -> list[Path]:
-    """Remove ``.lock`` residue older than *max_age_hours*.
+    """Report unheld ``.lock`` residue older than *max_age_hours*. Never deletes.
 
-    A lock file's mtime is its **creation** time and never refreshes while
-    the lock is held, so age alone cannot tell a crashed run's residue from a
-    write that has simply been running for hours.  Deleting the latter hands
-    out a second exclusive holder on the same target — exactly what must not
-    happen.  So a lock is only ever removed while this function itself holds
-    its exclusive ``flock``; a lock it cannot acquire is left alone no matter
-    how old it is.
+    **Lock files are never unlinked — by this function or any other.**  The
+    lock file is a permanent inode and the ``flock`` on it is the only mutex
+    (:class:`FileLock`).  Unlinking re-opens a two-holders race no matter how
+    carefully it is sequenced, because ``FileLock.__enter__`` does
+    ``os.open()`` *before* ``flock()``: a writer can hold inode I without
+    yet having flocked, the unlink removes the name, that writer then flocks
+    the orphaned I, and a second writer ``O_CREAT``s I2 and flocks that.
+    Two exclusive holders on the same target.
 
-    Kept separate from :func:`cleanup_stale_tmp` on purpose (§5 decision 4):
-    deleting a live lock breaks mutual exclusion, so it must never share a
-    code path with a safe delete.
+    Holding the flock across an unlink does not close that window — it only
+    narrows it.  And since a lock file's mtime is its **creation** time and
+    never refreshes while held, an unheld stale lock is the common case, so
+    any unlink path here is reachable in practice rather than theoretical.
 
-    ``dry_run`` defaults to **True**, like the other two ``cleanup_*``: a bare
-    call reports and deletes nothing (§3).  Production callers pass
-    ``dry_run=False`` explicitly.
+    Unlinking also buys nothing: the file is empty residue, and ``flock``
+    drops on process death regardless.  So this function reports and stops.
+    A stale lock file is cheap to leave behind; a second writer on the same
+    day is not.
+
+    A lock is reported only if it is genuinely unheld, so the list separates
+    real residue from a write that has simply been running for hours.
+
+    ``dry_run`` is kept for signature symmetry with the other two
+    ``cleanup_*``; this function never deletes, so it has no effect.
+
+    Returns the stale, unheld lock files — candidates a human may tidy by
+    hand.  Nothing is removed either way.
     """
     root = Path(root)
-    removed: list[Path] = []
+    found: list[Path] = []
     for path in _iter_files(root):
         if not path.name.endswith(_LOCK_SUFFIX):
             continue
@@ -447,16 +460,14 @@ def cleanup_stale_locks(
             continue
         fd = _try_exclusive_lock(path)
         if fd is None:
-            # Held by a live writer (or already gone).  Never delete it.
+            # Held by a live writer (or already gone).  Not residue.
             continue
         try:
-            removed.append(path)
-            if not dry_run:
-                path.unlink(missing_ok=True)
+            found.append(path)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-    return removed
+    return found
 
 
 # ---------------------------------------------------------------------------

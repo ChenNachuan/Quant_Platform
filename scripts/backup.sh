@@ -52,8 +52,8 @@ count_files() {
         | wc -l | tr -d ' '
 }
 
-src_count="$(count_files "${SRC}")"
-[[ "${src_count}" -gt 0 ]] \
+src_count_before="$(count_files "${SRC}")"
+[[ "${src_count_before}" -gt 0 ]] \
     || die "source holds no backable files (after excluding *.tmp/*.lock): ${SRC}"
 
 # --- DEST guards ----------------------------------------------------------
@@ -71,15 +71,38 @@ case "${src_abs}/" in "${dest_abs}/"*) die "source is inside destination: ${SRC}
 
 # A non-empty DEST must already look like a previous backup.  A mistyped DEST
 # pointing at an unrelated tree would otherwise be erased by --delete.
-if [[ -n "$(ls -A "${DEST}" 2>/dev/null)" ]]; then
+# Filesystem metadata is not content: a freshly formatted external disk always
+# carries lost+found / .Spotlight-V100 / .fseventsd / .Trashes and friends, and
+# the documented deployment is exactly "rsync to a mounted external disk".
+# find -name matches the basename literally, so the dollar signs and dots are
+# not regex metacharacters here.
+dest_real_count="$(find "${DEST}" -mindepth 1 -maxdepth 1 \
+    ! -name 'lost+found' \
+    ! -name 'System Volume Information' \
+    ! -name '$RECYCLE.BIN' \
+    ! -name '.Trash' \
+    ! -name '.DS_Store' \
+    ! -name '.Spotlight-V100' \
+    ! -name '.fseventsd' \
+    ! -name '.Trashes' \
+    ! -name '.TemporaryItems' \
+    ! -name '.DocumentRevisions-V100' \
+    ! -name '.BC' \
+    -print | wc -l | tr -d ' ')"
+if [[ "${dest_real_count}" -gt 0 ]]; then
     [[ -d "${DEST}/asset" || -d "${DEST}/raw" || -d "${DEST}/factors" ]] \
-        || die "destination is not empty and does not look like a previous backup: ${DEST}"
+        || die "destination has content that does not look like a previous backup: ${DEST}"
 fi
 
 # --- DEST must be on a different filesystem than SRC ----------------------
 # The design assumes an external disk.  Same-device DEST is the unmounted-
 # disk case, so it is refused unless deliberately allowed.
-device_of() { stat -f %d "$1" 2>/dev/null || stat -c %d "$1" 2>/dev/null; }
+#
+# GNU stat first (`-c`), BSD/macOS fallback (`-f`).  The order is load-bearing:
+# on Linux `stat -f` means --file-system, so `-f %d` errors but still prints a
+# dump to stdout and a trailing fallback appends the real device id onto it —
+# the two sides then never compare equal and the guard silently never fires.
+device_of() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; }
 if [[ "${BACKUP_ALLOW_LOCAL_DEST:-0}" != "1" ]]; then
     src_dev="$(device_of "${src_abs}")"
     dest_dev="$(device_of "${dest_abs}")"
@@ -95,11 +118,23 @@ rsync -a --delete \
     "${src_abs}/" "${dest_abs}/"
 
 # File-count comparison (§51).  Same exclusion semantics as the rsync above.
+#
+# SRC is a live Parquet tree, so both sides are sampled AFTER the sync and the
+# check is two-sided rather than an equality:
+#   dest_count >= src_count_before   nothing that existed at start was lost
+#   dest_count <= src_count          nothing appeared on DEST that SRC lacks
+# A file landing mid-sync therefore cannot turn a successful backup into a
+# FAIL, while a genuinely partial sync still fails the lower bound.
+src_count="$(count_files "${src_abs}")"
 dest_count="$(count_files "${dest_abs}")"
 
-echo "backup.sh: source files=${src_count} dest files=${dest_count}"
-if [[ "${src_count}" != "${dest_count}" ]]; then
-    echo "backup.sh: FAIL — file count mismatch (source=${src_count} dest=${dest_count})" >&2
+echo "backup.sh: source files=${src_count} dest files=${dest_count} (pre-sync ${src_count_before})"
+if [[ "${dest_count}" -lt "${src_count_before}" ]]; then
+    echo "backup.sh: FAIL — destination lost files (source-before=${src_count_before} dest=${dest_count})" >&2
+    exit 1
+fi
+if [[ "${dest_count}" -gt "${src_count}" ]]; then
+    echo "backup.sh: FAIL — destination has files source does not (source=${src_count} dest=${dest_count})" >&2
     exit 1
 fi
 
