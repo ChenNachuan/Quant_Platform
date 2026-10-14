@@ -498,6 +498,9 @@ def compute_all_safe(
 
     Returns ``(results, errors)`` where *errors* maps factor name → exception
     (or a ``RuntimeError`` explaining that an upstream dependency failed).
+
+    *max_workers* is reserved for when the layer-parallel executor is
+    selected; execution is sequential for now, matching :func:`compute_all`.
     """
     results: dict[str, pd.DataFrame] = {}
     errors: dict[str, Exception] = {}
