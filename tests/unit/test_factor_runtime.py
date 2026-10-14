@@ -227,6 +227,28 @@ class CausalFactor(Factor):
         return df[["date", "ticker", "causal_return"]].dropna()
 
 
+class StampFactor(Factor):
+    """Stamps every row with the compute() call number.
+
+    Lets a test see whether a result's rows came from a previous call's
+    cached frame (append) or from a fresh compute (full).  Deterministic
+    factors cannot show that — both branches would produce equal values.
+    """
+
+    name = "stamp_factor"
+    category = "time_series"
+    calls = 0
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        StampFactor.calls += 1
+        df = data["bars_daily"][["date", "ticker"]].copy()
+        df["stamp_factor"] = float(StampFactor.calls)
+        return df
+
+
 # ---------------------------------------------------------------------------
 # FactorDAG — registration and topological ordering
 # ---------------------------------------------------------------------------
@@ -328,21 +350,79 @@ class TestCacheKey:
         assert result is not None
 
     def test_append_mode(self):
+        # Phase 1 — prove the append branch actually fired: the short-range
+        # rows must still carry call 1's stamp (reused from cache), while the
+        # new tail rows carry call 2's stamp.  A full recompute would restamp
+        # every row with 2.0, and a no-op cache hit would not extend at all.
+        StampFactor.calls = 0
         dag = FactorDAG(data_loader=_synthetic_loader)
-        dag.register(SimpleReturn())
-        # First compute over a shorter range.
-        short = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-04")
-        assert len(short) > 0
-        # Then extend the range — should append, not full-recompute.
-        full = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
-        assert len(full) > len(short)
-        # History from the short run is preserved.
-        merged = short.merge(full, on=["date", "ticker"], suffixes=("_s", "_f"))
+        dag.register(StampFactor())
+        short = compute_factor(dag, "stamp_factor", "2024-01-02", "2024-01-04")
+        extended = compute_factor(dag, "stamp_factor", "2024-01-02", "2024-01-08")
+        assert len(extended) > len(short)
+        prefix = extended.loc[extended["date"] <= "2024-01-04", "stamp_factor"]
+        tail = extended.loc[extended["date"] > "2024-01-04", "stamp_factor"]
+        assert len(tail) > 0
+        assert set(prefix.unique()) == {1.0}, "cached prefix was recomputed"
+        assert set(tail.unique()) == {2.0}, "tail was not freshly computed"
+
+        # Phase 2 — the appended tail is value-correct for a lookback factor
+        # (pct_change needs the day before the tail to be right).  Compare
+        # the whole extended frame against a fresh full compute on a clean
+        # DAG — including rows the old test never looked at.
+        dag2 = FactorDAG(data_loader=_synthetic_loader)
+        dag2.register(SimpleReturn())
+        short2 = compute_factor(dag2, "returns_1d", "2024-01-02", "2024-01-04")
+        extended2 = compute_factor(dag2, "returns_1d", "2024-01-02", "2024-01-08")
+        dag3 = FactorDAG(data_loader=_synthetic_loader)
+        dag3.register(SimpleReturn())
+        fresh = compute_factor(
+            dag3, "returns_1d", "2024-01-02", "2024-01-08", force=True
+        )
+        # History from the short run is preserved exactly ...
+        merged = short2.merge(extended2, on=["date", "ticker"], suffixes=("_s", "_f"))
+        assert len(merged) == len(short2)
         assert np.allclose(
             merged["returns_1d_s"].values,
             merged["returns_1d_f"].values,
             equal_nan=True,
         )
+        # ... and the tail rows match a fresh full compute.
+        tail2 = extended2.loc[extended2["date"] > "2024-01-04"]
+        fresh_tail = fresh.loc[fresh["date"] > "2024-01-04"]
+        tail_cmp = tail2.merge(
+            fresh_tail, on=["date", "ticker"], suffixes=("_a", "_f"), how="outer"
+        )
+        assert len(tail_cmp) == len(fresh_tail) == len(tail2)
+        assert np.allclose(
+            tail_cmp["returns_1d_a"].values,
+            tail_cmp["returns_1d_f"].values,
+            equal_nan=True,
+        )
+
+    def test_append_rejected_on_upstream_revision(self):
+        # Compute a short range on unshifted data, then revise the upstream
+        # values and extend the range.  The cached prefix is stale, so append
+        # must not fire — the whole range is recomputed and every row (the
+        # prefix included) carries the new call's stamp.
+        StampFactor.calls = 0
+        shifted = {"on": False}
+
+        def loader(table_name: str, start: str, end: str) -> pd.DataFrame:
+            df = _synthetic_loader(table_name, start, end)
+            if shifted["on"]:
+                df = df.copy()
+                df["close"] = df["close"] + 99.0
+            return df
+
+        dag = FactorDAG(data_loader=loader)
+        dag.register(StampFactor())
+        compute_factor(dag, "stamp_factor", "2024-01-02", "2024-01-04")
+        assert StampFactor.calls == 1
+        shifted["on"] = True
+        extended = compute_factor(dag, "stamp_factor", "2024-01-02", "2024-01-08")
+        assert StampFactor.calls == 2  # full recompute, not append
+        assert set(extended["stamp_factor"].unique()) == {2.0}
 
     def test_depends_hash_changes_with_data(self):
         factor = SimpleReturn()
@@ -352,6 +432,27 @@ class TestCacheKey:
         hash2 = compute_depends_hash(factor, data2)
         assert hash1 != hash2
         assert len(hash1) == 12
+
+    def test_depends_hash_changes_with_content(self):
+        # Same shape (row count, date range, columns), different values —
+        # the fingerprint must see the content, not just the shape.
+        factor = SimpleReturn()
+        data1 = {"bars_daily": _make_bars("2024-01-02", "2024-01-08")}
+        data2 = {"bars_daily": _make_bars("2024-01-02", "2024-01-08")}
+        assert data1["bars_daily"].shape == data2["bars_daily"].shape
+        data2["bars_daily"] = data2["bars_daily"].copy()
+        data2["bars_daily"]["close"] = data2["bars_daily"]["close"] + 99.0
+        hash1 = compute_depends_hash(factor, data1)
+        hash2 = compute_depends_hash(factor, data2)
+        assert hash1 != hash2
+
+    def test_depends_hash_stable_for_identical_content(self):
+        factor = SimpleReturn()
+        data1 = {"bars_daily": _make_bars("2024-01-02", "2024-01-08")}
+        data2 = {"bars_daily": _make_bars("2024-01-02", "2024-01-08")}
+        assert compute_depends_hash(factor, data1) == compute_depends_hash(
+            factor, data2
+        )
 
 
 # ---------------------------------------------------------------------------

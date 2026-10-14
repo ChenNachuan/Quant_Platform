@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 from collections import deque
-from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import pandas as pd
@@ -231,12 +230,31 @@ class FactorDAG:
 # ---------------------------------------------------------------------------
 
 
+def _dataframe_fingerprint(df: pd.DataFrame) -> str:
+    """Value-sensitive digest of a DataFrame's contents.
+
+    Row-wise value hashes (``pandas.util.hash_pandas_object``, index
+    excluded) over the frame's natural row order, plus a schema signature
+    of column names and dtypes.  Same shape with different values digests
+    differently — the fingerprint is of the content, not of the shape.
+    """
+    if df is None:
+        return "missing"
+    if df.empty:
+        return "empty"
+    row_hashes = pd.util.hash_pandas_object(df, index=False).to_numpy()
+    schema = ",".join(f"{c}:{df[c].dtype}" for c in df.columns)
+    raw = schema + "|" + hashlib.md5(row_hashes.tobytes()).hexdigest()
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
 def compute_depends_hash(factor: Factor, data: dict[str, pd.DataFrame]) -> str:
     """Compute a 12-char md5 fingerprint of the factor's dependency contents.
 
     For each dependency (sorted by name) the fingerprint includes the
-    dependency name, its row count, and its ``max(date)``.  The parts are
-    joined with ``|`` and hashed — first 12 hex chars of the md5.
+    dependency name and a value-sensitive digest of its rows.  Two data
+    dicts with the same shape but different values produce different
+    hashes; the same values always produce the same hash.
     """
     parts: list[str] = []
     for dep in sorted(factor.depends_on()):
@@ -244,9 +262,7 @@ def compute_depends_hash(factor: Factor, data: dict[str, pd.DataFrame]) -> str:
         if df is None:
             parts.append(f"{dep}:missing:")
             continue
-        row_count = len(df)
-        max_date = str(df["date"].max()) if "date" in df.columns and not df.empty else ""
-        parts.append(f"{dep}:{row_count}:{max_date}")
+        parts.append(f"{dep}:{_dataframe_fingerprint(df)}")
     raw = "|".join(parts)
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
@@ -292,23 +308,52 @@ def _make_cache_key(
     return (name, version, (str(start), str(end)), depends_hash)
 
 
+def _slice_data_to_range(
+    data: dict[str, pd.DataFrame],
+    start: str,
+    end: str,
+) -> dict[str, pd.DataFrame]:
+    """Subset each dependency frame to rows whose date falls in ``[start, end]``."""
+    start10, end10 = str(start)[:10], str(end)[:10]
+    sliced: dict[str, pd.DataFrame] = {}
+    for dep, df in data.items():
+        if df is None or "date" not in getattr(df, "columns", []):
+            sliced[dep] = df
+            continue
+        dates = df["date"].astype(str).str[:10]
+        sliced[dep] = df.loc[(dates >= start10) & (dates <= end10)]
+    return sliced
+
+
 def _find_append_candidate(
     dag: FactorDAG,
-    name: str,
-    version: str,
-    depends_hash: str,
+    factor: Factor,
+    data: dict[str, pd.DataFrame],
     start: str,
     end: str,
 ) -> tuple[CacheKey, pd.DataFrame] | None:
-    """Find a cache entry with same (name, version, depends_hash) that covers
-    ``[start, X]`` where ``X < end`` — the append candidate.
+    """Find a cache entry covering ``[start, X]`` with ``X < end`` whose
+    dependency content over its own range is still unchanged.
+
+    The cached key's ``depends_hash`` was computed over the *cached* range,
+    so it is compared against the hash of the current *data* sliced to that
+    same range — not against the hash of the full requested range.  A pure
+    range extension therefore matches, while an upstream revision (values
+    changed under the same dates) does not and falls through to full.
     """
+    start_s, end_s = str(start), str(end)
     for key, df in dag._cache.items():
         c_name, c_version, c_range, c_hash = key
-        if c_name == name and c_version == version and c_hash == depends_hash:
-            c_start, c_end = c_range
-            if c_start == start and c_end < end:
-                return key, df
+        if c_name != factor.name or c_version != factor.version:
+            continue
+        c_start, c_end = c_range
+        if c_start != start_s or not (c_end < end_s):
+            continue
+        prefix_hash = compute_depends_hash(
+            factor, _slice_data_to_range(data, c_start, c_end)
+        )
+        if prefix_hash == c_hash:
+            return key, df
     return None
 
 
@@ -324,10 +369,11 @@ def compute_factor(
     Three modes:
 
     - **cache hit** — exact key match and ``force=False`` → return cached
-    - **append** — same (name, version, depends_hash) cached for a shorter
-      range ending before *end* → compute only the delta and append
-    - **full** — no cache, ``force=True``, or version change (different key)
-      → compute the full range
+    - **append** — same (name, version) cached for a shorter range starting
+      at *start*, with dependency content over that range unchanged →
+      reuse the cached prefix and compute the tail
+    - **full** — no cache, ``force=True``, version change, or an upstream
+      revision under the cached range → compute the full range
 
     The cache key is exactly ``(name, version, date_range, depends_hash)``.
     """
@@ -344,19 +390,22 @@ def compute_factor(
     if not force and key in dag._cache:
         return dag._cache[key]
 
-    # 2. Append: same identity (name, version, hash), shorter cached range.
+    # 2. Append: same identity (name, version) with unchanged dependency
+    #    content over a shorter cached range → reuse that prefix, compute
+    #    the tail.
     if not force:
-        candidate = _find_append_candidate(
-            dag, factor.name, factor.version, dep_hash, start, end
-        )
+        candidate = _find_append_candidate(dag, factor, data, start, end)
         if candidate is not None:
             _old_key, cached_df = candidate
             _c_start, c_end = _old_key[2]
-            # Compute the missing tail (next day after cached end).
-            tail_start = _next_day(c_end)
-            tail_data = _assemble_data(dag, factor, tail_start, end)
-            tail_result = factor.compute(tail_data)
+            # Compute over the full assembled range so lookback factors
+            # (pct_change, rolling windows) see the history a full compute
+            # would give them, then keep only the rows past the cached end.
+            # The prefix itself is taken from the cache, bit-identical.
+            tail_result = factor.compute(data)
             validate_output(factor.name, tail_result)
+            tail_dates = tail_result["date"].astype(str).str[:10]
+            tail_result = tail_result.loc[tail_dates > c_end[:10]]
             result = pd.concat([cached_df, tail_result])
             result = result.drop_duplicates(["date", "ticker"])
             result = result.sort_values(["date", "ticker"]).reset_index(drop=True)
@@ -368,12 +417,6 @@ def compute_factor(
     validate_output(factor.name, result)
     dag._cache[key] = result
     return result
-
-
-def _next_day(date_str: str) -> str:
-    """Return the calendar day after *date_str* (ISO format preserved)."""
-    dt = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
-    return (dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
