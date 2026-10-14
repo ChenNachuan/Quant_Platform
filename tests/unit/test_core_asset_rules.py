@@ -97,6 +97,9 @@ class TestStampTaxCrossCheck:
 
 
 class TestIsStampTaxExemptPrefix:
+    # Input contract: canonical input is the full ticker CODE.EXCH; the
+    # predicate only reads [:2], so a 6-char code and a 2-char prefix give
+    # the same answer. Callers (e.g. FeeModel) pass CODE.EXCH.
     def test_exempt_prefixes(self):
         assert is_stamp_tax_exempt_prefix("510300") is True  # ETF
         assert is_stamp_tax_exempt_prefix("560000") is True  # ETF
@@ -104,6 +107,10 @@ class TestIsStampTaxExemptPrefix:
         assert is_stamp_tax_exempt_prefix("159915") is True  # ETF
         assert is_stamp_tax_exempt_prefix("160119") is True  # LOF
         assert is_stamp_tax_exempt_prefix("501050") is True  # Shanghai LOF (prefix 50)
+
+    def test_full_ticker_input_contract(self):
+        # Canonical form CODE.EXCH must work — FeeModel passes this shape.
+        assert is_stamp_tax_exempt_prefix("501050.SH") is True
 
     def test_stock_not_exempt(self):
         assert is_stamp_tax_exempt_prefix("600000") is False
@@ -119,7 +126,9 @@ class TestAssetRulesKeys:
 
 
 class TestValidateEquityTicker:
-    # Golden-sample ETFs (AGENTS.md §6) + representative stocks
+    # Representative ETF tickers (validator smoke test) + representative stocks.
+    # Not the platform golden-sample pool — gap #4 is still open (its third
+    # ticker is 518880 gold ETF; this smoke list uses 588000 STAR50).
     def test_golden_sample_tickers_pass(self):
         for t in ("510300.SH", "510500.SH", "588000.SH", "511010.SH", "159915.SZ"):
             assert validate_equity_ticker(t), f"{t} should pass"
