@@ -166,6 +166,8 @@ class DataAPI:
             # Jupyter long-session reconnect: one retry after reconnect.
             logger.warning("DuckDB connection lost; reconnecting once")
             self.reconnect()
+            if profile:
+                self._conn.execute("PRAGMA enable_profiling")
             t0 = time.perf_counter()
             result = self._conn.execute(sql).fetchdf()
             elapsed = time.perf_counter() - t0

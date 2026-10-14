@@ -290,6 +290,58 @@ class TestDataAPI:
         assert df["n"].iloc[0] == 6
         api.close()
 
+    def test_profile_reissues_pragma_after_reconnect(self, asset_root, monkeypatch):
+        """profile=True on a stale connection must re-enable profiling on the new one.
+
+        Review Finding: PRAGMA enable_profiling was only issued before the
+        failure and never re-issued after reconnect.  The test closes the
+        underlying connection first and asserts the pragma ran on the new
+        connection generation.
+        """
+        import duckdb as duckdb_mod
+
+        class _SpyConn:
+            """Proxy that records SQL per connection generation."""
+            def __init__(self, real, gen, log):
+                self._real = real
+                self._gen = gen
+                self._log = log
+
+            def execute(self, sql, *a, **kw):
+                self._log.setdefault(self._gen, []).append(str(sql))
+                return self._real.execute(sql, *a, **kw)
+
+            def close(self):
+                return self._real.close()
+
+        stmts_per_gen: dict[int, list[str]] = {}
+        gen_counter = [0]
+        orig_connect = duckdb_mod.connect
+
+        def spy_connect(*a, **kw):
+            conn = orig_connect(*a, **kw)
+            gen_counter[0] += 1
+            return _SpyConn(conn, gen_counter[0], stmts_per_gen)
+
+        monkeypatch.setattr(duckdb_mod, "connect", spy_connect)
+
+        api = DataAPI(asset_root)
+        api.register_views()
+        # Force the stale-connection path
+        api._conn.close()
+
+        df = api.query("SELECT COUNT(*) AS n FROM bars_daily", profile=True)
+        assert df["n"].iloc[0] == 6
+
+        # gen 1 = original (dead), gen 2 = reconnected
+        assert gen_counter[0] == 2, f"expected 2 connection generations, got {gen_counter[0]}"
+        new_gen_stmts = stmts_per_gen.get(2, [])
+        assert any("enable_profiling" in s for s in new_gen_stmts), (
+            f"enable_profiling not re-issued on reconnected connection; "
+            f"gen2 statements: {new_gen_stmts}"
+        )
+        api.close()
+
 
 # ---------------------------------------------------------------------------
 # load_bars — return columns and sort order (DoD row)
