@@ -18,7 +18,6 @@ Quant/
 │   ├── ensemble/
 │   ├── factor/
 │   ├── models/
-│   ├── qlib_bridge/
 │   ├── vectorbt_engine/
 │   └── zvt_bridge/
 ├── strategies/             # 策略组装，不重复实现底层算子
