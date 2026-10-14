@@ -498,13 +498,13 @@ class TestDateColumnRejectsInt:
     def test_int_yyyymmdd_rejected_on_date_column(self):
         df = _valid_df("calendar")
         df["trade_date"] = 20240115
-        with pytest.raises(ValueError, match="integer"):
+        with pytest.raises(ValueError, match="numeric"):
             SCHEMA["calendar"].validate(df)
 
     def test_int_yyyymmdd_rejected_on_bars_daily(self):
         df = _valid_df("bars_daily")
         df["trade_date"] = 20240115
-        with pytest.raises(ValueError, match="integer"):
+        with pytest.raises(ValueError, match="numeric"):
             SCHEMA["bars_daily"].validate(df)
 
     def test_string_date_still_accepted(self):
@@ -533,6 +533,89 @@ class TestDatetimeColumnRejectsTzAware:
         df = _valid_df("bars_minute")
         result = SCHEMA["bars_minute"].validate(df)
         assert result["datetime"].iloc[0] == DT
+
+
+class TestNullableDateColumns:
+    """Finding A regression: nullable date columns must accept missing values."""
+
+    def test_announce_date_none_accepted(self):
+        row = _valid_row("corporate_actions")
+        row["announce_date"] = None
+        df = pd.DataFrame([row])
+        result = SCHEMA["corporate_actions"].validate(df)
+        assert pd.isna(result["announce_date"].iloc[0])
+
+    def test_record_date_nan_accepted(self):
+        row = _valid_row("corporate_actions")
+        row["record_date"] = float("nan")
+        df = pd.DataFrame([row])
+        result = SCHEMA["corporate_actions"].validate(df)
+        assert pd.isna(result["record_date"].iloc[0])
+
+    def test_mixed_present_missing_batch_accepted(self):
+        row1 = _valid_row("corporate_actions")
+        row1["announce_date"] = date(2024, 1, 10)
+        row1["record_date"] = None
+        row2 = {**row1, "ticker": "000001.SZ", "announce_date": None, "record_date": date(2024, 1, 14)}
+        df = pd.DataFrame([row1, row2])
+        result = SCHEMA["corporate_actions"].validate(df)
+        assert result["announce_date"].iloc[0] == date(2024, 1, 10)
+        assert pd.isna(result["record_date"].iloc[0])
+        assert pd.isna(result["announce_date"].iloc[1])
+        assert result["record_date"].iloc[1] == date(2024, 1, 14)
+
+    def test_both_dates_none_accepted(self):
+        row = _valid_row("corporate_actions")
+        row["announce_date"] = None
+        row["record_date"] = None
+        df = pd.DataFrame([row])
+        result = SCHEMA["corporate_actions"].validate(df)
+        assert pd.isna(result["announce_date"].iloc[0])
+        assert pd.isna(result["record_date"].iloc[0])
+
+
+class TestDateColumnRejectsFloatAndObject:
+    """Finding B regression: float/object dtype integers must not silently coerce."""
+
+    def test_float64_yyyymmdd_rejected(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = pd.Series([20240115.0])
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_object_dtype_int_rejected(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = pd.Series([20240115], dtype="object")
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_mixed_int_string_rejected(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = pd.Series([20240115, "2024-01-16"], dtype="object")
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_float64_epoch_datetime_rejected(self):
+        row = _valid_row("bars_minute")
+        row["datetime"] = 1705282260.0
+        df = pd.DataFrame([row])
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["bars_minute"].validate(df)
+
+    def test_object_dtype_int_datetime_rejected(self):
+        row = _valid_row("bars_minute")
+        row["datetime"] = pd.Series([1705282260], dtype="object").iloc[0]
+        df = pd.DataFrame([row])
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["bars_minute"].validate(df)
+
+    def test_object_tz_aware_timestamp_rejected(self):
+        ts = pd.Timestamp("2024-01-15 09:31:00+08:00")
+        row = _valid_row("bars_minute")
+        row["datetime"] = ts
+        df = pd.DataFrame([row])
+        with pytest.raises((ValueError, pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["bars_minute"].validate(df)
 
 
 class TestPrimaryKeyUniqueness:

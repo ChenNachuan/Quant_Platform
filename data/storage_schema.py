@@ -76,43 +76,75 @@ def _quality_flag_column() -> Column:
 # ---------------------------------------------------------------------------
 # Safe date / datetime coercion (code-review findings 1 & 2)
 # ---------------------------------------------------------------------------
-def _safe_date_parser(series: pd.Series) -> pd.Series:
-    """Convert to ``datetime.date``, rejecting integer and tz-aware input.
+def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
+    """Reject numeric dtypes and numeric/tz-aware elements in object columns.
 
     Pandera's built-in ``coerce=True`` treats integer values as epoch
-    seconds, so ``20240115`` silently becomes ``date(1970, 1, 1)``.  This
-    parser accepts only datetime64 / date / string and rejects everything
-    else loudly.
+    seconds, so ``20240115`` silently becomes ``date(1970, 1, 1)``.  The
+    first iteration of this guard only checked ``dtype.kind in "iub"``,
+    which missed float64 (``20240115.0``) and object-dtype integers.
+    Reject *values*, not just dtypes.
     """
-    if series.dtype.kind in "iub":
+    if series.dtype.kind in "iufb":
+        if series.isna().all():
+            return  # all-null column: accept and let the caller emit NaT
         raise ValueError(
-            f"integer/boolean input to date column not allowed (got dtype {series.dtype}); "
+            f"numeric input to {kind} column not allowed (got dtype {series.dtype}); "
             "pass datetime64, date, or ISO string"
         )
     if getattr(series.dtype, "tz", None) is not None:
-        raise ValueError("tz-aware input to date column not allowed; use naive dates")
-    try:
-        converted = pd.to_datetime(series, errors="raise")
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"cannot parse date column: {exc}") from exc
-    return converted.dt.date
+        raise ValueError(f"tz-aware input to {kind} column not allowed")
+    if series.dtype.kind == "O":
+        for val in series.dropna():
+            if isinstance(val, bool):
+                raise ValueError(f"boolean input to {kind} column not allowed")
+            if isinstance(val, (int, float)):
+                raise ValueError(
+                    f"numeric value {val!r} in {kind} column not allowed; "
+                    "pass datetime64, date, or ISO string"
+                )
+            if getattr(val, "tzinfo", None) is not None:
+                raise ValueError(f"tz-aware value {val!r} in {kind} column not allowed")
+
+
+def _safe_date_parser(series: pd.Series) -> pd.Series:
+    """Convert to ``datetime.date``, rejecting numeric and tz-aware input.
+
+    Accepts only datetime64 / date / string.  Nulls are preserved as
+    ``NaT`` so ``nullable=True`` columns pass through unchanged.
+    """
+    _reject_numeric_and_bad_objects(series, "date")
+    mask = series.isna()
+    result = pd.Series(index=series.index, dtype="object")
+    if (~mask).any():
+        try:
+            converted = pd.to_datetime(series[~mask], errors="raise")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"cannot parse date column: {exc}") from exc
+        result[~mask] = converted.dt.date
+    result[mask] = pd.NaT
+    return result
 
 
 def _safe_datetime_parser(series: pd.Series) -> pd.Series:
-    """Convert to naive ``datetime64``, rejecting integer and tz-aware input.
+    """Convert to naive ``datetime64``, rejecting numeric and tz-aware input.
 
     The design uses naive Beijing time.  Pandera's built-in coercion silently
     shifts tz-aware timestamps (e.g. ``09:31+0800`` → ``01:31``).
+    Nulls are preserved as ``NaT``.
     """
-    if series.dtype.kind in "iub":
-        raise ValueError(
-            f"integer/boolean input to datetime column not allowed (got dtype {series.dtype})"
-        )
-    if getattr(series.dtype, "tz", None) is not None:
-        raise ValueError(
-            "tz-aware timestamps not allowed (design uses naive Beijing time)"
-        )
-    return pd.to_datetime(series, errors="raise")
+    _reject_numeric_and_bad_objects(series, "datetime")
+    mask = series.isna()
+    result = pd.Series(index=series.index, dtype="datetime64[ns]")
+    if (~mask).any():
+        try:
+            converted = pd.to_datetime(series[~mask], errors="raise")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"cannot parse datetime column: {exc}") from exc
+        if getattr(converted.dtype, "tz", None) is not None:
+            raise ValueError("tz-aware timestamps not allowed (design uses naive Beijing time)")
+        result[~mask] = converted
+    return result
 
 
 def _date_column(nullable: bool = False) -> Column:
