@@ -1015,12 +1015,13 @@ class TestBackupScript:
         assert "counts match" in result.stdout
         assert "mismatch" not in result.stdout
 
-    def test_same_device_guard_fires_without_override(self, tmp_path):
-        """The same-device guard must actually fire — the whole point of it.
+    def test_dest_must_be_a_mountpoint_without_override(self, tmp_path):
+        """A local directory is not a mount point, so it must be refused.
 
-        A `stat` portability bug once made this guard silently dead on Linux.
-        src and dest under one tmp_path are the same device, so without the
-        override the script must refuse.
+        This is the honest form of the unmounted-disk guard: a same-device
+        comparison against SRC does not detect it, because when data_platform
+        has its own volume an unmounted mountpoint falls back to root — a
+        *different* device from SRC — and the comparison would pass.
         """
         src = _make_data_platform(tmp_path)
         dest = tmp_path / "dest"
@@ -1029,7 +1030,20 @@ class TestBackupScript:
         result = _run_backup(src, dest, BACKUP_ALLOW_LOCAL_DEST="0")
 
         assert result.returncode == 2
-        assert "same filesystem" in result.stderr
+        assert "not a mount point" in result.stderr
+        assert "BACKUP_ALLOW_LOCAL_DEST=1" in result.stderr
+
+    def test_same_device_guard_fires_without_override(self, tmp_path):
+        """The same-device guard must also be alive — a `stat` portability bug
+        once made it silently dead on Linux."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        result = _run_backup(src, dest, BACKUP_ALLOW_LOCAL_DEST="0")
+
+        assert result.returncode == 2
+        # either guard firing is a refusal; both name the deliberate override
         assert "BACKUP_ALLOW_LOCAL_DEST=1" in result.stderr
 
     def test_device_of_returns_a_single_clean_token(self, tmp_path):
@@ -1159,3 +1173,143 @@ class TestBackupScript:
 
         assert result.returncode == 1
         assert "lost files" in result.stderr
+
+    def test_rsync_partial_transfer_status_is_not_fatal(self, tmp_path):
+        """rsync 23/24 are live-tree churn, not a failed backup.
+
+        Under set -e an unhandled 23/24 aborted before the count check and
+        the OK line, so a good backup reported failure.
+        """
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f'REAL="{_real_rsync()}"\n'
+            '"$REAL" "$@"\n'
+            "exit 23   # partial transfer: a source file vanished mid-sync\n"
+        )
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OK — counts match" in result.stdout
+
+    def test_rsync_source_vanished_status_is_not_fatal(self, tmp_path):
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f'REAL="{_real_rsync()}"\n'
+            '"$REAL" "$@"\n'
+            "exit 24   # source vanished during file list build\n"
+        )
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OK — counts match" in result.stdout
+
+    def test_other_rsync_status_is_still_fatal(self, tmp_path):
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text("#!/usr/bin/env bash\nexit 12\n")
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 12
+        assert "rsync exited 12" in result.stderr
+
+    def test_symlinked_source_is_counted(self, tmp_path):
+        """find is -P and will not descend a symlinked start.
+
+        A symlinked SRC used to report "no backable files" and refuse a good
+        backup.  Both sides are resolved before any find.
+        """
+        real_src = _make_data_platform(tmp_path)
+        link_src = tmp_path / "link_to_platform"
+        link_src.symlink_to(real_src)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        result = _run_backup(link_src, dest)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OK — counts match" in result.stdout
+
+    def test_symlinked_destination_holding_foreign_content_refused(self, tmp_path):
+        """A symlinked DEST must not skip the foreign-content guard."""
+        src = _make_data_platform(tmp_path)
+        real_dest = tmp_path / "real_dest"
+        real_dest.mkdir()
+        victim = real_dest / "important" / "notes.txt"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"do not delete me")
+        link_dest = tmp_path / "link_to_dest"
+        link_dest.symlink_to(real_dest)
+
+        result = _run_backup(src, link_dest)
+
+        assert result.returncode == 2
+        assert "does not look like a previous backup" in result.stderr
+        assert victim.exists(), "rsync --delete must not reach a refused DEST"
+
+    def test_symlinked_destination_backs_up_through_the_link(self, tmp_path):
+        src = _make_data_platform(tmp_path)
+        real_dest = tmp_path / "real_dest"
+        real_dest.mkdir()
+        link_dest = tmp_path / "link_to_dest"
+        link_dest.symlink_to(real_dest)
+
+        result = _run_backup(src, link_dest)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (real_dest / "asset" / "bars_daily" / "2024-01-15.parquet").exists()
+
+    def test_fs_metadata_survives_rsync_delete(self, tmp_path):
+        """--delete must not choke on or remove well-known fs metadata.
+
+        rsync excludes only *.tmp/*.lock, so --delete would either abort
+        (non-root, under set -e) or silently remove OS directories (root).
+        """
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "fresh_disk"
+        dest.mkdir()
+        for name in ("lost+found", ".Spotlight-V100", ".fseventsd", ".Trashes"):
+            d = dest / name
+            d.mkdir()
+            (d / "os_file.bin").write_bytes(b"os metadata")
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        for name in ("lost+found", ".Spotlight-V100", ".fseventsd", ".Trashes"):
+            assert (dest / name / "os_file.bin").exists(), f"{name} was removed by --delete"
+
+    def test_fs_metadata_is_not_counted_as_content(self, tmp_path):
+        """Metadata on DEST must not break the two-sided count bounds."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "fresh_disk"
+        dest.mkdir()
+        (dest / "lost+found").mkdir()
+        (dest / "lost+found" / "orphan").write_bytes(b"ext4 metadata")
+        (dest / ".DS_Store").write_bytes(b"mac metadata")
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OK — counts match" in result.stdout

@@ -13,12 +13,17 @@
 #   scripts/backup.sh <data_platform_dir> <backup_dest_dir>
 #   DATA_PLATFORM=... BACKUP_DEST=... scripts/backup.sh
 #
-# DEST is expected to be a mounted external disk.  Backing up onto the same
-# filesystem as SRC is refused unless BACKUP_ALLOW_LOCAL_DEST=1 is set
-# deliberately — an unmounted disk would otherwise become a plain local
-# directory and fill the root filesystem.
+# DEST must be a mount point — the mounted external disk itself.  That is the
+# honest form of the guard: a same-filesystem comparison alone does NOT detect
+# an unmounted disk, because when data_platform has its own volume an
+# unmounted mountpoint falls back to the root filesystem, a *different* device
+# from SRC, and a naive comparison would pass.  BACKUP_ALLOW_LOCAL_DEST=1
+# deliberately allows a non-mountpoint / same-device DEST for tests and for
+# knowingly local backups.
 #
-# Excludes *.tmp / *.lock — write residue is not backup content.
+# Excludes *.tmp / *.lock and well-known filesystem metadata (lost+found,
+# .Spotlight-V100, …) — neither is backup content, and --delete must not
+# choke on or remove the latter.
 set -euo pipefail
 
 SRC="${1:-${DATA_PLATFORM:-}}"
@@ -33,89 +38,119 @@ if [[ -z "${SRC}" || -z "${DEST}" ]]; then
 fi
 
 [[ -d "${SRC}" ]] || die "source is not a directory: ${SRC}"
-
-# --- SRC must look like a data_platform root -------------------------------
-# A wrong or empty SRC is the expensive failure: rsync --delete would erase
-# the whole DEST, and with both sides empty the count comparison would print
-# OK and exit 0.  Refuse before the destructive sync.
-[[ -d "${SRC}/asset" || -d "${SRC}/raw" || -d "${SRC}/factors" ]] \
-    || die "source does not look like a data_platform root (no asset/ raw/ or factors/): ${SRC}"
-
-# --- counting must agree with rsync's --exclude semantics -----------------
-# rsync prunes matching DIRECTORIES; a plain `find -type f ! -name` descends
-# into them and counts the files inside, which turns a complete backup into a
-# spurious "file count mismatch".
-count_files() {
-    find "$1" \
-        \( -type d \( -name '*.tmp' -o -name '*.lock' \) -prune \) -o \
-        \( -type f ! -name '*.tmp' ! -name '*.lock' -print \) \
-        | wc -l | tr -d ' '
-}
-
-src_count_before="$(count_files "${SRC}")"
-[[ "${src_count_before}" -gt 0 ]] \
-    || die "source holds no backable files (after excluding *.tmp/*.lock): ${SRC}"
-
-# --- DEST guards ----------------------------------------------------------
-# Never mkdir -p an arbitrary path: an unmounted external disk would silently
-# become a local directory and fill the root filesystem.
 [[ -e "${DEST}" ]] || die "destination does not exist (mount the external disk first): ${DEST}"
 [[ -d "${DEST}" ]] || die "destination exists and is not a directory: ${DEST}"
 [[ -w "${DEST}" ]] || die "destination is not writable: ${DEST}"
 
+# Resolve both sides BEFORE any find(1).  find is -P and will not descend a
+# symlinked start, so a symlinked SRC/DEST would report zero files and quietly
+# skip the guards that depend on counting.
 src_abs="$(cd "${SRC}" && pwd -P)"
 dest_abs="$(cd "${DEST}" && pwd -P)"
+
 [[ "${src_abs}" != "${dest_abs}" ]] || die "source and destination are the same directory: ${SRC}"
 case "${dest_abs}/" in "${src_abs}/"*) die "destination is inside source: ${DEST}" ;; esac
 case "${src_abs}/" in "${dest_abs}/"*) die "source is inside destination: ${SRC}" ;; esac
 
-# A non-empty DEST must already look like a previous backup.  A mistyped DEST
-# pointing at an unrelated tree would otherwise be erased by --delete.
-# Filesystem metadata is not content: a freshly formatted external disk always
-# carries lost+found / .Spotlight-V100 / .fseventsd / .Trashes and friends, and
-# the documented deployment is exactly "rsync to a mounted external disk".
-# find -name matches the basename literally, so the dollar signs and dots are
-# not regex metacharacters here.
-dest_real_count="$(find "${DEST}" -mindepth 1 -maxdepth 1 \
-    ! -name 'lost+found' \
-    ! -name 'System Volume Information' \
-    ! -name '$RECYCLE.BIN' \
-    ! -name '.Trash' \
-    ! -name '.DS_Store' \
-    ! -name '.Spotlight-V100' \
-    ! -name '.fseventsd' \
-    ! -name '.Trashes' \
-    ! -name '.TemporaryItems' \
-    ! -name '.DocumentRevisions-V100' \
-    ! -name '.BC' \
-    -print | wc -l | tr -d ' ')"
-if [[ "${dest_real_count}" -gt 0 ]]; then
-    [[ -d "${DEST}/asset" || -d "${DEST}/raw" || -d "${DEST}/factors" ]] \
+# --- one list, three consumers --------------------------------------------
+# Filesystem metadata a freshly formatted external disk always carries.  Used
+# by the DEST pre-check, the counters and rsync alike, so those three can
+# never disagree about what counts as content.
+FS_METADATA=(
+    'lost+found'
+    'System Volume Information'
+    '$RECYCLE.BIN'
+    '.Trash'
+    '.DS_Store'
+    '.Spotlight-V100'
+    '.fseventsd'
+    '.Trashes'
+    '.TemporaryItems'
+    '.DocumentRevisions-V100'
+    '.BC'
+)
+
+find_skip=()    # -o -name <n> -o -name <m> ...  (joins an existing OR chain)
+find_keep=()    # ! -name <n> ! -name <m> ...    (implicit AND)
+rsync_excludes=(--exclude='*.tmp' --exclude='*.lock')
+for _n in "${FS_METADATA[@]}"; do
+    find_skip+=(-o -name "${_n}")
+    find_keep+=(! -name "${_n}")
+    rsync_excludes+=(--exclude="${_n}")
+done
+unset _n
+
+# --- counting must agree with rsync's --exclude semantics -----------------
+# rsync prunes matching DIRECTORIES; a plain `find -type f ! -name` descends
+# into them and counts the files inside, which turns a complete backup into a
+# spurious "file count mismatch".  Pruning any matching name covers both.
+count_files() {
+    find "$1" \
+        \( \( -name '*.tmp' -o -name '*.lock' "${find_skip[@]}" \) -prune \) -o \
+        \( -type f -print \) \
+        | wc -l | tr -d ' '
+}
+
+# --- SRC must look like a data_platform root ------------------------------
+# A wrong or empty SRC is the expensive failure: rsync --delete would erase
+# the whole DEST, and with both sides empty the count comparison would print
+# OK and exit 0.  Refuse before the destructive sync.
+[[ -d "${src_abs}/asset" || -d "${src_abs}/raw" || -d "${src_abs}/factors" ]] \
+    || die "source does not look like a data_platform root (no asset/ raw/ or factors/): ${SRC}"
+
+src_count_before="$(count_files "${src_abs}")"
+[[ "${src_count_before}" -gt 0 ]] \
+    || die "source holds no backable files (after excluding *.tmp/*.lock): ${SRC}"
+
+# --- DEST must already look like a previous backup ------------------------
+# A mistyped DEST pointing at an unrelated tree would otherwise be erased by
+# --delete.  Filesystem metadata is not content: a freshly formatted external
+# disk always carries it, and the documented deployment is exactly "rsync to a
+# mounted external disk".
+if [[ "$(find "${dest_abs}" -mindepth 1 -maxdepth 1 "${find_keep[@]}" -print | wc -l | tr -d ' ')" -gt 0 ]]; then
+    [[ -d "${dest_abs}/asset" || -d "${dest_abs}/raw" || -d "${dest_abs}/factors" ]] \
         || die "destination has content that does not look like a previous backup: ${DEST}"
 fi
 
-# --- DEST must be on a different filesystem than SRC ----------------------
-# The design assumes an external disk.  Same-device DEST is the unmounted-
-# disk case, so it is refused unless deliberately allowed.
-#
+# --- DEST must be a mount point, and not the SRC filesystem ---------------
 # GNU stat first (`-c`), BSD/macOS fallback (`-f`).  The order is load-bearing:
 # on Linux `stat -f` means --file-system, so `-f %d` errors but still prints a
 # dump to stdout and a trailing fallback appends the real device id onto it —
 # the two sides then never compare equal and the guard silently never fires.
 device_of() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; }
+
 if [[ "${BACKUP_ALLOW_LOCAL_DEST:-0}" != "1" ]]; then
-    src_dev="$(device_of "${src_abs}")"
     dest_dev="$(device_of "${dest_abs}")"
+    parent_dev="$(device_of "$(dirname "${dest_abs}")")"
+    src_dev="$(device_of "${src_abs}")"
+
+    # A same-device comparison against SRC does not mean "the disk is
+    # mounted": if data_platform has its own volume and the external disk is
+    # not mounted, the mountpoint falls back to the root filesystem — a
+    # different device from SRC — and the comparison would pass.  Require
+    # DEST to actually be a mount point.
+    if [[ -n "${dest_dev}" && -n "${parent_dev}" && "${dest_dev}" == "${parent_dev}" ]]; then
+        die "destination is not a mount point (is the external disk mounted there?); set BACKUP_ALLOW_LOCAL_DEST=1 to override: ${DEST}"
+    fi
     if [[ -n "${src_dev}" && -n "${dest_dev}" && "${src_dev}" == "${dest_dev}" ]]; then
-        die "destination is on the same filesystem as source (unmounted external disk?); set BACKUP_ALLOW_LOCAL_DEST=1 to override: ${DEST}"
+        die "destination is on the same filesystem as source; set BACKUP_ALLOW_LOCAL_DEST=1 to override: ${DEST}"
     fi
 fi
 
-echo "backup.sh: rsync ${SRC}/ -> ${DEST}/"
-rsync -a --delete \
-    --exclude='*.tmp' \
-    --exclude='*.lock' \
-    "${src_abs}/" "${dest_abs}/"
+echo "backup.sh: rsync ${src_abs}/ -> ${dest_abs}/"
+# Capture rather than letting set -e abort: rsync 23 (partial transfer) and
+# 24 (source vanished) are exactly the live-tree churn the two-sided count
+# below tolerates — a Parquet file being replaced under us is not a failed
+# backup, and must not stop us reaching the count check or the OK line.
+rsync_status=0
+rsync -a --delete "${rsync_excludes[@]}" "${src_abs}/" "${dest_abs}/" || rsync_status=$?
+case "${rsync_status}" in
+    0|23|24) ;;
+    *)
+        echo "backup.sh: FAIL — rsync exited ${rsync_status}" >&2
+        exit "${rsync_status}"
+        ;;
+esac
 
 # File-count comparison (§51).  Same exclusion semantics as the rsync above.
 #
