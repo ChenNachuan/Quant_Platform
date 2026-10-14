@@ -405,15 +405,26 @@ def load_bars(
             f"adjust={adjust!r} requires adjfactor but table {table!r} has none"
         )
 
+    # When adjusting, adjfactor must be in the SELECT even if fields omits it.
+    # It is dropped from the result below if the caller did not request it.
+    effective_fields = fields
+    drop_adj_after = False
+    if adjust != "none" and has_adj and fields is not None and "adjfactor" not in fields:
+        effective_fields = [*fields, "adjfactor"]
+        drop_adj_after = True
+
     with DataAPI(data_root) as api:
         if is_agg:
-            sql = _build_aggregated_sql(table, start, end, symbol, fields, freq)
+            sql = _build_aggregated_sql(table, start, end, symbol, effective_fields, freq)
         else:
-            sql = _build_daily_sql(table, start, end, symbol, fields, freq)
+            sql = _build_daily_sql(table, start, end, symbol, effective_fields, freq)
         df = api.query(sql)
 
         if adjust != "none" and not df.empty:
             df = _apply_adjustment(df, api, table, adjust)
+
+    if drop_adj_after and "adjfactor" in df.columns:
+        df = df.drop(columns=["adjfactor"])
 
     # Ensure contract column order and sort
     if not df.empty:

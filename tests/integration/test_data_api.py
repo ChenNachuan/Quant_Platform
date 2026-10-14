@@ -415,6 +415,39 @@ class TestAdjustment:
                 freq="minute", adjust="forward", data_root=minute_root,
             )
 
+    def test_fields_with_forward_adjustment(self, asset_root):
+        """fields=['close'] + adjust='forward' must not crash (Finding 1).
+
+        adjfactor is needed for the ratio but the caller did not request it
+        in ``fields`` — it is forced into the SELECT, used for the ratio,
+        then dropped from the output.
+        """
+        df = load_bars(
+            symbol="600519.SH",
+            start="2024-01-02", end="2024-01-04",
+            fields=["close"], adjust="forward",
+            data_root=asset_root,
+        )
+        assert "close" in df.columns
+        assert "adjfactor" not in df.columns
+        assert "open" not in df.columns
+        # qfq close: day1=5.0, day2=5.5, day3=5.5 (2:1 split, adj_latest=2.0)
+        assert abs(df["close"].iloc[0] - 5.0) < 1e-6
+        assert abs(df["close"].iloc[1] - 5.5) < 1e-6
+        assert abs(df["close"].iloc[2] - 5.5) < 1e-6
+
+    def test_fields_with_adjustment_keeps_adjfactor_when_requested(self, asset_root):
+        """fields including adjfactor + adjust: adjfactor stays in output."""
+        df = load_bars(
+            symbol="600519.SH",
+            start="2024-01-02", end="2024-01-04",
+            fields=["close", "adjfactor"], adjust="forward",
+            data_root=asset_root,
+        )
+        assert "close" in df.columns
+        assert "adjfactor" in df.columns
+        assert abs(df["close"].iloc[0] - 5.0) < 1e-6
+
 
 # ---------------------------------------------------------------------------
 # Table-family mapping (asset_type)
