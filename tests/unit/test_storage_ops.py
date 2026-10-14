@@ -165,6 +165,32 @@ class TestAtomicWriteFailureInjection:
         assert not target.exists()
         assert list(tmp_path.iterdir()) == []
 
+    def test_failed_overwrite_leaves_previous_target_intact(self, tmp_path, monkeypatch):
+        """§1: the target is either absent or complete — never half-written.
+
+        A failed *overwrite* must not damage the complete file already at
+        the target path.  This is the other half of the atomicity contract:
+        the tests above start from an empty tmp_path and only pin the
+        "absent" half (Test finding, QUANT-13).
+        """
+        target = tmp_path / "2024-01-15.parquet"
+        write_parquet_atomic(_bars_daily_df(close=11.5), target, table="bars_daily")
+        original_bytes = target.read_bytes()
+
+        def boom(self, path, *args, **kwargs):
+            Path(path).write_bytes(b"half-written parquet bytes")
+            raise OSError("disk write failed mid-stream")
+
+        monkeypatch.setattr(pd.DataFrame, "to_parquet", boom)
+
+        with pytest.raises(OSError, match="mid-stream"):
+            write_parquet_atomic(_bars_daily_df(close=99.0), target, table="bars_daily")
+
+        assert target.exists(), "the pre-existing complete target must survive"
+        assert target.read_bytes() == original_bytes, "target must be byte-identical"
+        assert pd.read_parquet(target)["close"].iloc[0] == 11.5
+        assert not list(tmp_path.glob("*.tmp")), "no .tmp may survive"
+
     def test_disk_full_check_refuses_write(self, tmp_path, monkeypatch):
         from data import storage_ops
 
