@@ -24,6 +24,7 @@ dependencies = [
     "scipy-stubs~=1.15.3",
     "watchdog>=6.0.0",
     "polars>=1.0.0",
+    "pandera>=0.34.1",
 ]
 
 [tool.uv.sources]
