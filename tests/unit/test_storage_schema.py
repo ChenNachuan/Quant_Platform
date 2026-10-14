@@ -21,6 +21,7 @@ from data.storage_schema import (
     QUALITY_FLAG_MAX,
     SCHEMA,
     TABLE_FAMILY,
+    FactorViewRegistry,
     factor_schema,
     factor_view_name,
 )
@@ -214,7 +215,7 @@ class TestWrongTypeRejected:
     def test_unparseable_string_for_date_rejected(self):
         df = _valid_df("calendar")
         df["trade_date"] = "garbage_not_a_date"
-        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError, ValueError)):
             SCHEMA["calendar"].validate(df)
 
     def test_list_for_scalar_rejected(self):
@@ -298,8 +299,9 @@ class TestQualityFlag:
         assert QUALITY_FLAG_MAX == 31
 
     def test_quality_flag_is_int64(self):
-        col = SCHEMA["bars_daily"].columns["quality_flag"]
-        assert "int" in str(col.dtype).lower()
+        df = _valid_df("bars_daily")
+        result = SCHEMA["bars_daily"].validate(df)
+        assert result["quality_flag"].dtype.kind in "iu"
 
     def test_quality_flag_non_negative_enforced(self):
         df = _valid_df("bars_daily")
@@ -485,3 +487,136 @@ class TestColumnContracts:
         df["trade_date"] = pd.to_datetime(["2024-01-15"])
         result = SCHEMA["bars_daily"].validate(df)
         assert result["trade_date"].iloc[0] == D
+
+
+# ---------------------------------------------------------------------------
+# Regression: code-review findings 2026-10-14
+# ---------------------------------------------------------------------------
+class TestDateColumnRejectsInt:
+    """Finding 1: YYYYMMDD ints must not silently coerce to epoch dates."""
+
+    def test_int_yyyymmdd_rejected_on_date_column(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = 20240115
+        with pytest.raises(ValueError, match="integer"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_int_yyyymmdd_rejected_on_bars_daily(self):
+        df = _valid_df("bars_daily")
+        df["trade_date"] = 20240115
+        with pytest.raises(ValueError, match="integer"):
+            SCHEMA["bars_daily"].validate(df)
+
+    def test_string_date_still_accepted(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = "2024-01-15"
+        result = SCHEMA["calendar"].validate(df)
+        assert result["trade_date"].iloc[0] == D
+
+    def test_date_object_still_accepted(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = D
+        result = SCHEMA["calendar"].validate(df)
+        assert result["trade_date"].iloc[0] == D
+
+
+class TestDatetimeColumnRejectsTzAware:
+    """Finding 2: tz-aware timestamps must not silently shift."""
+
+    def test_tz_aware_datetime_rejected(self):
+        df = _valid_df("bars_minute")
+        df["datetime"] = pd.to_datetime(["2024-01-15 09:31:00+08:00"])
+        with pytest.raises(ValueError, match="tz-aware"):
+            SCHEMA["bars_minute"].validate(df)
+
+    def test_naive_datetime_accepted(self):
+        df = _valid_df("bars_minute")
+        result = SCHEMA["bars_minute"].validate(df)
+        assert result["datetime"].iloc[0] == DT
+
+
+class TestPrimaryKeyUniqueness:
+    """Finding 3: duplicate PK rows must be rejected (§47.14)."""
+
+    def test_duplicate_bars_daily_pk_rejected(self):
+        row = _valid_row("bars_daily")
+        df = pd.DataFrame([row, row])
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["bars_daily"].validate(df)
+
+    def test_distinct_bars_daily_pk_accepted(self):
+        row1 = _valid_row("bars_daily")
+        row2 = {**row1, "ticker": "000001.SZ"}
+        df = pd.DataFrame([row1, row2])
+        result = SCHEMA["bars_daily"].validate(df)
+        assert len(result) == 2
+
+    def test_duplicate_corporate_actions_pk_rejected(self):
+        row = _valid_row("corporate_actions")
+        df = pd.DataFrame([row, row])
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["corporate_actions"].validate(df)
+
+    def test_duplicate_calendar_pk_rejected(self):
+        row = _valid_row("calendar")
+        df = pd.DataFrame([row, row])
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["calendar"].validate(df)
+
+
+class TestFactorViewRegistry:
+    """Finding 4: factor_view_name collisions must be detected."""
+
+    def test_collision_detected(self):
+        registry = FactorViewRegistry()
+        registry.register("alpha.1")
+        with pytest.raises(ValueError, match="collision"):
+            registry.register("alpha_1")
+
+    def test_same_name_reregister_ok(self):
+        registry = FactorViewRegistry()
+        v1 = registry.register("momentum_20d")
+        v2 = registry.register("momentum_20d")
+        assert v1 == v2
+
+    def test_distinct_names_ok(self):
+        registry = FactorViewRegistry()
+        assert registry.register("momentum_20d") == "factor_momentum_20d"
+        assert registry.register("reversal_5d") == "factor_reversal_5d"
+
+    def test_views_property(self):
+        registry = FactorViewRegistry()
+        registry.register("alpha.1")
+        assert registry.views == {"factor_alpha_1": "alpha.1"}
+
+
+class TestFactorSchemaReservedNames:
+    """Finding 5: factor_schema must reject reserved column names."""
+
+    def test_ticker_rejected(self):
+        with pytest.raises(ValueError, match="reserved"):
+            factor_schema("ticker")
+
+    def test_date_rejected(self):
+        with pytest.raises(ValueError, match="reserved"):
+            factor_schema("date")
+
+    def test_normal_name_accepted(self):
+        schema = factor_schema("momentum_20d")
+        assert "momentum_20d" in schema.columns
+
+
+class TestContractSpecsExchange:
+    """Finding 7: exchange column must be validated against EXCHANGE_MAP."""
+
+    def test_valid_exchange_accepted(self):
+        df = _valid_df("contract_specs")
+        df["exchange"] = "CFFEX"
+        result = SCHEMA["contract_specs"].validate(df)
+        assert result["exchange"].iloc[0] == "CFFEX"
+
+    def test_invalid_exchange_rejected(self):
+        df = _valid_df("contract_specs")
+        df["exchange"] = "FAKE_EXCHANGE"
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["contract_specs"].validate(df)
