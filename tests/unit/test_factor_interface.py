@@ -2,7 +2,7 @@
 output contract, metadata extraction, and category / name validation.
 
 Covers every DoD row: depends_on prefix resolution and rejection, output
-schema enforcement, list_factor_meta field extraction, FACTOR_CATEGORIES
+schema enforcement, extract_factor_meta field extraction, FACTOR_CATEGORIES
 boundary, and the three Dev-default decisions (version convention shape,
 event/alternative category acceptance, name validation point).
 """
@@ -20,7 +20,7 @@ from research.factor_interface import (
     VALID_CATEGORIES,
     Factor,
     factor_meta,
-    list_factor_meta,
+    extract_factor_meta,
     parse_dependency,
     validate_output,
 )
@@ -427,33 +427,33 @@ class TestFactorMeta:
         meta = factor_meta(NoDesc)
         assert meta["description"] is None
 
-    def test_list_factor_meta_from_classes(self):
-        rows = list_factor_meta([Momentum20D, VolAdjMomentum])
+    def test_extract_factor_meta_from_classes(self):
+        rows = extract_factor_meta([Momentum20D, VolAdjMomentum])
         assert len(rows) == 2
         assert rows[0]["name"] == "momentum_20d"
         assert rows[1]["name"] == "vol_adj_momentum"
         assert rows[1]["version"] == "2.1"
 
-    def test_list_factor_meta_from_registry(self):
+    def test_extract_factor_meta_from_registry(self):
         from core.registry import FactorRegistry
 
         FactorRegistry._store.clear()
         try:
             FactorRegistry.register(Momentum20D)
             FactorRegistry.register(VolAdjMomentum)
-            rows = list_factor_meta()
+            rows = extract_factor_meta()
             assert len(rows) == 2
             names = {r["name"] for r in rows}
             assert names == {"momentum_20d", "vol_adj_momentum"}
         finally:
             FactorRegistry._store.clear()
 
-    def test_list_factor_meta_empty_registry(self):
+    def test_extract_factor_meta_empty_registry(self):
         from core.registry import FactorRegistry
 
         FactorRegistry._store.clear()
         try:
-            assert list_factor_meta() == []
+            assert extract_factor_meta() == []
         finally:
             FactorRegistry._store.clear()
 

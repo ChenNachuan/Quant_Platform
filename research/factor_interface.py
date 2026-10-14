@@ -59,9 +59,10 @@ KIND_FACTOR: str = "factor"
 
 # ---------------------------------------------------------------------------
 # Factor naming — ``{type}_{semantic}_{params}`` snake_case
-# (factor_governance.md §62.6).  Structural check only: at least two
+# (factor_governance.md §62.6).  Structural check: at least two
 # underscore-separated segments, every segment contains a letter, whole name
-# is lowercase.  Semantic quality (rejecting ``factor_001``) is a review-time
+# is lowercase.  Rejects ``mom20``, ``Momentum20``, ``factor_001``, etc.
+# Whether a structurally valid name is semantically right is a review-time
 # judgement, not a regex.
 # ---------------------------------------------------------------------------
 
@@ -145,10 +146,15 @@ def factor_meta(cls: type) -> dict[str, Any]:
     return {f: getattr(cls, f, None) for f in _META_FIELDS}
 
 
-def list_factor_meta(
+def extract_factor_meta(
     factors: Iterable[type] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract metadata from Factor classes.
+
+    Distinct from :func:`core.registry.list_factor_meta` (the nine-field
+    registry-level extractor) to avoid a same-name / different-shape
+    collision.  This returns the six Factor interface fields; the registry
+    version returns the full ``META_FIELDS`` contract.
 
     Parameters
     ----------
