@@ -17,6 +17,7 @@ Price literals use ``10.0`` not ``10`` (T1 Review note for T2).
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -75,6 +76,16 @@ def _factor_df(value_column: str = "value", value=0.05) -> pd.DataFrame:
     return pd.DataFrame(
         [{"ticker": "600519.SH", "date": D, value_column: value}]
     )
+
+
+def _data_files(root: Path) -> list[Path]:
+    """Files under *root* that are not lock residue.
+
+    The ``.lock`` file is a permanent inode — the mutex is the flock on it —
+    so a failed write legitimately leaves it behind.  The atomicity contract
+    is about target and ``.tmp``, not the lock file.
+    """
+    return [p for p in root.rglob("*") if p.is_file() and not p.name.endswith(".lock")]
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +150,7 @@ class TestAtomicWriteFailureInjection:
 
         assert not target.exists(), "target must not exist after a failed write"
         assert not list(tmp_path.glob("*.tmp")), "no .tmp may survive a failed write"
-        assert list(tmp_path.iterdir()) == [], "no half-written file may remain"
+        assert _data_files(tmp_path) == [], "no half-written data file may remain"
 
     def test_failure_at_rename_leaves_nothing(self, tmp_path, monkeypatch):
         """Exception at the rename step: no target file, no .tmp."""
@@ -154,7 +165,7 @@ class TestAtomicWriteFailureInjection:
 
         assert not target.exists()
         assert not list(tmp_path.glob("*.tmp"))
-        assert list(tmp_path.iterdir()) == []
+        assert _data_files(tmp_path) == [], "no half-written data file may remain"
 
     def test_failure_before_write_creates_nothing(self, tmp_path):
         """A validation failure means the write never starts."""
@@ -320,19 +331,76 @@ class TestFileLock:
         with FileLock(target):
             pass
 
-    def test_lock_file_removed_on_exit(self, tmp_path):
+    def test_lock_file_persists_after_exit(self, tmp_path):
+        """The lock file is a permanent inode; the mutex is the flock.
+
+        Unlinking on exit re-opens a two-holders race (second-review finding):
+        a second process can flock the old inode after the unlock and before
+        the unlink, and a third creates a fresh inode and flocks it too.
+        """
         target = tmp_path / "2024-01-15.parquet"
         with FileLock(target) as lock:
             assert lock.lock_path.exists()
-        assert not lock.lock_path.exists()
+        assert lock.lock_path.exists(), "the lock file must not be unlinked"
 
-    def test_lock_file_removed_even_on_exception(self, tmp_path):
+    def test_lock_file_persists_after_exception(self, tmp_path):
         target = tmp_path / "2024-01-15.parquet"
         lock = FileLock(target)
         with pytest.raises(RuntimeError):
             with lock:
                 raise RuntimeError("boom")
-        assert not lock.lock_path.exists()
+        assert lock.lock_path.exists()
+        # and the flock was released despite the exception
+        with FileLock(target):
+            pass
+
+    def test_repeated_locks_reuse_the_same_inode(self, tmp_path):
+        """One target must map to one inode, forever — that is what makes the
+        flock the only mutex.  Regression for the release-then-unlink race.
+        """
+        target = tmp_path / "2024-01-15.parquet"
+        with FileLock(target) as first:
+            inode_before = first.lock_path.stat().st_ino
+        with FileLock(target) as second:
+            inode_after = second.lock_path.stat().st_ino
+        assert inode_before == inode_after
+
+    def test_cleanup_never_deletes_a_held_lock(self, tmp_path):
+        """A write longer than max_age_hours must not have its lock swept.
+
+        The lock file's mtime is creation time and never refreshes while
+        held, so age alone cannot distinguish residue from a live writer.
+        """
+        target = tmp_path / "2024-01-15.parquet"
+        old_stamp = (datetime.now() - timedelta(hours=5)).timestamp()
+        with FileLock(target) as lock:
+            os.utime(lock.lock_path, (old_stamp, old_stamp))
+            # mtime is 5h old, well past the 1h threshold, but it is held
+            removed = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
+            assert removed == []
+            assert lock.lock_path.exists(), "a held lock must never be deleted"
+
+    def test_cleanup_deletes_an_unheld_stale_lock(self, tmp_path):
+        lock_path = tmp_path / "2024-01-15.parquet.lock"
+        lock_path.write_bytes(b"")
+        old_stamp = (datetime.now() - timedelta(hours=5)).timestamp()
+        os.utime(lock_path, (old_stamp, old_stamp))
+
+        removed = cleanup_stale_locks(tmp_path, max_age_hours=1, dry_run=False)
+
+        assert removed == [lock_path]
+        assert not lock_path.exists()
+
+    def test_cleanup_dry_run_reports_but_keeps_unheld_lock(self, tmp_path):
+        lock_path = tmp_path / "2024-01-15.parquet.lock"
+        lock_path.write_bytes(b"")
+        old_stamp = (datetime.now() - timedelta(hours=5)).timestamp()
+        os.utime(lock_path, (old_stamp, old_stamp))
+
+        removed = cleanup_stale_locks(tmp_path, max_age_hours=1)
+
+        assert removed == [lock_path]
+        assert lock_path.exists()
 
     def test_different_targets_do_not_conflict(self, tmp_path):
         a = tmp_path / "2024-01-15.parquet"
@@ -729,3 +797,186 @@ class TestDailyGrowth:
         report = check_daily_growth(tmp_path, today=date(2024, 6, 1))
         assert report["files"] == 0
         assert report["exceeded"] is False
+
+    def test_residue_is_not_counted(self, tmp_path):
+        """.tmp / .lock are write residue, not data."""
+        (tmp_path / "2024-06-01.parquet").write_bytes(b"x" * 100)
+        (tmp_path / "2024-06-01.parquet.tmp").write_bytes(b"y" * 9999)
+        (tmp_path / "2024-06-01.parquet.lock").write_bytes(b"z" * 9999)
+        report = check_daily_growth(tmp_path, today=date(2024, 6, 1))
+        assert report["files"] == 1
+        assert report["bytes"] == 100
+
+
+class TestCapacityMissingPath:
+    def test_missing_path_measures_nearest_existing_ancestor_not_cwd(self, tmp_path, monkeypatch):
+        """Probing cwd would report an unrelated filesystem's free space.
+
+        A path that does not exist yet must be measured on the filesystem it
+        would land on — its nearest existing ancestor.
+        """
+        import data.storage_ops as mod
+
+        probed: list[str] = []
+        monkeypatch.setattr(
+            mod.shutil,
+            "disk_usage",
+            lambda p: (probed.append(str(p)) or __import__("collections").namedtuple(
+                "U", "total used free"
+            )(100 * 1024**3, 0, 60 * 1024**3)),
+        )
+
+        missing = tmp_path / "no" / "such" / "dir"
+        check_capacity(missing)
+
+        assert probed == [str(tmp_path)], (
+            f"expected the nearest existing ancestor {tmp_path}, probed {probed}"
+        )
+        assert str(Path.cwd()) not in probed, "must never fall back to cwd"
+
+
+# ---------------------------------------------------------------------------
+# scripts/backup.sh — the guards around a destructive rsync --delete
+# ---------------------------------------------------------------------------
+BACKUP_SH = Path(__file__).resolve().parents[2] / "scripts" / "backup.sh"
+
+
+def _run_backup(src: Path, dest: Path, **env: str) -> subprocess.CompletedProcess:
+    environ = {**os.environ, "BACKUP_ALLOW_LOCAL_DEST": "1", **env}
+    return subprocess.run(
+        ["bash", str(BACKUP_SH), str(src), str(dest)],
+        capture_output=True,
+        text=True,
+        env=environ,
+    )
+
+
+def _make_data_platform(root: Path) -> Path:
+    src = root / "data_platform"
+    (src / "asset" / "bars_daily").mkdir(parents=True)
+    (src / "raw" / "src" / "eq").mkdir(parents=True)
+    (src / "asset" / "bars_daily" / "2024-01-15.parquet").write_bytes(b"a")
+    (src / "raw" / "src" / "eq" / "2024-01-15.parquet").write_bytes(b"bb")
+    (src / "raw" / "src" / "eq" / "2024-01-15.parquet.tmp").write_bytes(b"junk")
+    (src / "raw" / "src" / "eq" / "2024-01-15.parquet.lock").write_bytes(b"junk")
+    return src
+
+
+class TestBackupScript:
+    def test_happy_path_copies_and_excludes_residue(self, tmp_path):
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 0, result.stderr
+        assert (dest / "asset" / "bars_daily" / "2024-01-15.parquet").read_bytes() == b"a"
+        assert (dest / "raw" / "src" / "eq" / "2024-01-15.parquet").read_bytes() == b"bb"
+        assert not list(dest.rglob("*.tmp")), "*.tmp must not be backed up"
+        assert not list(dest.rglob("*.lock")), "*.lock must not be backed up"
+        assert "counts match" in result.stdout
+
+    def test_empty_source_refused_before_destructive_sync(self, tmp_path):
+        """HIGH: an empty SRC must not let --delete wipe DEST and print OK."""
+        src = tmp_path / "data_platform"
+        (src / "asset").mkdir(parents=True)  # marker present, but no files
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        keep = dest / "asset" / "bars_daily" / "2023-01-01.parquet"
+        keep.parent.mkdir(parents=True)
+        keep.write_bytes(b"last-good-backup")
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "no backable files" in result.stderr
+        assert keep.exists(), "the last good backup must be untouched"
+        assert "OK" not in result.stdout
+
+    def test_wrong_source_refused_and_dest_survives(self, tmp_path):
+        """A SRC that is not a data_platform root must be refused outright."""
+        src = tmp_path / "not_data_platform"
+        src.mkdir()
+        (src / "random.txt").write_bytes(b"hello")
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        keep = dest / "asset" / "old.parquet"
+        keep.parent.mkdir(parents=True)
+        keep.write_bytes(b"last-good-backup")
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "does not look like a data_platform root" in result.stderr
+        assert keep.exists()
+        assert "OK" not in result.stdout
+
+    def test_missing_destination_refused(self, tmp_path):
+        """No mkdir -p: an unmounted external disk must not materialise locally."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "not_mounted"
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "does not exist" in result.stderr
+        assert not dest.exists(), "backup.sh must not create the destination"
+
+    def test_foreign_nonempty_destination_refused(self, tmp_path):
+        """A mistyped DEST holding an unrelated tree must not be --delete'd."""
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "unrelated"
+        dest.mkdir()
+        victim = dest / "important" / "notes.txt"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"do not delete me")
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "does not look like a previous backup" in result.stderr
+        assert victim.exists()
+
+    def test_destination_inside_source_refused(self, tmp_path):
+        src = _make_data_platform(tmp_path)
+        dest = src / "nested_dest"
+        dest.mkdir()
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "inside source" in result.stderr
+
+    def test_source_inside_destination_refused(self, tmp_path):
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        src = _make_data_platform(dest)
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 2
+        assert "inside destination" in result.stderr
+
+    def test_same_source_and_destination_refused(self, tmp_path):
+        src = _make_data_platform(tmp_path)
+
+        result = _run_backup(src, src)
+
+        assert result.returncode == 2
+        assert "same directory" in result.stderr
+
+    def test_count_ignores_residue_directories(self, tmp_path):
+        """rsync prunes *.tmp/*.lock directories; find must too."""
+        src = _make_data_platform(tmp_path)
+        residue_dir = src / "asset" / "leftover.tmp"
+        residue_dir.mkdir()
+        (residue_dir / "inner.parquet").write_bytes(b"should not count")
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        result = _run_backup(src, dest)
+
+        assert result.returncode == 0, result.stderr
+        assert "counts match" in result.stdout
+        assert "mismatch" not in result.stdout

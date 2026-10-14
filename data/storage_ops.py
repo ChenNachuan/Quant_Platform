@@ -123,8 +123,15 @@ class FileLock:
     raises :class:`ConcurrentWriteError` immediately (§50).  No retry —
     see §5 decision 6.
 
-    The lock file is removed on exit.  Crash residue is swept by
-    :func:`cleanup_stale_locks`, not by this class (§5 decision 4).
+    The lock **file** is a permanent inode and is deliberately never unlinked
+    here.  The mutex is the ``flock``, which is released atomically with
+    ``close()``.  Unlinking on exit re-opens a two-holders race: after the
+    unlock a second process can flock the old inode before the unlink
+    completes, and a third creates a fresh inode and flocks it as well.  That
+    silently breaks the one-writer-per-day/table contract.
+
+    Lock files from crashed runs are swept by :func:`cleanup_stale_locks`,
+    which only removes a lock it can itself exclusively hold.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
@@ -139,15 +146,18 @@ class FileLock:
     def __enter__(self) -> FileLock:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-        self._fd = fd
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(fd)
-            self._fd = None
             raise ConcurrentWriteError(
                 f"another writer holds the lock for {self._target}"
             ) from exc
+        except BaseException:
+            # Any other flock failure must not leak the fd.
+            os.close(fd)
+            raise
+        self._fd = fd
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -159,10 +169,7 @@ class FileLock:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-        try:
-            os.remove(self._lock_path)
-        except FileNotFoundError:
-            pass
+        # Deliberately no unlink — see the class docstring.
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +394,25 @@ def cleanup_stale_tmp(
     return removed
 
 
+def _try_exclusive_lock(path: Path) -> int | None:
+    """Acquire ``flock(LOCK_EX | LOCK_NB)`` on *path*, returning the fd.
+
+    Returns ``None`` when the lock is already held or the file is gone.  The
+    caller owns a returned fd and must unlock and close it — and should hold
+    it across any unlink so no writer can slip in on the old inode.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def cleanup_stale_locks(
     root: str | os.PathLike[str],
     max_age_hours: float = STALE_MAX_AGE_HOURS,
@@ -396,10 +422,17 @@ def cleanup_stale_locks(
 ) -> list[Path]:
     """Remove ``.lock`` residue older than *max_age_hours*.
 
-    ``flock`` releases on process exit, so a stale lock file is purely
-    cosmetic.  Kept separate from :func:`cleanup_stale_tmp` on purpose (§5
-    decision 4): deleting a live lock breaks mutual exclusion, so it must
-    never share a code path with a safe delete.
+    A lock file's mtime is its **creation** time and never refreshes while
+    the lock is held, so age alone cannot tell a crashed run's residue from a
+    write that has simply been running for hours.  Deleting the latter hands
+    out a second exclusive holder on the same target — exactly what must not
+    happen.  So a lock is only ever removed while this function itself holds
+    its exclusive ``flock``; a lock it cannot acquire is left alone no matter
+    how old it is.
+
+    Kept separate from :func:`cleanup_stale_tmp` on purpose (§5 decision 4):
+    deleting a live lock breaks mutual exclusion, so it must never share a
+    code path with a safe delete.
 
     ``dry_run`` defaults to **True**, like the other two ``cleanup_*``: a bare
     call reports and deletes nothing (§3).  Production callers pass
@@ -412,9 +445,17 @@ def cleanup_stale_locks(
             continue
         if not _is_stale(path, max_age_hours, now):
             continue
-        removed.append(path)
-        if not dry_run:
-            path.unlink(missing_ok=True)
+        fd = _try_exclusive_lock(path)
+        if fd is None:
+            # Held by a live writer (or already gone).  Never delete it.
+            continue
+        try:
+            removed.append(path)
+            if not dry_run:
+                path.unlink(missing_ok=True)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
     return removed
 
 
@@ -510,11 +551,19 @@ def check_capacity(data_root: str | os.PathLike[str] = "data_platform") -> str:
 
     ``OK`` above 50 GB free, ``WARNING`` at 10–50 GB, ``CRITICAL`` at or
     below 10 GB.  ``CRITICAL`` is the "refuse the write" tier.
+
+    When *data_root* does not exist yet the nearest existing ancestor is
+    measured — that is the filesystem the path would land on.  Falling back
+    to the current directory would report free space for an unrelated
+    filesystem and turn a capacity refusal into a silent pass.
     """
     target = Path(data_root)
-    probe = target if target.exists() else target.parent
-    if not probe.exists():
-        probe = Path.cwd()
+    probe = target
+    while not probe.exists():
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
     free = shutil.disk_usage(probe).free
     if free > CAPACITY_OK_BYTES:
         return "OK"
@@ -535,12 +584,18 @@ def check_daily_growth(
     the same date the partition is named after, so a rewrite of an existing
     day does not count as new data.  Exceeding the baseline is an anomaly
     signal (duplicate ingestion / bloat), not a write refusal (§51).
+
+    ``.tmp`` and ``.lock`` residue is not data and is not counted, matching
+    the split :func:`cleanup_expired` already draws between residue and
+    content.
     """
     root = Path(data_root)
     day = today if today is not None else date.today()
     total = 0
     count = 0
     for path in _iter_files(root):
+        if path.name.endswith((_TMP_SUFFIX, _LOCK_SUFFIX)):
+            continue
         if parse_date_from_filename(path.name) != day:
             continue
         try:
