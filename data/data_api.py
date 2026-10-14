@@ -156,9 +156,9 @@ class DataAPI:
     # -- query ---------------------------------------------------------------
     def query(self, sql: str, profile: bool = False) -> pd.DataFrame:
         """Execute *sql* and return a DataFrame.  Logs a ``[COST]`` line."""
-        if profile:
-            self._conn.execute("PRAGMA enable_profiling")
         try:
+            if profile:
+                self._conn.execute("PRAGMA enable_profiling")
             t0 = time.perf_counter()
             result = self._conn.execute(sql).fetchdf()
             elapsed = time.perf_counter() - t0
@@ -226,6 +226,16 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _validate_identifier(name: str) -> str:
+    """Reject non-identifier column names before they reach SQL text."""
+    if not name.isidentifier():
+        raise ValueError(
+            f"invalid column name {name!r}: must be a valid Python identifier "
+            "(letters, digits, underscores; no SQL fragments)"
+        )
+    return name
+
+
 def _symbol_filter(symbol: str | list[str] | None) -> str:
     if symbol is None:
         return ""
@@ -257,7 +267,7 @@ def _build_daily_sql(
             if has_adj:
                 select_parts.append("adjfactor")
             continue
-        select_parts.append(col)
+        select_parts.append(_validate_identifier(col))
     if fields is None and has_adj:
         select_parts.append("adjfactor")
 
@@ -313,8 +323,13 @@ def _build_aggregated_sql(
         "ticker",
     ]
     for col in value_cols:
-        if col in agg_exprs:
-            select_parts.append(f"{agg_exprs[col]} AS {col}")
+        _validate_identifier(col)
+        if col not in agg_exprs:
+            raise ValueError(
+                f"field {col!r} is not available in {freq!r} aggregation; "
+                f"supported fields: {sorted(agg_exprs)}"
+            )
+        select_parts.append(f"{agg_exprs[col]} AS {col}")
 
     where = (
         f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
@@ -520,8 +535,11 @@ def to_alphalens_factor(factor_df: pd.DataFrame) -> pd.Series:
     Output: Series with MultiIndex ``(date, ticker)``.
     """
     value_cols = [c for c in factor_df.columns if c not in ("date", "ticker")]
-    if not value_cols:
-        raise ValueError("factor_df must have at least one value column besides date/ticker")
+    if len(value_cols) != 1:
+        raise ValueError(
+            f"factor_df must have exactly one value column besides date/ticker; "
+            f"got {len(value_cols)}: {value_cols}"
+        )
     value_col = value_cols[0]
     indexed = factor_df.set_index(["date", "ticker"])[value_col]
     indexed.name = value_col

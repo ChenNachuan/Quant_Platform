@@ -282,6 +282,14 @@ class TestDataAPI:
         assert df["x"].iloc[0] == 1
         api.close()
 
+    def test_profile_true_does_not_crash(self, asset_root):
+        """profile=True must execute inside the reconnect try, not crash on pragma."""
+        api = DataAPI(asset_root)
+        api.register_views()
+        df = api.query("SELECT COUNT(*) AS n FROM bars_daily", profile=True)
+        assert df["n"].iloc[0] == 6
+        api.close()
+
 
 # ---------------------------------------------------------------------------
 # load_bars — return columns and sort order (DoD row)
@@ -329,6 +337,14 @@ class TestLoadBarsColumns:
             data_root=asset_root,
         )
         assert set(df["ticker"]) == {"600519.SH", "000001.SZ"}
+
+    def test_fields_rejects_sql_injection(self, asset_root):
+        """fields entries must be valid identifiers — no SQL fragments."""
+        with pytest.raises(ValueError, match="invalid column name"):
+            load_bars(
+                fields=["close; DROP TABLE bars_daily"],
+                data_root=asset_root,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +548,15 @@ class TestAggregation:
         first = df.iloc[0]["date"]
         assert first == datetime(2024, 1, 2, 9, 31) or first == pd.Timestamp("2024-01-02 09:31:00")
 
+    def test_aggregated_rejects_unsupported_field(self, minute_root):
+        """Unsupported field in 5min/60min must fail loudly, not be silently dropped."""
+        with pytest.raises(ValueError, match="not available"):
+            load_bars(
+                start="2024-01-02", end="2024-01-02",
+                freq="5min", fields=["close", "settle"],
+                data_root=minute_root,
+            )
+
 
 # ---------------------------------------------------------------------------
 # alphalens adapters (DoD: to_alphalens_prices shape = date × ticker)
@@ -572,6 +597,25 @@ class TestAlphalensAdapters:
     def test_alphalens_constants(self):
         assert ALPHALENS_PERIODS == (1, 5, 10, 20)
         assert ALPHALENS_QUANTILES == 5
+
+    def test_to_alphalens_factor_rejects_multiple_value_columns(self):
+        """Multiple value columns must raise, not silently pick the first."""
+        df = pd.DataFrame({
+            "date": [date(2024, 1, 2)],
+            "ticker": ["600519.SH"],
+            "momentum": [0.05],
+            "reversal": [0.02],
+        })
+        with pytest.raises(ValueError, match="exactly one value column"):
+            to_alphalens_factor(df)
+
+    def test_to_alphalens_factor_rejects_zero_value_columns(self):
+        df = pd.DataFrame({
+            "date": [date(2024, 1, 2)],
+            "ticker": ["600519.SH"],
+        })
+        with pytest.raises(ValueError, match="exactly one value column"):
+            to_alphalens_factor(df)
 
 
 # ---------------------------------------------------------------------------
