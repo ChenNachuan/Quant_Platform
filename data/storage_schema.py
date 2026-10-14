@@ -13,32 +13,39 @@ Settled rulings on QUANT-12 override stale wording in the design docs:
 3. ``bars_daily`` holds stock + ETF + LOF together.  Table selection is by
    family (equity / futures / continuous), not by the 6-member ``AssetType``.
 
-Schema evolution: **add-column only**.  New columns must be ``nullable=True``
-so that ``union_by_name=true`` reads of pre-addition files still validate.
-``strict=True`` rejects unexpected columns on write.
+Schema evolution: **add-column only**.  To keep pre-addition frames passing
+validation, a new column must set **both** ``nullable=True`` (values may be
+null when ``union_by_name=true`` fills them) **and** ``required=False`` (the
+column may be entirely absent from older frames).  ``strict=True`` rejects
+unexpected columns on write.
 
 Implementation decisions (QUANT-12 §5, documented in the PR description):
 
-- ``trade_date`` datetime→date conversion happens **before** validation
-  via column-level ``coerce=True`` on date/datetime columns only: the schema
-  asserts the stored type (``date``).  Numeric columns use ``coerce=False``
-  so non-integral floats in integer columns raise instead of silently
-  truncating (Review fix 2026-10-14).
+- ``trade_date`` datetime→date conversion happens **before** validation via
+  a custom parser that accepts only datetime64 / date / string dates and
+  rejects integer input (which pandera would treat as epoch seconds).
+  Datetime columns likewise reject tz-aware timestamps (design uses naive
+  Beijing time).  Numeric columns use ``coerce=False`` so non-integral floats
+  in integer columns raise instead of silently truncating.
 - Dates are ``datetime.date`` / Parquet ``DATE``, **not** VARCHAR.
 - Schema changes are recorded in ``schema_changelog.jsonl`` alongside git log.
 - Factor value column is named per-factor via :func:`factor_schema`;
   ``SCHEMA["factor"]`` uses the canonical placeholder ``"value"``.
 - Factor DuckDB view names: ``factor_{sanitized}`` — non-alphanumerics → ``_``.
+  Use :class:`FactorViewRegistry` to detect collisions between distinct factor
+  names that sanitize to the same view.
 """
 
 from __future__ import annotations
 
 import re
 
+import numpy as np
+import pandas as pd
 import pandera.pandas as pa
-from pandera.pandas import Check, Column, DataFrameSchema
+from pandera.pandas import Check, Column, DataFrameSchema, Parser
 
-from core.asset_rules import validate_equity_ticker, validate_futures_ticker
+from core.asset_rules import EXCHANGE_MAP, validate_equity_ticker, validate_futures_ticker
 from core.types import QualityFlag
 
 # ---------------------------------------------------------------------------
@@ -54,6 +61,111 @@ QUALITY_FLAG_BITS: dict[str, int] = {
 CLEAN: int = int(QualityFlag.CLEAN)
 QUALITY_FLAG_MAX: int = 31  # 5 bits → value < 32
 
+
+def _quality_flag_column() -> Column:
+    """Shared quality_flag column: int64 bitmask, 5 bits, not-null."""
+    return Column(
+        int,
+        checks=[
+            Check.ge(0, name="quality_flag_non_negative"),
+            Check.lt(QUALITY_FLAG_MAX + 1, name="quality_flag_within_5_bits"),
+        ],
+        nullable=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Safe date / datetime coercion (code-review findings 1 & 2)
+# ---------------------------------------------------------------------------
+def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
+    """Reject numeric dtypes and numeric/tz-aware elements in object columns.
+
+    Pandera's built-in ``coerce=True`` treats integer values as epoch
+    seconds, so ``20240115`` silently becomes ``date(1970, 1, 1)``.  The
+    first iteration of this guard only checked ``dtype.kind in "iub"``,
+    which missed float64 (``20240115.0``) and object-dtype integers.
+    Reject *values*, not just dtypes.
+    """
+    if series.dtype.kind in "iufb":
+        if series.isna().all():
+            return  # all-null column: accept and let the caller emit NaT
+        raise ValueError(
+            f"numeric input to {kind} column not allowed (got dtype {series.dtype}); "
+            "pass datetime64, date, or ISO string"
+        )
+    if getattr(series.dtype, "tz", None) is not None:
+        raise ValueError(f"tz-aware input to {kind} column not allowed")
+    if series.dtype.kind == "O":
+        for val in series.dropna():
+            if isinstance(val, (bool, np.bool_, int, float, np.integer, np.floating)):
+                raise ValueError(
+                    f"numeric value {val!r} in {kind} column not allowed; "
+                    "pass datetime64, date, or ISO string"
+                )
+            if getattr(val, "tzinfo", None) is not None:
+                raise ValueError(f"tz-aware value {val!r} in {kind} column not allowed")
+
+
+def _safe_date_parser(series: pd.Series) -> pd.Series:
+    """Convert to ``datetime.date``, rejecting numeric and tz-aware input.
+
+    Accepts only datetime64 / date / string.  Nulls are preserved as
+    ``NaT`` so ``nullable=True`` columns pass through unchanged.
+    """
+    _reject_numeric_and_bad_objects(series, "date")
+    mask = series.isna()
+    result = pd.Series(index=series.index, dtype="object")
+    if (~mask).any():
+        try:
+            converted = pd.to_datetime(series[~mask], errors="raise")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"cannot parse date column: {exc}") from exc
+        result[~mask] = converted.dt.date
+    result[mask] = pd.NaT
+    return result
+
+
+def _safe_datetime_parser(series: pd.Series) -> pd.Series:
+    """Convert to naive ``datetime64``, rejecting numeric and tz-aware input.
+
+    The design uses naive Beijing time.  Pandera's built-in coercion silently
+    shifts tz-aware timestamps (e.g. ``09:31+0800`` → ``01:31``).
+    Nulls are preserved as ``NaT``.
+    """
+    _reject_numeric_and_bad_objects(series, "datetime")
+    mask = series.isna()
+    result = pd.Series(index=series.index, dtype="datetime64[ns]")
+    if (~mask).any():
+        try:
+            converted = pd.to_datetime(series[~mask], errors="raise")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"cannot parse datetime column: {exc}") from exc
+        if getattr(converted.dtype, "tz", None) is not None:
+            raise ValueError("tz-aware timestamps not allowed (design uses naive Beijing time)")
+        result[~mask] = converted
+    return result
+
+
+def _date_column(nullable: bool = False) -> Column:
+    """Date column with safe coercion (rejects int / tz-aware)."""
+    return Column(
+        pa.Date,
+        coerce=False,
+        parsers=Parser(_safe_date_parser),
+        nullable=nullable,
+    )
+
+
+def _datetime_column(nullable: bool = False) -> Column:
+    """Datetime column with safe coercion (rejects int / tz-aware)."""
+    return Column(
+        pa.DateTime,
+        coerce=False,
+        parsers=Parser(_safe_datetime_parser),
+        nullable=nullable,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared checks
 # ---------------------------------------------------------------------------
@@ -63,10 +175,6 @@ _equity_ticker_check = Check(
 _futures_ticker_check = Check(
     validate_futures_ticker, element_wise=True, name="futures_ticker",
 )
-_quality_flag_checks = [
-    Check.ge(0, name="quality_flag_non_negative"),
-    Check.lt(QUALITY_FLAG_MAX + 1, name="quality_flag_within_5_bits"),
-]
 _ohlcv_checks = [Check.gt(0, name="positive")]
 _non_negative_checks = [Check.ge(0, name="non_negative")]
 _event_type_check = Check.isin(
@@ -74,6 +182,9 @@ _event_type_check = Check.isin(
 )
 _classification_check = Check.isin(
     ["citics", "sw"], name="classification",
+)
+_exchange_check = Check.isin(
+    sorted(EXCHANGE_MAP), name="exchange_code",
 )
 
 
@@ -120,70 +231,81 @@ TABLE_FAMILY: dict[str, str] = {
 # Pandera schemas — 11 tables
 # ---------------------------------------------------------------------------
 
-def _table(columns: dict, **kwargs) -> DataFrameSchema:
-    """Build a table schema with the standard coerce / strict policy.
+def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSchema:
+    """Build a table schema with the standard coerce / strict / unique policy.
 
-    Schema-level coercion is **off** so that integer columns reject
-    non-integral floats instead of silently truncating them.  Date and
-    datetime columns carry ``coerce=True`` individually (§5 decision 1).
+    Schema-level coercion is **off**.  Date/datetime columns carry safe
+    parsers individually (§5 decision 1).  *unique* lists column names whose
+    combination must be unique (the table's PK per §47.14).
     """
-    return DataFrameSchema(columns, coerce=False, strict=True, **kwargs)
+    return DataFrameSchema(
+        columns, coerce=False, strict=True, unique=unique or [], **kwargs,
+    )
 
 
 # --- 1. bars_daily — 14 cols, PK(ticker, trade_date) ------------------------
-BARS_DAILY_SCHEMA = _table({
-    "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-    "open": Column(float, checks=_ohlcv_checks, nullable=False),
-    "high": Column(float, checks=_ohlcv_checks, nullable=False),
-    "low": Column(float, checks=_ohlcv_checks, nullable=False),
-    "close": Column(float, checks=_ohlcv_checks, nullable=False),
-    "volume": Column(int, checks=_non_negative_checks, nullable=False),
-    "amount": Column(float, checks=_non_negative_checks, nullable=False),
-    "adjfactor": Column(float, checks=_ohlcv_checks, nullable=False),
-    "turnover": Column(float, checks=_non_negative_checks, nullable=True),
-    "suspend": Column(bool, nullable=False),
-    "is_limit_up": Column(bool, nullable=False),
-    "is_limit_down": Column(bool, nullable=False),
-    "quality_flag": Column(int, checks=_quality_flag_checks, nullable=False),
-})
+BARS_DAILY_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "adjfactor": Column(float, checks=_ohlcv_checks, nullable=False),
+        "turnover": Column(float, checks=_non_negative_checks, nullable=True),
+        "suspend": Column(bool, nullable=False),
+        "is_limit_up": Column(bool, nullable=False),
+        "is_limit_down": Column(bool, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
 
 # --- 2. bars_minute — 10 cols, no adjfactor, PK(ticker, trade_date, datetime)
-BARS_MINUTE_SCHEMA = _table({
-    "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-    "datetime": Column(pa.DateTime, coerce=True, nullable=False),
-    "open": Column(float, checks=_ohlcv_checks, nullable=False),
-    "high": Column(float, checks=_ohlcv_checks, nullable=False),
-    "low": Column(float, checks=_ohlcv_checks, nullable=False),
-    "close": Column(float, checks=_ohlcv_checks, nullable=False),
-    "volume": Column(int, checks=_non_negative_checks, nullable=False),
-    "amount": Column(float, checks=_non_negative_checks, nullable=False),
-    "quality_flag": Column(int, checks=_quality_flag_checks, nullable=False),
-})
+BARS_MINUTE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "datetime": _datetime_column(),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "datetime"],
+)
 
 # --- 3. bars_daily_futures — 11 cols, settle/open_interest, no adjfactor ----
-BARS_DAILY_FUTURES_SCHEMA = _table({
-    "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-    "open": Column(float, checks=_ohlcv_checks, nullable=False),
-    "high": Column(float, checks=_ohlcv_checks, nullable=False),
-    "low": Column(float, checks=_ohlcv_checks, nullable=False),
-    "close": Column(float, checks=_ohlcv_checks, nullable=False),
-    "settle": Column(float, checks=_ohlcv_checks, nullable=False),
-    "volume": Column(int, checks=_non_negative_checks, nullable=False),
-    "amount": Column(float, checks=_non_negative_checks, nullable=False),
-    "open_interest": Column(int, checks=_non_negative_checks, nullable=False),
-    "quality_flag": Column(int, checks=_quality_flag_checks, nullable=False),
-})
+BARS_DAILY_FUTURES_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "settle": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "open_interest": Column(int, checks=_non_negative_checks, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
 
 # --- 4. tick_futures_l2 — 28 cols (Phase 2 reserved) ------------------------
 # bid_price_1~5 / bid_volume_1~5 / ask_price_1~5 / ask_volume_1~5 are five
 # independent columns each, not list-typed.  7 base + 20 book + quality_flag.
 _tick_base: dict = {
     "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-    "datetime": Column(pa.DateTime, coerce=True, nullable=False),
+    "trade_date": _date_column(),
+    "datetime": _datetime_column(),
     "last_price": Column(float, checks=_ohlcv_checks, nullable=False),
     "volume": Column(int, checks=_non_negative_checks, nullable=False),
     "amount": Column(float, checks=_non_negative_checks, nullable=False),
@@ -196,29 +318,38 @@ for _i in range(1, 6):
     _tick_book[f"ask_price_{_i}"] = Column(float, checks=_non_negative_checks, nullable=False)
     _tick_book[f"ask_volume_{_i}"] = Column(int, checks=_non_negative_checks, nullable=False)
 
-TICK_FUTURES_L2_SCHEMA = _table({
-    **_tick_base,
-    **_tick_book,
-    "quality_flag": Column(int, checks=_quality_flag_checks, nullable=False),
-})
+TICK_FUTURES_L2_SCHEMA = _table(
+    {
+        **_tick_base,
+        **_tick_book,
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "datetime"],
+)
 
 # --- 5. fundamental — 11 cols, valuation ratios nullable -------------------
-FUNDAMENTAL_SCHEMA = _table({
-    "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-    "total_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
-    "float_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
-    "pe_ttm": Column(float, nullable=True),
-    "pe_lyr": Column(float, nullable=True),
-    "pb": Column(float, nullable=True),
-    "ps_ttm": Column(float, nullable=True),
-    "total_shares": Column(int, checks=_non_negative_checks, nullable=False),
-    "float_shares": Column(int, checks=_non_negative_checks, nullable=False),
-    "quality_flag": Column(int, checks=_quality_flag_checks, nullable=False),
-})
+FUNDAMENTAL_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "total_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
+        "float_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
+        "pe_ttm": Column(float, nullable=True),
+        "pe_lyr": Column(float, nullable=True),
+        "pb": Column(float, nullable=True),
+        "ps_ttm": Column(float, nullable=True),
+        "total_shares": Column(int, checks=_non_negative_checks, nullable=False),
+        "float_shares": Column(int, checks=_non_negative_checks, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
 
 
 # --- 6. factor — 3 cols, value column named per-factor ---------------------
+_FACTOR_RESERVED_COLUMNS = frozenset({"ticker", "date"})
+
+
 def factor_schema(value_column: str = "value") -> DataFrameSchema:
     """Schema for one factor's long-format value table.
 
@@ -226,76 +357,100 @@ def factor_schema(value_column: str = "value") -> DataFrameSchema:
     The value column is named after the factor (issue QUANT-12: "3 cols
     ticker/date/{name}").  ``SCHEMA["factor"]`` uses the canonical placeholder
     ``"value"``; T2/T3 should call this function with the real factor name.
+
+    Raises ``ValueError`` when *value_column* collides with the fixed
+    ``ticker`` / ``date`` columns (code-review finding 5).
     """
-    return _table({
-        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-        "date": Column(pa.Date, coerce=True, nullable=False),
-        value_column: Column(float, nullable=True),
-    })
+    if value_column in _FACTOR_RESERVED_COLUMNS:
+        raise ValueError(
+            f"value_column {value_column!r} collides with a fixed column name; "
+            f"reserved names are {sorted(_FACTOR_RESERVED_COLUMNS)}"
+        )
+    return _table(
+        {
+            "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+            "date": _date_column(),
+            value_column: Column(float, nullable=True),
+        },
+        unique=["ticker", "date"],
+    )
 
 
 # Canonical placeholder for the SCHEMA registry.
 FACTOR_SCHEMA = factor_schema()
 
 # --- 7. calendar — 1 col, per-exchange file -------------------------------
-CALENDAR_SCHEMA = _table({
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-})
+CALENDAR_SCHEMA = _table(
+    {"trade_date": _date_column()},
+    unique=["trade_date"],
+)
 
 # --- 8. contract_specs — 12 cols, futures contract metadata ---------------
-CONTRACT_SPECS_SCHEMA = _table({
-    "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
-    "symbol": Column(str, nullable=False),
-    "exchange": Column(str, nullable=False),
-    "contract_multiplier": Column(float, checks=_ohlcv_checks, nullable=False),
-    "price_tick": Column(float, checks=_ohlcv_checks, nullable=False),
-    "list_date": Column(pa.Date, coerce=True, nullable=False),
-    "expire_date": Column(pa.Date, coerce=True, nullable=False),
-    "delivery_month": Column(str, nullable=False),
-    "price_limit_pct": Column(float, checks=_ohlcv_checks, nullable=False),
-    "margin_rate": Column(float, checks=_ohlcv_checks, nullable=True),
-    "trading_hours": Column(str, nullable=False),
-    "is_active": Column(bool, nullable=False),
-})
+CONTRACT_SPECS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
+        "symbol": Column(str, nullable=False),
+        "exchange": Column(str, checks=_exchange_check, nullable=False),
+        "contract_multiplier": Column(float, checks=_ohlcv_checks, nullable=False),
+        "price_tick": Column(float, checks=_ohlcv_checks, nullable=False),
+        "list_date": _date_column(),
+        "expire_date": _date_column(),
+        "delivery_month": Column(str, nullable=False),
+        "price_limit_pct": Column(float, checks=_ohlcv_checks, nullable=False),
+        "margin_rate": Column(float, checks=_ohlcv_checks, nullable=True),
+        "trading_hours": Column(str, nullable=False),
+        "is_active": Column(bool, nullable=False),
+    },
+    unique=["ticker"],
+)
 
 # --- 9. industry — 6 cols, l3 nullable ------------------------------------
-INDUSTRY_SCHEMA = _table({
-    "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "industry_l1": Column(str, nullable=False),
-    "industry_l2": Column(str, nullable=False),
-    "industry_l3": Column(str, nullable=True),
-    "classification": Column(str, checks=_classification_check, nullable=False),
-    "effective_date": Column(pa.Date, coerce=True, nullable=False),
-})
+INDUSTRY_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "industry_l1": Column(str, nullable=False),
+        "industry_l2": Column(str, nullable=False),
+        "industry_l3": Column(str, nullable=True),
+        "classification": Column(str, checks=_classification_check, nullable=False),
+        "effective_date": _date_column(),
+    },
+    unique=["ticker"],
+)
 
 # --- 10. corporate_actions — 10 cols, PK(ticker, ex_date, event_type) -----
-CORPORATE_ACTIONS_SCHEMA = _table({
-    "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-    "ex_date": Column(pa.Date, coerce=True, nullable=False),
-    "event_type": Column(str, checks=_event_type_check, nullable=False),
-    "announce_date": Column(pa.Date, coerce=True, nullable=True),
-    "record_date": Column(pa.Date, coerce=True, nullable=True),
-    "detail": Column(str, nullable=False),
-    "cash_dividend": Column(float, checks=_non_negative_checks, nullable=True),
-    "stock_dividend": Column(float, checks=_non_negative_checks, nullable=True),
-    "rights_price": Column(float, checks=_non_negative_checks, nullable=True),
-    "rights_ratio": Column(float, checks=_non_negative_checks, nullable=True),
-})
+CORPORATE_ACTIONS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "ex_date": _date_column(),
+        "event_type": Column(str, checks=_event_type_check, nullable=False),
+        "announce_date": _date_column(nullable=True),
+        "record_date": _date_column(nullable=True),
+        "detail": Column(str, nullable=False),
+        "cash_dividend": Column(float, checks=_non_negative_checks, nullable=True),
+        "stock_dividend": Column(float, checks=_non_negative_checks, nullable=True),
+        "rights_price": Column(float, checks=_non_negative_checks, nullable=True),
+        "rights_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+    },
+    unique=["ticker", "ex_date", "event_type"],
+)
 
 # --- 11. continuous — 11 cols, per-symbol file, no quality_flag -----------
-CONTINUOUS_SCHEMA = _table({
-    "trade_date": Column(pa.Date, coerce=True, nullable=False),
-    "dominant_contract": Column(str, checks=_futures_ticker_check, nullable=False),
-    "open": Column(float, checks=_ohlcv_checks, nullable=False),
-    "high": Column(float, checks=_ohlcv_checks, nullable=False),
-    "low": Column(float, checks=_ohlcv_checks, nullable=False),
-    "close": Column(float, checks=_ohlcv_checks, nullable=False),
-    "volume": Column(int, checks=_non_negative_checks, nullable=False),
-    "amount": Column(float, checks=_non_negative_checks, nullable=False),
-    "open_interest": Column(int, checks=_non_negative_checks, nullable=False),
-    "settle": Column(float, checks=_ohlcv_checks, nullable=False),
-    "adjfactor": Column(float, checks=_ohlcv_checks, nullable=False),
-})
+CONTINUOUS_SCHEMA = _table(
+    {
+        "trade_date": _date_column(),
+        "dominant_contract": Column(str, checks=_futures_ticker_check, nullable=False),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "open_interest": Column(int, checks=_non_negative_checks, nullable=False),
+        "settle": Column(float, checks=_ohlcv_checks, nullable=False),
+        "adjfactor": Column(float, checks=_ohlcv_checks, nullable=False),
+    },
+    unique=["trade_date"],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +483,42 @@ def factor_view_name(factor_name: str) -> str:
     Rule: ``factor_{sanitized}`` where every non-``[0-9a-zA-Z_]`` character
     becomes ``_``; if the sanitized name starts with a digit, prepend ``_``.
     The same sanitization applies to the value-column alias inside the view.
+
+    This is a pure function and does **not** detect collisions; use
+    :class:`FactorViewRegistry` when registering views at runtime.
     """
     sanitized = _non_alnum.sub("_", factor_name)
     if sanitized and sanitized[0].isdigit():
         sanitized = f"_{sanitized}"
     return f"factor_{sanitized}"
+
+
+class FactorViewRegistry:
+    """Collision-safe registry mapping factor names to DuckDB view names.
+
+    ``factor_view_name`` sanitizes names, so ``alpha.1`` and ``alpha_1``
+    both map to ``factor_alpha_1``.  Registering both through this
+    registry raises ``ValueError`` instead of silently overwriting.
+    """
+
+    def __init__(self) -> None:
+        self._views: dict[str, str] = {}  # view_name -> factor_name
+
+    def register(self, factor_name: str) -> str:
+        """Register *factor_name* and return its view name.
+
+        Raises ``ValueError`` on collision with a different factor name.
+        """
+        view = factor_view_name(factor_name)
+        existing = self._views.get(view)
+        if existing is not None and existing != factor_name:
+            raise ValueError(
+                f"factor view name collision: {existing!r} and {factor_name!r} "
+                f"both map to {view!r}"
+            )
+        self._views[view] = factor_name
+        return view
+
+    @property
+    def views(self) -> dict[str, str]:
+        return dict(self._views)
