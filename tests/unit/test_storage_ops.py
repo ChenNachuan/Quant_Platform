@@ -323,36 +323,46 @@ class TestFileLock:
 # parse_date_from_filename
 # ---------------------------------------------------------------------------
 class TestParseDateFromFilename:
-    @pytest.mark.parametrize(
-        "name,expected",
-        [
-            ("2024-01-15.parquet", date(2024, 1, 15)),
-            ("2024-01-15.parquet.tmp", date(2024, 1, 15)),
-            ("2024-01-15.parquet.lock", date(2024, 1, 15)),
-            ("20240115.parquet", date(2024, 1, 15)),
-            ("2024.parquet", date(2024, 1, 1)),
-            ("batch_2024-01-15_reject.json", date(2024, 1, 15)),
-        ],
-    )
-    def test_parses_date(self, name, expected):
-        assert parse_date_from_filename(name) == expected
+    def test_parses_iso_date(self):
+        assert parse_date_from_filename("2024-01-15.parquet") == date(2024, 1, 15)
 
-    @pytest.mark.parametrize(
-        "name",
-        [
-            "contract_specs.parquet",
-            "industry.parquet",
-            "corporate_actions.parquet",
-            "metadata.json",
-            "no-date-here.parquet",
-            "",
-        ],
-    )
-    def test_non_date_names_return_none(self, name):
-        assert parse_date_from_filename(name) is None
+    def test_parses_iso_date_under_tmp_suffix(self):
+        assert parse_date_from_filename("2024-01-15.parquet.tmp") == date(2024, 1, 15)
 
-    def test_invalid_calendar_date_falls_through(self):
-        # 2024-13-45 is not a real date — no valid parse
+    def test_parses_iso_date_under_lock_suffix(self):
+        assert parse_date_from_filename("2024-01-15.parquet.lock") == date(2024, 1, 15)
+
+    def test_parses_compact_date(self):
+        assert parse_date_from_filename("20240115.parquet") == date(2024, 1, 15)
+
+    def test_parses_year_partition(self):
+        assert parse_date_from_filename("2024.parquet") == date(2024, 1, 1)
+
+    def test_parses_embedded_date_in_rejection_name(self):
+        assert parse_date_from_filename("batch_2024-01-15_reject.json") == date(
+            2024, 1, 15
+        )
+
+    def test_contract_specs_has_no_date(self):
+        assert parse_date_from_filename("contract_specs.parquet") is None
+
+    def test_industry_has_no_date(self):
+        assert parse_date_from_filename("industry.parquet") is None
+
+    def test_corporate_actions_has_no_date(self):
+        assert parse_date_from_filename("corporate_actions.parquet") is None
+
+    def test_metadata_has_no_date(self):
+        assert parse_date_from_filename("metadata.json") is None
+
+    def test_plain_name_has_no_date(self):
+        assert parse_date_from_filename("no-date-here.parquet") is None
+
+    def test_empty_name_has_no_date(self):
+        assert parse_date_from_filename("") is None
+
+    def test_invalid_calendar_date_is_not_a_year_guess(self):
+        # 2024-13-45 is not a real date — must not fall through to a year
         assert parse_date_from_filename("2024-13-45.parquet") is None
 
 
@@ -577,19 +587,7 @@ class TestLifecycleConfig:
 # Capacity tiers
 # ---------------------------------------------------------------------------
 class TestCapacity:
-    @pytest.mark.parametrize(
-        "free,expected",
-        [
-            (60 * 1024**3, "OK"),
-            (50 * 1024**3 + 1, "OK"),
-            (50 * 1024**3, "WARNING"),
-            (20 * 1024**3, "WARNING"),
-            (10 * 1024**3 + 1, "WARNING"),
-            (10 * 1024**3, "CRITICAL"),
-            (0, "CRITICAL"),
-        ],
-    )
-    def test_tiers(self, tmp_path, monkeypatch, free, expected):
+    def _free(self, tmp_path, monkeypatch, free_bytes: int) -> str:
         import data.storage_ops as mod
 
         class Usage:
@@ -598,11 +596,32 @@ class TestCapacity:
         monkeypatch.setattr(
             mod.shutil,
             "disk_usage",
-            lambda _p: __import__("collections").namedtuple(
-                "U", "total used free"
-            )(100 * 1024**3, 100 * 1024**3 - free, free),
+            lambda _p: __import__("collections").namedtuple("U", "total used free")(
+                100 * 1024**3, 100 * 1024**3 - free_bytes, free_bytes
+            ),
         )
-        assert check_capacity(tmp_path) == expected
+        return check_capacity(tmp_path)
+
+    def test_well_above_ok_threshold(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 60 * 1024**3) == "OK"
+
+    def test_just_above_ok_threshold(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 50 * 1024**3 + 1) == "OK"
+
+    def test_exactly_ok_threshold_is_warning(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 50 * 1024**3) == "WARNING"
+
+    def test_mid_warning_band(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 20 * 1024**3) == "WARNING"
+
+    def test_just_above_critical_threshold(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 10 * 1024**3 + 1) == "WARNING"
+
+    def test_exactly_critical_threshold(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 10 * 1024**3) == "CRITICAL"
+
+    def test_zero_free_is_critical(self, tmp_path, monkeypatch):
+        assert self._free(tmp_path, monkeypatch, 0) == "CRITICAL"
 
     def test_returns_a_known_tier(self, tmp_path):
         assert check_capacity(tmp_path) in {"OK", "WARNING", "CRITICAL"}
