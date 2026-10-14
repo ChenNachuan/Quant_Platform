@@ -617,6 +617,27 @@ class TestDateColumnRejectsFloatAndObject:
         with pytest.raises((ValueError, pa.errors.SchemaErrors, pa.errors.SchemaError)):
             SCHEMA["bars_minute"].validate(df)
 
+    def test_numpy_int64_in_object_column_rejected(self):
+        import numpy as np
+        df = _valid_df("calendar")
+        df["trade_date"] = pd.Series([np.int64(20240115), "2024-01-16"], dtype=object)
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_numpy_float32_in_object_column_rejected(self):
+        import numpy as np
+        df = _valid_df("calendar")
+        df["trade_date"] = pd.Series([np.float32(20240115.0)], dtype=object)
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_numpy_bool_in_object_column_rejected(self):
+        import numpy as np
+        df = _valid_df("calendar")
+        df["trade_date"] = pd.Series([np.bool_(True)], dtype=object)
+        with pytest.raises(ValueError, match="numeric"):
+            SCHEMA["calendar"].validate(df)
+
 
 class TestPrimaryKeyUniqueness:
     """Finding 3: duplicate PK rows must be rejected (§47.14)."""

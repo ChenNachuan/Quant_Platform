@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 from pandera.pandas import Check, Column, DataFrameSchema, Parser
@@ -96,9 +97,7 @@ def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
         raise ValueError(f"tz-aware input to {kind} column not allowed")
     if series.dtype.kind == "O":
         for val in series.dropna():
-            if isinstance(val, bool):
-                raise ValueError(f"boolean input to {kind} column not allowed")
-            if isinstance(val, (int, float)):
+            if isinstance(val, (bool, np.bool_, int, float, np.integer, np.floating)):
                 raise ValueError(
                     f"numeric value {val!r} in {kind} column not allowed; "
                     "pass datetime64, date, or ISO string"
