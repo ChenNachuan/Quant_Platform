@@ -14,7 +14,11 @@
 ASSET_RULES: dict[str, dict]
 
 def get_asset_rules(asset_type: str) -> dict: ...
+
+def is_stamp_tax_exempt_prefix(ticker: str) -> bool: ...
 ```
+
+**入参契约**（`is_stamp_tax_exempt_prefix`）：canonical 入参是完整 ticker `CODE.EXCH`。函数只读 `[:2]`，因此 6 位码与 2 字符前缀同解；调用方（如 `FeeModel`）一律传完整 ticker。
 
 差异落层表（§69.5）：
 
@@ -43,7 +47,7 @@ def get_asset_rules(asset_type: str) -> dict: ...
 | A 股差异几乎全落 execution/ + data/ | 在 research/ 做资产分支 | research 因子计算对资产透明——因子只看 DataFrame |
 | 期货/期权不复用 SimAccount | V1 就预抽象保证金账本 | 保证金、逐日盯市是另一套账本，排 V3/V4 而不是预抽象 |
 | `get_asset_rules()` 未知类型 KeyError | 静默回落默认规则 | 不静默回落——错误配置必须立刻炸 |
-| 与 FeeModel._is_etf 同源一致 | 两处各自判断 | 前者按代码前缀自动判（51/15/16 免印花税），后者按资产类型显式配，必须对得上 |
+| 与 FeeModel._is_etf 同源一致 | 两处各自判断 | 前者按代码前缀自动判（ETF 免印花税前缀 = `("51","56","58","15","16")`），后者按资产类型显式配，必须对得上。**单源 = `core/asset_rules.py` 的 `STAMP_TAX_EXEMPT_PREFIXES`**（派生集，另含 FUND 前缀 `50`）；本文档不得再维护第二份前缀表 |
 
 ## 实现要点
 
@@ -70,6 +74,14 @@ ASSET_RULES = {
         "st_limit": None,
         "short": False,
     },
+    "fund": {
+        "t_plus": 1,
+        "lot_size": 100,
+        "stamp_tax": False,                     # listed fund (LOF etc.) 免印花税
+        "price_limits": {"main": 0.10},         # LOF 按股票 ±10%
+        "st_limit": None,
+        "short": False,
+    },
     # "bond": V2 预留    "futures": V3 预留    "option": V4 预留
 }
 
@@ -79,7 +91,9 @@ def get_asset_rules(asset_type: str) -> dict:
     return ASSET_RULES[asset_type]
 ```
 
-一致性校验点（§69 验证 4 条之一）：`get_asset_rules("etf")["stamp_tax"] == False` 必须与 `FeeModel._is_etf("510300")` 判定一致；stock 前缀 60/00/30/68/8 的 price_limits 映射正确。
+本表以 `core/asset_rules.py` 的 `ASSET_RULES` 为**单源**；LOF 落 `FUND`（前缀 `50`/`16`），不落 `stock` 也不落 `etf`。
+
+一致性校验点（§69 验证 4 条之一）：`get_asset_rules("etf")["stamp_tax"] == False` 必须与 `FeeModel._is_etf("510300")` 判定一致；stock 前缀 60/00/30/68/8 的 price_limits 映射正确；`is_stamp_tax_exempt_prefix("501050.SH") is True`（完整 ticker 入参契约）。
 
 ## 实施时定稿项
 
