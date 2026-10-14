@@ -268,6 +268,34 @@ def compute_depends_hash(factor: Factor, data: dict[str, pd.DataFrame]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Canonical row order
+# ---------------------------------------------------------------------------
+
+#: Sort keys for canonical output — applied in this order where present.
+_CANON_KEYS: tuple[str, ...] = ("date", "ticker")
+
+
+def _canonicalise(df: pd.DataFrame) -> pd.DataFrame:
+    """Put *df* into canonical row order: ``date``, then ``ticker``.
+
+    Every frame that enters or leaves :func:`compute_factor` goes through
+    this, so a factor's values never depend on which cache path (hit /
+    append / full) produced its inputs.  Order-sensitive compute
+    (``diff`` / ``shift`` / ``rolling`` without ``groupby``) is only
+    reproducible under one row order.
+    """
+    if df is None:
+        return df
+    keys = [c for c in _CANON_KEYS if c in df.columns]
+    if not keys:
+        return df
+    # mergesort: stable, so a frame with unique (date, ticker) keys — the
+    # output contract — always canonicalises to the same order for the same
+    # content, whatever order the rows arrived in.
+    return df.sort_values(keys, kind="mergesort").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Data assembly (Dev default — see PR description)
 # ---------------------------------------------------------------------------
 
@@ -281,15 +309,17 @@ def _assemble_data(
     """Build the ``data`` dict for ``factor.compute()``.
 
     Bare dependency names → data tables loaded via the DAG's ``data_loader``.
-    ``"factor:xxx"`` → recursively computed upstream factor results.
+    ``"factor:xxx"`` → recursively computed upstream factor results.  Each
+    frame is canonicalised so the consumer sees one row order regardless of
+    where the frame came from.
     """
     data: dict[str, pd.DataFrame] = {}
     for dep in factor.depends_on():
         kind, name = parse_dependency(dep)
         if kind == KIND_TABLE:
-            data[dep] = dag._data_loader(name, start, end)
+            data[dep] = _canonicalise(dag._data_loader(name, start, end))
         elif kind == KIND_FACTOR:
-            data[dep] = compute_factor(dag, name, start, end)
+            data[dep] = _canonicalise(compute_factor(dag, name, start, end))
     return data
 
 
@@ -376,6 +406,11 @@ def compute_factor(
       revision under the cached range → compute the full range
 
     The cache key is exactly ``(name, version, date_range, depends_hash)``.
+
+    Every returned frame — and every frame handed to ``compute()`` — is in
+    canonical row order (``date``, then ``ticker``), whatever path produced
+    it.  A factor's values therefore never depend on which cache path its
+    inputs came from.
     """
     if factor_name not in dag.factors:
         raise ValueError(f"factor {factor_name!r} is not registered")
@@ -408,13 +443,14 @@ def compute_factor(
             tail_result = tail_result.loc[tail_dates > c_end[:10]]
             result = pd.concat([cached_df, tail_result])
             result = result.drop_duplicates(["date", "ticker"])
-            result = result.sort_values(["date", "ticker"]).reset_index(drop=True)
+            result = _canonicalise(result)
             dag._cache[key] = result
             return result
 
     # 3. Full compute.
     result = factor.compute(data)
     validate_output(factor.name, result)
+    result = _canonicalise(result)
     dag._cache[key] = result
     return result
 

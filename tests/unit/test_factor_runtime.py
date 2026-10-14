@@ -249,6 +249,59 @@ class StampFactor(Factor):
         return df
 
 
+class TickerMajorUpstream(Factor):
+    """Upstream that emits rows in (ticker, date) order, not (date, ticker)."""
+
+    name = "ticker_major_val"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
+        df["ticker_major_val"] = df["close"] * 1.0
+        return df[["date", "ticker", "ticker_major_val"]]
+
+
+class ChainStampDownstream(Factor):
+    """Stamps compute() calls; consumes a factor: dependency.
+
+    Together with :class:`TickerMajorUpstream` this is the chain where a
+    cache-path-dependent upstream row order used to make the consumer's
+    depends_hash mismatch and kill the append branch.
+    """
+
+    name = "chain_stamp_val"
+    category = "time_series"
+    calls = 0
+
+    def depends_on(self):
+        return ["factor:ticker_major_val"]
+
+    def compute(self, data):
+        ChainStampDownstream.calls += 1
+        df = data["factor:ticker_major_val"][["date", "ticker"]].copy()
+        df["chain_stamp_val"] = float(ChainStampDownstream.calls)
+        return df
+
+
+class OrderSensitiveDownstream(Factor):
+    """Row-diff over its factor: input, with no groupby — order-sensitive."""
+
+    name = "order_diff_val"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["factor:ticker_major_val"]
+
+    def compute(self, data):
+        df = data["factor:ticker_major_val"].copy()
+        df["order_diff_val"] = df["ticker_major_val"].diff()
+        return df[["date", "ticker", "order_diff_val"]].dropna()
+
+
 # ---------------------------------------------------------------------------
 # FactorDAG — registration and topological ordering
 # ---------------------------------------------------------------------------
@@ -366,10 +419,10 @@ class TestCacheKey:
         assert set(prefix.unique()) == {1.0}, "cached prefix was recomputed"
         assert set(tail.unique()) == {2.0}, "tail was not freshly computed"
 
-        # Phase 2 — the appended tail is value-correct for a lookback factor
-        # (pct_change needs the day before the tail to be right).  Compare
-        # the whole extended frame against a fresh full compute on a clean
-        # DAG — including rows the old test never looked at.
+        # Phase 2 — the composition must equal a fresh full compute, values
+        # *and* row order.  assert_frame_equal is the check that bites when
+        # the append path sorts and the full path does not: comparing prefix
+        # and tail separately never looks at the seam or the order.
         dag2 = FactorDAG(data_loader=_synthetic_loader)
         dag2.register(SimpleReturn())
         short2 = compute_factor(dag2, "returns_1d", "2024-01-02", "2024-01-04")
@@ -379,26 +432,54 @@ class TestCacheKey:
         fresh = compute_factor(
             dag3, "returns_1d", "2024-01-02", "2024-01-08", force=True
         )
-        # History from the short run is preserved exactly ...
-        merged = short2.merge(extended2, on=["date", "ticker"], suffixes=("_s", "_f"))
-        assert len(merged) == len(short2)
-        assert np.allclose(
-            merged["returns_1d_s"].values,
-            merged["returns_1d_f"].values,
-            equal_nan=True,
+        assert len(extended2) > len(short2)
+        pd.testing.assert_frame_equal(extended2, fresh)
+
+    def test_append_mode_factor_chain(self):
+        # Same contract across a factor: dependency, whose row order used to
+        # follow the upstream's cache path and kill the consumer's append.
+        ChainStampDownstream.calls = 0
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(TickerMajorUpstream())
+        dag.register(ChainStampDownstream())
+        short = compute_factor(dag, "chain_stamp_val", "2024-01-02", "2024-01-04")
+        extended = compute_factor(dag, "chain_stamp_val", "2024-01-02", "2024-01-08")
+        assert len(extended) > len(short)
+        prefix = extended.loc[extended["date"] <= "2024-01-04", "chain_stamp_val"]
+        tail = extended.loc[extended["date"] > "2024-01-04", "chain_stamp_val"]
+        assert len(tail) > 0
+        assert set(prefix.unique()) == {1.0}, "factor: chain append did not fire"
+        assert set(tail.unique()) == {2.0}
+
+        # Composition equals a fresh full compute — values and row order.
+        dag2 = FactorDAG(data_loader=_synthetic_loader)
+        dag2.register(TickerMajorUpstream())
+        dag2.register(OrderSensitiveDownstream())
+        short2 = compute_factor(dag2, "order_diff_val", "2024-01-02", "2024-01-04")
+        extended2 = compute_factor(dag2, "order_diff_val", "2024-01-02", "2024-01-08")
+        dag3 = FactorDAG(data_loader=_synthetic_loader)
+        dag3.register(TickerMajorUpstream())
+        dag3.register(OrderSensitiveDownstream())
+        fresh = compute_factor(
+            dag3, "order_diff_val", "2024-01-02", "2024-01-08", force=True
         )
-        # ... and the tail rows match a fresh full compute.
-        tail2 = extended2.loc[extended2["date"] > "2024-01-04"]
-        fresh_tail = fresh.loc[fresh["date"] > "2024-01-04"]
-        tail_cmp = tail2.merge(
-            fresh_tail, on=["date", "ticker"], suffixes=("_a", "_f"), how="outer"
-        )
-        assert len(tail_cmp) == len(fresh_tail) == len(tail2)
-        assert np.allclose(
-            tail_cmp["returns_1d_a"].values,
-            tail_cmp["returns_1d_f"].values,
-            equal_nan=True,
-        )
+        assert len(extended2) > len(short2)
+        pd.testing.assert_frame_equal(extended2, fresh)
+
+    def test_cache_path_independent_values(self):
+        # Same requested range, two cache paths (upstream full vs upstream
+        # append), one answer.  The consumer is order-sensitive on purpose.
+        def run(pre_extend: bool) -> pd.DataFrame:
+            dag = FactorDAG(data_loader=_synthetic_loader)
+            dag.register(TickerMajorUpstream())
+            dag.register(OrderSensitiveDownstream())
+            if pre_extend:
+                compute_factor(dag, "order_diff_val", "2024-01-02", "2024-01-04")
+            return compute_factor(dag, "order_diff_val", "2024-01-02", "2024-01-08")
+
+        full_path = run(pre_extend=False)
+        append_path = run(pre_extend=True)
+        pd.testing.assert_frame_equal(full_path, append_path)
 
     def test_append_rejected_on_upstream_revision(self):
         # Compute a short range on unshifted data, then revise the upstream
