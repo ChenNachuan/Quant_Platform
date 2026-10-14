@@ -213,6 +213,57 @@ class TestAtomicWriteFailureInjection:
         assert list(tmp_path.iterdir()) == []
 
 
+class TestFsyncBeforeReplace:
+    """#5: durability — fsync the tmp before os.replace.
+
+    Exception-atomicity already holds; this is about a power cut leaving a
+    present-but-truncated target.  T2's DoD: a mid-write failure must never
+    leave a half-written file.
+    """
+
+    def test_fsync_called_before_replace(self, tmp_path, monkeypatch):
+        target = tmp_path / "2024-01-15.parquet"
+        call_order: list[str] = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def tracking_fsync(fd):
+            call_order.append("fsync")
+            return real_fsync(fd)
+
+        def tracking_replace(src, dst):
+            call_order.append("replace")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "fsync", tracking_fsync)
+        monkeypatch.setattr(os, "replace", tracking_replace)
+
+        write_parquet_atomic(_bars_daily_df(), target, table="bars_daily")
+
+        assert "fsync" in call_order, "fsync must be called"
+        assert "replace" in call_order, "replace must be called"
+        assert call_order.index("fsync") < call_order.index("replace"), (
+            f"fsync must precede replace, got {call_order}"
+        )
+
+    def test_fsync_count_at_least_one(self, tmp_path, monkeypatch):
+        target = tmp_path / "2024-01-15.parquet"
+        fsync_calls: list[int] = []
+        real_fsync = os.fsync
+
+        def counting_fsync(fd):
+            fsync_calls.append(fd)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", counting_fsync)
+
+        write_parquet_atomic(_bars_daily_df(), target, table="bars_daily")
+
+        assert len(fsync_calls) >= 1, (
+            f"expected at least one fsync call, got {len(fsync_calls)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Schema validation is wired to every write path
 # ---------------------------------------------------------------------------

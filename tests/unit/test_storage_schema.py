@@ -724,3 +724,133 @@ class TestContractSpecsExchange:
         df["exchange"] = "FAKE_EXCHANGE"
         with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
             SCHEMA["contract_specs"].validate(df)
+
+
+# ---------------------------------------------------------------------------
+# QUANT-15 regressions — second-review residuals
+# ---------------------------------------------------------------------------
+class TestTzAnnotatedStringDateRejected:
+    """#1: tz-annotated strings must not silently shift the date.
+
+    ``"2024-01-15 23:00:00+00:00"`` is 2024-01-16 in Beijing.  Taking the
+    literal date part is silent data corruption.
+    """
+
+    def test_utc_offset_string_rejected(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = "2024-01-15 23:00:00+00:00"
+        with pytest.raises(ValueError, match="tz"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_beijing_offset_string_rejected(self):
+        df = _valid_df("calendar")
+        df["trade_date"] = "2024-01-15 09:31:00+08:00"
+        with pytest.raises(ValueError, match="tz"):
+            SCHEMA["calendar"].validate(df)
+
+    def test_naive_string_date_still_accepted(self):
+        """No-tz ISO strings must keep their current behaviour."""
+        df = _valid_df("calendar")
+        df["trade_date"] = "2024-01-15"
+        result = SCHEMA["calendar"].validate(df)
+        assert result["trade_date"].iloc[0] == date(2024, 1, 15)
+
+    def test_tz_annotated_string_on_bars_daily_rejected(self):
+        df = _valid_df("bars_daily")
+        df["trade_date"] = "2024-01-15 23:00:00+00:00"
+        with pytest.raises(ValueError, match="tz"):
+            SCHEMA["bars_daily"].validate(df)
+
+
+class TestIndustryUniqueIncludesClassification:
+    """#2: unique=["ticker"] rejects a ticker carrying both citics and sw.
+
+    The schema's own ``classification`` column allows both values, so the
+    uniqueness constraint must include it.
+    """
+
+    def _industry_row(self, classification: str, **overrides) -> dict:
+        row = _valid_row("industry")
+        row["classification"] = classification
+        row.update(overrides)
+        return row
+
+    def test_same_ticker_two_classifications_accepted(self):
+        df = pd.DataFrame(
+            [
+                self._industry_row("citics"),
+                self._industry_row("sw"),
+            ]
+        )
+        result = SCHEMA["industry"].validate(df)
+        assert len(result) == 2
+
+    def test_same_ticker_same_classification_rejected(self):
+        df = pd.DataFrame(
+            [
+                self._industry_row("citics"),
+                self._industry_row("citics"),
+            ]
+        )
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["industry"].validate(df)
+
+    def test_three_classifications_same_ticker_rejected_on_duplicate(self):
+        """Two citics + one sw: the duplicate citics pair must still fail."""
+        df = pd.DataFrame(
+            [
+                self._industry_row("citics"),
+                self._industry_row("sw"),
+                self._industry_row("citics"),
+            ]
+        )
+        with pytest.raises((pa.errors.SchemaErrors, pa.errors.SchemaError)):
+            SCHEMA["industry"].validate(df)
+
+
+class TestMissingLookingStringsRejected:
+    """#3: garbage strings that look like missing must be rejected uniformly.
+
+    ``""`` / ``"NaN"`` / ``"nan"`` / ``"NaT"`` used to silently become ``NaT``
+    while ``"null"`` / ``"  "`` raised.  All six must be rejected; real
+    missing values (``None`` / ``NaN``) must pass on nullable columns.
+    """
+
+    GARBAGE = ["", "NaN", "nan", "NaT", "null", "  "]
+
+    @pytest.mark.parametrize("garbage", GARBAGE)
+    def test_garbage_string_rejected_on_date(self, garbage):
+        df = _valid_df("calendar")
+        df["trade_date"] = garbage
+        with pytest.raises(ValueError):
+            SCHEMA["calendar"].validate(df)
+
+    @pytest.mark.parametrize("garbage", GARBAGE)
+    def test_garbage_string_rejected_on_datetime(self, garbage):
+        row = _valid_row("bars_minute")
+        row["datetime"] = garbage
+        df = pd.DataFrame([row])
+        with pytest.raises(ValueError):
+            SCHEMA["bars_minute"].validate(df)
+
+    @pytest.mark.parametrize("garbage", GARBAGE)
+    def test_garbage_string_rejected_on_nullable_date(self, garbage):
+        row = _valid_row("corporate_actions")
+        row["announce_date"] = garbage
+        df = pd.DataFrame([row])
+        with pytest.raises(ValueError):
+            SCHEMA["corporate_actions"].validate(df)
+
+    def test_none_accepted_on_nullable_date(self):
+        row = _valid_row("corporate_actions")
+        row["announce_date"] = None
+        df = pd.DataFrame([row])
+        result = SCHEMA["corporate_actions"].validate(df)
+        assert pd.isna(result["announce_date"].iloc[0])
+
+    def test_nan_accepted_on_nullable_date(self):
+        row = _valid_row("corporate_actions")
+        row["record_date"] = float("nan")
+        df = pd.DataFrame([row])
+        result = SCHEMA["corporate_actions"].validate(df)
+        assert pd.isna(result["record_date"].iloc[0])
