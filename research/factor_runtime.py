@@ -401,7 +401,7 @@ def compute_factor(
     - **cache hit** — exact key match and ``force=False`` → return cached
     - **append** — same (name, version) cached for a shorter range starting
       at *start*, with dependency content over that range unchanged →
-      reuse the cached prefix and compute the tail
+      the cached prefix is reused and the rows past it are filled in
     - **full** — no cache, ``force=True``, version change, or an upstream
       revision under the cached range → compute the full range
 
@@ -411,6 +411,19 @@ def compute_factor(
     canonical row order (``date``, then ``ticker``), whatever path produced
     it.  A factor's values therefore never depend on which cache path its
     inputs came from.
+
+    **Append is a provenance guarantee, not a speed-up.**  The historical
+    rows come from the cache bit-identical, so a range extension never
+    re-derives them; the new rows are computed with full dependency context
+    so lookback factors get the boundary values a full compute would give.
+    Because :meth:`Factor.compute` is a black box with no lookback
+    declaration, that context is the whole range — append therefore costs
+    the same compute as full, and earns reproducibility rather than CPU.
+    A genuine tail-only compute needs a ``lookback`` / ``compute_delta``
+    contract on :class:`~research.factor_interface.Factor` (T1, not
+    extended here).  The splice assumes ``compute()`` is a pure function of
+    ``data``; an impure factor would make any cache path unsound, not just
+    this one.
     """
     if factor_name not in dag.factors:
         raise ValueError(f"factor {factor_name!r} is not registered")
@@ -437,6 +450,11 @@ def compute_factor(
             # (pct_change, rolling windows) see the history a full compute
             # would give them, then keep only the rows past the cached end.
             # The prefix itself is taken from the cache, bit-identical.
+            #
+            # Same CPU as the full branch — see the compute_factor docstring.
+            # The win is provenance (cached history reused, not re-derived),
+            # not speed; a cheaper tail needs Factor to declare its lookback,
+            # which is T1's to add.
             tail_result = factor.compute(data)
             validate_output(factor.name, tail_result)
             tail_dates = tail_result["date"].astype(str).str[:10]
