@@ -1,0 +1,528 @@
+"""Tests for research.factor_runtime — FactorDAG, caching, failure isolation.
+
+Covers every DoD row: cycle detection (ValueError), dependency ordering
+(upstream before downstream), cache key shape and override semantics
+(force / version-bump), failure propagation in compute_all_safe, and the
+look-ahead red line (test_no_lookahead).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from research.factor_interface import Factor
+from research.factor_runtime import (
+    FactorDAG,
+    MLFactor,
+    compute_all,
+    compute_all_safe,
+    compute_depends_hash,
+    compute_factor,
+)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic data helpers
+# ---------------------------------------------------------------------------
+
+_DATES = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]
+_TICKERS = ["000001.SZ", "000002.SZ"]
+
+
+def _make_bars(start: str = "2024-01-02", end: str = "2024-01-08") -> pd.DataFrame:
+    """Synthetic OHLCV bars for two tickers over five trading days."""
+    rows = []
+    for t in _TICKERS:
+        base = 10.0 if t == "000001.SZ" else 20.0
+        for i, d in enumerate(_DATES):
+            if d < start or d > end:
+                continue
+            rows.append(
+                {
+                    "date": d,
+                    "ticker": t,
+                    "open": base + i * 0.5,
+                    "high": base + i * 0.5 + 0.3,
+                    "low": base + i * 0.5 - 0.3,
+                    "close": base + i * 0.5 + 0.1,
+                    "volume": 1000 + i * 100,
+                    "amount": (base + i * 0.5) * (1000 + i * 100),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _synthetic_loader(table_name: str, start: str, end: str) -> pd.DataFrame:
+    """Test-double data loader — returns synthetic bars filtered by range."""
+    if table_name == "bars_daily":
+        return _make_bars(start, end)
+    raise ValueError(f"unknown table {table_name!r}")
+
+
+# ---------------------------------------------------------------------------
+# Test factor fixtures
+# ---------------------------------------------------------------------------
+
+
+class SimpleReturn(Factor):
+    """1-day return — looks backwards only (no look-ahead)."""
+
+    name = "returns_1d"
+    description = "1-day pct change of close"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
+        df["returns_1d"] = df.groupby("ticker")["close"].pct_change(1)
+        return df[["date", "ticker", "returns_1d"]].dropna()
+
+
+class Volatility5D(Factor):
+    """Rolling std of returns — upstream of VolAdjMomentum."""
+
+    name = "volatility_5d"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
+        df["volatility_5d"] = (
+            df.groupby("ticker")["close"].pct_change(1).rolling(3).std()
+        )
+        return df[["date", "ticker", "volatility_5d"]].dropna()
+
+
+class VolAdjMomentum(Factor):
+    """Depends on two upstream factors via the factor: prefix."""
+
+    name = "vol_adj_momentum"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["factor:returns_1d", "factor:volatility_5d"]
+
+    def compute(self, data):
+        ret = data["factor:returns_1d"]
+        vol = data["factor:volatility_5d"]
+        merged = ret.merge(vol, on=["date", "ticker"])
+        merged["vol_adj_momentum"] = merged["returns_1d"] / merged["volatility_5d"]
+        return merged[["date", "ticker", "vol_adj_momentum"]].dropna()
+
+
+class SlowFactor(Factor):
+    """Always raises — used for failure-propagation tests."""
+
+    name = "slow_factor"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        raise RuntimeError("intentional failure for testing")
+
+
+class DownstreamOfSlow(Factor):
+    """Depends on SlowFactor — must be skipped when SlowFactor fails."""
+
+    name = "downstream_of_slow"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["factor:slow_factor"]
+
+    def compute(self, data):
+        df = data["factor:slow_factor"].copy()
+        df["downstream_of_slow"] = 1.0
+        return df[["date", "ticker", "downstream_of_slow"]]
+
+
+class IndependentFactor(Factor):
+    """Same layer as DownstreamOfSlow — must survive SlowFactor's failure."""
+
+    name = "independent_factor"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df["independent_factor"] = df["close"] * 2.0
+        return df[["date", "ticker", "independent_factor"]]
+
+
+class CycleA(Factor):
+    name = "cycle_a"
+
+    def depends_on(self):
+        return ["factor:cycle_b"]
+
+    def compute(self, data):
+        return pd.DataFrame(columns=["date", "ticker", "cycle_a"])
+
+
+class CycleB(Factor):
+    name = "cycle_b"
+
+    def depends_on(self):
+        return ["factor:cycle_a"]
+
+    def compute(self, data):
+        return pd.DataFrame(columns=["date", "ticker", "cycle_b"])
+
+
+class SelfCycle(Factor):
+    name = "self_cycle"
+
+    def depends_on(self):
+        return ["factor:self_cycle"]
+
+    def compute(self, data):
+        return pd.DataFrame(columns=["date", "ticker", "self_cycle"])
+
+
+class LookAheadFactor(Factor):
+    """DELIBERATE look-ahead: uses full-sample mean (includes future dates).
+
+    Deleting the final day changes the mean and therefore changes every
+    historical value — test_no_lookahead must catch this.
+    """
+
+    name = "lookahead_bad"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        # LOOKAHEAD BUG: mean over the full sample includes future dates.
+        df["lookahead_bad"] = df["close"] / df["close"].mean() - 1
+        return df[["date", "ticker", "lookahead_bad"]]
+
+
+class CausalFactor(Factor):
+    """Correct factor: 1-day return, strictly backwards-looking."""
+
+    name = "causal_return"
+    category = "time_series"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
+        df["causal_return"] = df.groupby("ticker")["close"].pct_change(1)
+        return df[["date", "ticker", "causal_return"]].dropna()
+
+
+# ---------------------------------------------------------------------------
+# FactorDAG — registration and topological ordering
+# ---------------------------------------------------------------------------
+
+
+class TestFactorDAG:
+    def test_register_and_topological_sort(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        dag.register(Volatility5D())
+        dag.register(VolAdjMomentum())
+        order = dag.topological_sort()
+        assert order.index("returns_1d") < order.index("vol_adj_momentum")
+        assert order.index("volatility_5d") < order.index("vol_adj_momentum")
+
+    def test_topological_layers_upstream_before_downstream(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        dag.register(Volatility5D())
+        dag.register(VolAdjMomentum())
+        layers = dag.topological_layers()
+        # Layer 0: both roots; layer 1: the dependent factor.
+        assert set(layers[0]) == {"returns_1d", "volatility_5d"}
+        assert layers[1] == ["vol_adj_momentum"]
+
+    def test_cycle_raises_value_error(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(CycleA())
+        dag.register(CycleB())
+        with pytest.raises(ValueError, match="circular"):
+            dag.topological_sort()
+
+    def test_cycle_layers_raises_value_error(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(CycleA())
+        dag.register(CycleB())
+        with pytest.raises(ValueError, match="circular"):
+            dag.topological_layers()
+
+    def test_self_cycle_raises(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SelfCycle())
+        with pytest.raises(ValueError, match="circular"):
+            dag.topological_sort()
+
+    def test_duplicate_register_raises(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        with pytest.raises(ValueError, match="already registered"):
+            dag.register(SimpleReturn())
+
+    def test_dangling_dependency_raises(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(VolAdjMomentum())  # depends on unregistered factors
+        with pytest.raises(ValueError, match="unregistered"):
+            dag.topological_sort()
+
+
+# ---------------------------------------------------------------------------
+# Cache key
+# ---------------------------------------------------------------------------
+
+
+class TestCacheKey:
+    def test_cache_key_shape(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
+        keys = list(dag._cache.keys())
+        assert len(keys) == 1
+        name, version, date_range, dep_hash = keys[0]
+        assert name == "returns_1d"
+        assert version == "1.0"
+        assert date_range == ("2024-01-02", "2024-01-08")
+        assert isinstance(dep_hash, str) and len(dep_hash) == 12
+
+    def test_force_overrides_cache(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        result1 = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
+        result2 = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
+        assert result1 is result2  # cache hit — same object
+
+        result3 = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08", force=True)
+        assert result3 is not result1  # force recomputed
+        pd.testing.assert_frame_equal(result3, result1)
+
+    def test_version_change_triggers_full_recompute(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
+        # Bump version — new cache key, not an append.
+        SimpleReturn.version = "2.0"
+        try:
+            result = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
+        finally:
+            SimpleReturn.version = "1.0"
+        assert len(dag._cache) == 2  # old key + new key
+        assert result is not None
+
+    def test_append_mode(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        # First compute over a shorter range.
+        short = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-04")
+        assert len(short) > 0
+        # Then extend the range — should append, not full-recompute.
+        full = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
+        assert len(full) > len(short)
+        # History from the short run is preserved.
+        merged = short.merge(full, on=["date", "ticker"], suffixes=("_s", "_f"))
+        assert np.allclose(
+            merged["returns_1d_s"].values,
+            merged["returns_1d_f"].values,
+            equal_nan=True,
+        )
+
+    def test_depends_hash_changes_with_data(self):
+        factor = SimpleReturn()
+        data1 = {"bars_daily": _make_bars("2024-01-02", "2024-01-08")}
+        data2 = {"bars_daily": _make_bars("2024-01-02", "2024-01-04")}
+        hash1 = compute_depends_hash(factor, data1)
+        hash2 = compute_depends_hash(factor, data2)
+        assert hash1 != hash2
+        assert len(hash1) == 12
+
+
+# ---------------------------------------------------------------------------
+# Dependency order — upstream computed before downstream
+# ---------------------------------------------------------------------------
+
+
+class TestDependencyOrder:
+    def test_upstream_computed_first(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        dag.register(Volatility5D())
+        dag.register(VolAdjMomentum())
+        results = compute_all(dag, "2024-01-02", "2024-01-08")
+        assert set(results) == {"returns_1d", "volatility_5d", "vol_adj_momentum"}
+        # Downstream result exists and is derived from upstream values.
+        assert not results["vol_adj_momentum"].empty
+
+    def test_compute_all_returns_all_factors(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        dag.register(IndependentFactor())
+        results = compute_all(dag, "2024-01-02", "2024-01-08")
+        assert set(results) == {"returns_1d", "independent_factor"}
+
+
+# ---------------------------------------------------------------------------
+# Failure propagation (compute_all_safe)
+# ---------------------------------------------------------------------------
+
+
+class TestFailurePropagation:
+    def test_upstream_failure_skips_downstream(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SlowFactor())
+        dag.register(DownstreamOfSlow())
+        results, errors = compute_all_safe(dag, "2024-01-02", "2024-01-08")
+        assert "slow_factor" in errors
+        assert isinstance(errors["slow_factor"], RuntimeError)
+        assert "downstream_of_slow" in errors
+        assert "slow_factor" not in results
+        assert "downstream_of_slow" not in results
+
+    def test_independent_same_layer_survives(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SlowFactor())
+        dag.register(DownstreamOfSlow())
+        dag.register(IndependentFactor())
+        results, errors = compute_all_safe(dag, "2024-01-02", "2024-01-08")
+        assert "independent_factor" in results
+        assert "independent_factor" not in errors
+
+    def test_compute_all_raises_on_failure(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SlowFactor())
+        with pytest.raises(RuntimeError, match="intentional"):
+            compute_all(dag, "2024-01-02", "2024-01-08")
+
+    def test_safe_returns_partial_results(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        dag.register(SlowFactor())
+        dag.register(IndependentFactor())
+        results, errors = compute_all_safe(dag, "2024-01-02", "2024-01-08")
+        assert "returns_1d" in results
+        assert "independent_factor" in results
+        assert "slow_factor" in errors
+
+
+# ---------------------------------------------------------------------------
+# Look-ahead red line (DoD sharpest row)
+# ---------------------------------------------------------------------------
+
+
+class TestNoLookAhead:
+    def test_no_lookahead(self):
+        """Deleting the final day must leave history unchanged.
+
+        A causal factor's historical values must not change when the last
+        day is removed.  A deliberately look-ahead factor must FAIL this
+        check — proving the test has teeth.
+        """
+        # --- causal factor: history unchanged ---
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(CausalFactor())
+
+        full = compute_factor(dag, "causal_return", "2024-01-02", "2024-01-08")
+        # Delete the final day and recompute.
+        trunc = compute_factor(dag, "causal_return", "2024-01-02", "2024-01-05")
+
+        last_date = full["date"].max()
+        full_history = full[full["date"] < last_date].reset_index(drop=True)
+        assert len(full_history) > 0
+        assert len(trunc) == len(full_history)
+        np.testing.assert_allclose(
+            full_history["causal_return"].values,
+            trunc["causal_return"].values,
+            equal_nan=True,
+            err_msg="causal factor: history changed after deleting last day",
+        )
+
+    def test_lookahead_fixture_fails(self):
+        """Prove the lookahead test has teeth: a deliberately bad factor
+        must NOT satisfy the history-unchanged property."""
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(LookAheadFactor())
+
+        full = compute_factor(dag, "lookahead_bad", "2024-01-02", "2024-01-08")
+        trunc = compute_factor(dag, "lookahead_bad", "2024-01-02", "2024-01-05")
+
+        last_date = full["date"].max()
+        full_history = full[full["date"] < last_date].reset_index(drop=True)
+        assert len(full_history) > 0
+
+        # The full-sample mean shifts when the last day is removed —
+        # every historical value changes.  The allclose assertion must fail.
+        history_matches = np.allclose(
+            full_history["lookahead_bad"].values,
+            trunc["lookahead_bad"].values,
+            equal_nan=True,
+        )
+        assert not history_matches, (
+            "lookahead fixture unexpectedly passed — test has no teeth"
+        )
+
+
+# ---------------------------------------------------------------------------
+# MLFactor skeleton
+# ---------------------------------------------------------------------------
+
+
+class TestMLFactor:
+    def test_ml_factor_skeleton_fields(self):
+        assert MLFactor.retrain_freq == "monthly"
+        assert MLFactor.timeout_seconds == 300
+        assert MLFactor.model_path == ""
+        assert MLFactor.name == "ml_factor"
+
+    def test_ml_factor_train_raises(self):
+        ml = MLFactor()
+        with pytest.raises(NotImplementedError, match="S11"):
+            ml.train({}, "2024-01-01")
+
+    def test_ml_factor_predict_raises(self):
+        ml = MLFactor()
+        with pytest.raises(NotImplementedError, match="S11"):
+            ml.predict(None, {})
+
+    def test_ml_factor_compute_raises(self):
+        ml = MLFactor()
+        with pytest.raises(NotImplementedError, match="S11"):
+            ml.compute({})
+
+    def test_ml_factor_is_isolated_in_compute_all(self):
+        """ML factors compute serially (separate from normal factors)."""
+
+        class MyML(MLFactor):
+            name = "my_ml_factor"
+            version = "1.0"
+
+            def depends_on(self):
+                return ["bars_daily"]
+
+            def compute(self, data):
+                df = data["bars_daily"][["date", "ticker", "close"]].copy()
+                df["my_ml_factor"] = df["close"] * 0.5
+                return df[["date", "ticker", "my_ml_factor"]]
+
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        dag.register(MyML())
+        results = compute_all(dag, "2024-01-02", "2024-01-08")
+        assert "my_ml_factor" in results
+        assert "returns_1d" in results
