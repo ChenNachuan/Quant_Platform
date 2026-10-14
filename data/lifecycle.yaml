@@ -1,0 +1,43 @@
+# Retention policy for data_platform/ — the only place retention lives.
+# Consumed by data.storage_ops.cleanup_expired; never hard-coded in Python.
+#
+# Rule shapes:
+#   retention: permanent          — never deleted
+#   retention: rolling + days:N   — delete when the date parsed from the
+#                                   filename is older than N days
+#
+# Matching is by path prefix relative to the data root; the longest matching
+# prefix wins.  Files whose name carries no date are kept — deleting a
+# full-file reference table because its name has no date would lose the
+# whole table (QUANT-13 §5 decision 8).
+#
+# Retention scope per docs/design/data/storage_ops.md §49/§51:
+#   asset/ + factors/ + research/  permanent
+#   raw/ + corrections/ + cross_check/ + dqc_detail/   1 year rolling
+#   quarantine/                    30 days rolling
+version: 1
+default: permanent
+policies:
+  - prefix: asset
+    retention: permanent
+  - prefix: factors
+    retention: permanent
+  - prefix: research
+    retention: permanent
+  - prefix: logs
+    retention: permanent
+  - prefix: raw
+    retention: rolling
+    days: 365
+  - prefix: corrections
+    retention: rolling
+    days: 365
+  - prefix: cross_check
+    retention: rolling
+    days: 365
+  - prefix: dqc_detail
+    retention: rolling
+    days: 365
+  - prefix: quarantine
+    retention: rolling
+    days: 30
