@@ -1225,6 +1225,40 @@ class TestBackupScript:
         assert result.returncode == 1
         assert "lost files" in result.stderr
 
+    def test_source_shrinking_midrun_does_not_collapse_the_floor(self, tmp_path):
+        """The lower bound must not fall with the source.
+
+        `min(src_count_before, src_count)` let a tree that shrank mid-run
+        drag the floor down with it: rsync --delete had already mirrored the
+        smaller tree, the guard compared the wreckage against itself and
+        printed OK over the destroyed previous backup. A shrink during the
+        run is not routine retention — `cleanup_expired` is scheduled
+        separately and finishes before this script samples `src_count_before`.
+        """
+        src = _make_data_platform(tmp_path)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "rsync"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "# shrink the source first, then mirror — rsync --delete takes the\n"
+            "# previous backup down to the shrunken tree with it\n"
+            f'rm -f "{src}/raw/src/eq/2024-01-15.parquet"\n'
+            f'REAL="{_real_rsync()}"\n'
+            '"$REAL" "$@"\n'
+        )
+        stub.chmod(0o755)
+
+        result = _run_backup(src, dest, PATH=f"{stub_dir}:{os.environ['PATH']}")
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "lost files" in result.stderr
+        # the diagnostic must name the collapse, not just a bare mismatch
+        assert "pre-sync=2" in result.stderr
+        assert "counts match" not in result.stdout
+
     def test_rsync_partial_transfer_status_is_not_fatal(self, tmp_path):
         """rsync 23/24 are live-tree churn, not a failed backup.
 

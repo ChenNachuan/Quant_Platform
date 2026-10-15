@@ -22,7 +22,11 @@ def layer_of_path(path) -> str:
     """
     parts = Path(path).parts
     if "tests" in parts:
-        idx = parts.index("tests") + 1
+        # The LAST "tests" component: `parts.index` takes the first, so a
+        # checkout under an ancestor directory named `tests`
+        # (e.g. /home/tests/repo/tests/integration/x.py) would classify from
+        # `repo` and fall through to the `unit` default.
+        idx = max(i for i, part in enumerate(parts) if part == "tests") + 1
         if idx < len(parts) and parts[idx] in LAYER_MARKERS:
             return parts[idx]
     return "unit"
