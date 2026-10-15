@@ -193,24 +193,28 @@ esac
 # SRC is a live Parquet tree, so both sides are sampled AFTER the sync and the
 # check is two-sided rather than an equality:
 #   dest_count >= src_count_before   nothing that existed at start was lost
-#   dest_count <= src_count          nothing appeared on DEST that SRC lacks
+#                                    (hard floor — must NOT shrink with SRC)
+#   dest_count <= src_high           nothing appeared on DEST that SRC lacks
+#                                    (warn only — live-tree churn is real)
 # A file landing mid-sync therefore cannot turn a successful backup into a
-# FAIL, while a genuinely partial sync still fails the lower bound.
+# FAIL: it shows up in the post-sync source sample and is copied on the next
+# run. What does FAIL is losing something that was there when we started.
 src_count="$(count_files "${src_abs}")"
 dest_count="$(count_files "${dest_abs}")"
 
 echo "backup.sh: source files=${src_count} dest files=${dest_count} (pre-sync ${src_count_before})"
-# Lower bound tolerates a shrinking source: a concurrent
-# `data.storage_ops.cleanup_expired` legitimately removes files mid-sync and
-# `rsync --delete` correctly mirrors the smaller tree.  Taking the bound from
-# `min(before, after)` still catches a partial transfer, while not reporting
-# normal churn as a lost backup.
+# Lower bound is the PRE-SYNC count and must not collapse. Taking
+# `min(before, after)` made the floor fall with the source: an unmounted tree
+# or an over-eager cleanup drops `src_count` toward 0, `rsync --delete` has
+# already mirrored the shrunken tree, and the guard then reports OK over the
+# wreckage of the previous backup. `src_count_before` is sampled after any
+# already-finished `cleanup_expired` run (they are scheduled separately), so
+# a shrink *during* this script is not routine retention — it is the case
+# this guard exists to stop.
 src_low="${src_count_before}"
-if [[ "${src_count}" -lt "${src_low}" ]]; then
-    src_low="${src_count}"
-fi
 if [[ "${dest_count}" -lt "${src_low}" ]]; then
-    echo "backup.sh: FAIL — destination lost files (source-low=${src_low} dest=${dest_count})" >&2
+    echo "backup.sh: FAIL — destination lost files (pre-sync=${src_count_before} source-now=${src_count} dest=${dest_count})" >&2
+    echo "backup.sh:        the tree shrank mid-run or the transfer was partial; if cleanup_expired really ran concurrently, re-run after it finishes, otherwise investigate an unmount or a bad delete" >&2
     exit 1
 fi
 # Upper bound uses the LARGER of the two source samples. If cleanup_expired

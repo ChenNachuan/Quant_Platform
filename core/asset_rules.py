@@ -105,23 +105,39 @@ PREFIX_EXCHANGE: dict[str, str] = {
 #: Futures product code -> the only exchange it trades on. Same reason as
 #: ``PREFIX_RULES``: an ``IF2406.SHFE`` must fail, not pass, because the
 #: suffix drives calendar selection and instrument identity.
+#:
+#: This is a **contradiction detector, not an admission list**. A product
+#: that is absent is not thereby illegal — exchanges list new contracts, and
+#: a closed whitelist turns ``validate_futures_ticker`` into an engine that
+#: rejects live instruments at write time. Unknown product + a valid
+#: exchange token therefore passes; a known product with the wrong venue
+#: fails. Keep the map as complete as the listings are known, so the
+#: contradiction check has reach, but never make correctness depend on it
+#: being exhaustive.
 FUTURES_EXCHANGE: dict[str, str] = {
+    # CFFEX — index & bond futures
     "IF": "CFFEX", "IH": "CFFEX", "IC": "CFFEX", "IM": "CFFEX", "T": "CFFEX",
     "TF": "CFFEX", "TS": "CFFEX", "TL": "CFFEX",
+    # SHFE — metals & chemicals
     "CU": "SHFE", "AL": "SHFE", "ZN": "SHFE", "PB": "SHFE", "NI": "SHFE",
     "SN": "SHFE", "AU": "SHFE", "AG": "SHFE", "RB": "SHFE", "HC": "SHFE",
     "SS": "SHFE", "BU": "SHFE", "RU": "SHFE", "FU": "SHFE", "SP": "SHFE",
-    "BR": "SHFE",
+    "BR": "SHFE", "AO": "SHFE",
+    # DCE — agricultural & industrial
     "M": "DCE", "Y": "DCE", "P": "DCE", "C": "DCE", "CS": "DCE", "A": "DCE",
     "B": "DCE", "JD": "DCE", "L": "DCE", "V": "DCE", "PP": "DCE", "J": "DCE",
     "JM": "DCE", "I": "DCE", "EG": "DCE", "EB": "DCE", "PG": "DCE", "LH": "DCE",
-    "RR": "DCE",
+    "RR": "DCE", "BB": "DCE", "FB": "DCE", "LG": "DCE",
+    # CZCE — agricultural & chemical
     "SR": "CZCE", "CF": "CZCE", "ZC": "CZCE", "TA": "CZCE", "MA": "CZCE",
     "OI": "CZCE", "RM": "CZCE", "FG": "CZCE", "SA": "CZCE", "UR": "CZCE",
     "SF": "CZCE", "SM": "CZCE", "AP": "CZCE", "CJ": "CZCE", "PK": "CZCE",
-    "PF": "CZCE", "SH": "CZCE",
+    "PF": "CZCE", "SH": "CZCE", "PX": "CZCE", "CY": "CZCE", "WH": "CZCE",
+    "RI": "CZCE", "RS": "CZCE", "JR": "CZCE", "LR": "CZCE", "PM": "CZCE",
+    # INE — energy & international
     "SC": "INE", "NR": "INE", "LU": "INE", "BC": "INE", "EC": "INE",
-    "SI": "GFEX", "LC": "GFEX",
+    # GFEX — green / new materials
+    "SI": "GFEX", "LC": "GFEX", "PS": "GFEX",
 }
 
 # ---------------------------------------------------------------------------
@@ -198,7 +214,9 @@ def validate_futures_ticker(ticker: str) -> bool:
         return False
     product, exchange = m.groups()
     known = FUTURES_EXCHANGE.get(product)
-    # A product not in the table cannot be cross-checked; refuse rather than
-    # accept a suffix that may contradict it. Unknown-prefix rules elsewhere
-    # in this module fail the same way.
-    return known is not None and known == exchange
+    # Contradiction check, not admission control. A known product must carry
+    # its own venue (`IF2406.SHFE` fails). An unknown product has nothing to
+    # contradict, so a valid exchange token is accepted — refusing it would
+    # mean every new listing is an ingest failure until this map is edited,
+    # and the map is not a source of truth the exchanges consult.
+    return known is None or known == exchange
