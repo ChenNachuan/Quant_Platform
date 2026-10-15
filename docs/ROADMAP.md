@@ -68,7 +68,7 @@
 | `uv run ruff check .` | 退出码 0 |
 | `python -c "from core import types, config, logging, registry, asset_rules"` | 可导入、无副作用 |
 | `grep -rnE "(^\|[[:space:]])(import\|from)[[:space:]]+(data\|research\|execution\|ops)\b" core/` | **无输出**（红线 3）。`^` 单锚会漏掉缩进 import，必须允许行首空白；更严可换 AST 导入检查 |
-| 一致性断言 | 测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`（与 `design/execution/fee_model.md:22-23` 同源），断言 `ASSET_RULES["etf"]["stamp_tax"] is False`。与 `FeeModel._is_etf` 的**双向对拍留待 S7-T2**（FeeModel 届时才落地）。前缀表两份文档不一致，见 §7 缺口 #17——本阶段按 `fee_model.md` 的 5 元组写测试 |
+| 一致性断言 | 断言 `STAMP_TAX_EXEMPT_PREFIXES == frozenset({"50","51","56","58","15","16"})` 且 `ASSET_RULES["etf"]["stamp_tax"] is False`；测试另钉 `is_stamp_tax_exempt_prefix("501050") is True`（沪市 LOF，前缀 `50`）。与 `FeeModel._is_etf` 的**双向对拍留待 S7-T2**（FeeModel 届时才落地）。前缀表两份文档的不一致见 §7 缺口 #17。**（QUANT-18 订正：原写「测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`」与实际测试不符——测试钉的是派生集 6 项，含沪市 LOF `50`。）** |
 | `.gitignore` | 含 `config/.env`（红线 8） |
 
 ---
@@ -571,7 +571,7 @@
 | 14 | **ensemble 权重口径两处同源未定。** `factor_combiner`「ensemble 的权重如何进 FactorCombiner」与 `ml_signal`「ensemble 权重公式（validation ICIR 归一化细节）」是同一个问题的两个入口，均未定稿。 | `design/research/factor_combiner.md`；`design/research/ml_signal.md` | S11 |
 | 15 | **`baseline_spec.py` 在仓库中不存在。** 总纲 §6 与 `core/testing.md` 都要求「保留作期货 ALSTM 策略自身回归基准」，但 `316261b` 树中 `find . -name baseline_spec.py` 无结果（`strategies/futures/alstm/` 下只有 `config.py / data.py / train.py / reporting.py / README.md`）。保留对象缺失，V3 回归基准无从谈起。 | `design/ARCHITECTURE.md` §6；`design/core/testing.md`；仓库实况 | S13、V3 |
 | 16 | **`pyproject.toml` 依赖与选型定稿表不一致。** 描述仍写 "based on ZVT, VectorBT, and Qlib"，依赖含 `zvt` / `vectorbt` / `pyqlib` / `prefect==3.6.22`；§4 定稿为 pandas 自研 + SimBroker/QmtBroker、调度 = APScheduler、三套桥接归档。属迁移收口项，本计划只登记不改。 | `pyproject.toml`；`design/ARCHITECTURE.md` §4 | S13 / M3 |
-| 17 | **ETF 免印花税前缀表两份设计文档不一致。** `fee_model.md` 写 5 元组 `("51","56","58","15","16")`；`asset_rules.md` 写「前缀（51/15/16 免印花税）」，少了 56/58。两者都自称「同源一致」，但彼此对不上；执行者照哪个写测试必须先来问。 | `design/core/asset_rules.md` 差异落层表注（前缀 51/15/16）vs `design/execution/fee_model.md` `_is_etf`（51/56/58/15/16） | S1、S7 **已裁** A：ETF 免印花税前缀 = **5 元组** `("51","56","58","15","16")`，与 `fee_model.md` 一致；`asset_rules.md` 的 `51/15/16` 说法作废。单源 = `core/asset_rules.py` 的 `STAMP_TAX_EXEMPT_PREFIXES`。（出处：QUANT-4 / 缺口 #17 裁决 A） |
+| 17 | **ETF 免印花税前缀表两份设计文档不一致。** `fee_model.md` 写 5 元组 `("51","56","58","15","16")`；`asset_rules.md` 写「前缀（51/15/16 免印花税）」，少了 56/58。两者都自称「同源一致」，但彼此对不上；执行者照哪个写测试必须先来问。 | `design/core/asset_rules.md` 差异落层表注（前缀 51/15/16）vs `design/execution/fee_model.md` `_is_etf`（51/56/58/15/16） | S1、S7 **已裁** A：免印花税前缀 = **派生集 6 项** `frozenset({"50","51","56","58","15","16"})`，成员由 `core/asset_rules.py::ASSET_PREFIXES` + `ASSET_RULES[*]["stamp_tax"]` 推出，含沪市 LOF `50`；其中 `16` 与 `50` 是 **FUND** 不是 ETF，「ETF 免印花税前缀」的说法本身不准确。单源 = `core/asset_rules.py` 的 `STAMP_TAX_EXEMPT_PREFIXES`。**（QUANT-18 订正：原写「5 元组 `("51","56","58","15","16")`」漏了沪市 LOF `50`，且把 FUND 算进 ETF；`asset_rules.md` 的 `51/15/16` 说法仍然作废。）**（出处：QUANT-4 / 缺口 #17 裁决 A，QUANT-18 订正） |
 
 ---
 
@@ -611,4 +611,4 @@
 2. `uv run ruff check .` 退出码 0。
 3. `python -c "from core import types, asset_rules"` 可导入、无副作用、无 IO。
 4. `grep -rnE "(^|[[:space:]])(import|from)[[:space:]]+(data|research|execution|ops)\b" core/` **无输出**（红线 3）。必须能命中函数体内的缩进 `from data.x import y`——实测 `^` 单锚会漏掉它，故用 `(^|[[:space:]])`。
-5. 免印花税场内基金前缀表 `STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES = ("51","56","58","15","16")` 在 `core/asset_rules.py` 单源定义并导出（含深市 LOF `16`；`design/core/asset_rules.md` 旧写的 `51/15/16` 已按缺口 #17 裁决订正），断言 `ASSET_RULES["etf"]["stamp_tax"] is False` 且前缀表逐项一致；与 `FeeModel` 的双向对拍留待 S7-T2。
+5. 免印花税前缀表以单源 `core/asset_rules.py::STAMP_TAX_EXEMPT_PREFIXES` 为准，断言 `STAMP_TAX_EXEMPT_PREFIXES == frozenset({"50","51","56","58","15","16"})` 且 `ASSET_RULES["etf"]["stamp_tax"] is False`。该集合是**派生**的——由 `ASSET_PREFIXES` + `ASSET_RULES[*]["stamp_tax"]` 推出，文档不得再手写清单当权威。含沪市 LOF `50` 与深市 LOF `16`，两者是 **FUND** 不是 ETF。与 `FeeModel` 的双向对拍留待 S7-T2。（QUANT-18 订正：删去一个代码中并不存在的常量名及其 5 元组写法，原写法漏了沪市 LOF `50`。）
