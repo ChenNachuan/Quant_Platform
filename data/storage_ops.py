@@ -22,6 +22,7 @@ Field authority: ``docs/design/data/storage_ops.md`` (§48–§51).
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
 import shutil
@@ -31,7 +32,6 @@ from typing import Any, Iterator
 
 import pandas as pd
 import yaml
-
 from data.storage_schema import (
     CLEAN,
     PARTITION_PATHS,
@@ -42,6 +42,8 @@ from data.storage_schema import (
     factor_schema,
     factor_view_name,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CLEAN",
@@ -302,15 +304,6 @@ def write_parquet_atomic(
             finally:
                 os.close(fd)
             os.replace(tmp, target)
-            # The rename itself is not durable until the parent directory is
-            # fsynced: the data is on disk, but a power cut can still lose the
-            # new name.  The comment above claims power-cut durability — this
-            # is what delivers it.
-            dir_fd = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
         except BaseException:
             # Never leave a half-written file or a stray .tmp behind.
             try:
@@ -318,6 +311,23 @@ def write_parquet_atomic(
             except FileNotFoundError:
                 pass
             raise
+
+        # Durability, after the commit: the rename is not crash-safe until the
+        # parent directory is fsynced. Kept **outside** the block above on
+        # purpose — the target is already atomically committed at this point,
+        # and a raise here would make callers record a successful write as a
+        # failed one.
+        try:
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            logger.warning(
+                "wrote %s but could not fsync %s; committed but not durable",
+                target, target.parent,
+            )
 
 
 # ---------------------------------------------------------------------------

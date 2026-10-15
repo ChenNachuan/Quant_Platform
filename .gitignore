@@ -12,6 +12,10 @@ artifacts/
 *.hdf5
 *.feather
 *.pkl
+# The golden-sample fixture is a deliverable (S2), not runtime data. Without
+# this exemption `*.parquet` silently drops it from `git add .`, and a fresh
+# clone fails at `pd.read_parquet` with FileNotFoundError — a silent omission.
+!tests/golden/*.parquet
 
 # =============================================
 # 隐私配置与密钥

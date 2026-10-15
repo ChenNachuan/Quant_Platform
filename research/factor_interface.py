@@ -66,8 +66,11 @@ KIND_FACTOR: str = "factor"
 # judgement, not a regex.
 # ---------------------------------------------------------------------------
 
+# `\Z`, not `$`: `$` also matches immediately before a trailing newline, so
+# `"equity_mom_20d\n"` would pass and then flow into the registry key and
+# `factor:...` references as a name with a newline in it.
 _NAME_RE: re.Pattern[str] = re.compile(
-    r"^[a-z][a-z0-9]*(?:_[a-z0-9]*[a-z][a-z0-9]*)+$"
+    r"^[a-z][a-z0-9]*(?:_[a-z0-9]*[a-z][a-z0-9]*)+\Z"
 )
 
 # ---------------------------------------------------------------------------
@@ -250,10 +253,15 @@ class Factor(ABC):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        name = getattr(cls, "name", None)
+        # `cls.__dict__`, not `getattr`: the latter reads an *inherited* name,
+        # so a subclass that forgets to redeclare it silently takes the
+        # parent's identity. Since `factor:{name}` resolves dependencies, a
+        # factor that never declared its own name can masquerade under another.
+        name = cls.__dict__.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(
-                f"{cls.__name__} must define a non-empty 'name' class attribute"
+                f"{cls.__name__} must define its own non-empty 'name' class "
+                "attribute (inherited names are not accepted)"
             )
         if not _NAME_RE.match(name):
             raise ValueError(

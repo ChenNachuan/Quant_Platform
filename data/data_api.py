@@ -117,7 +117,9 @@ class DataAPI:
     ) -> None:
         self._root = Path(data_root)
         self._statement_timeout = statement_timeout
-        self._conn_lock = threading.Lock()
+        # RLock, not Lock: the retry path in `_run` holds the lock and then
+        # calls `reconnect()`, which takes it again.
+        self._conn_lock = threading.RLock()
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect()
         self._apply_timeout()
         self._views_registered = False
@@ -157,34 +159,61 @@ class DataAPI:
             if not any(entry.glob("*.parquet")):
                 logger.debug("no parquet files under %s; no view registered", entry)
                 continue
+            # Every other value in this module goes through _sql_literal /
+            # _validate_identifier. A quote in `data_root` or a directory named
+            # `bars-daily` / `my data` would otherwise be a syntax error, and
+            # because `__enter__` calls this, one odd directory under the root
+            # breaks every `load_bars()` on it.
             self._conn.execute(
-                f"CREATE OR REPLACE VIEW {entry.name} AS "
-                f"SELECT * FROM read_parquet('{glob}', "
+                f"CREATE OR REPLACE VIEW {_validate_identifier(entry.name)} AS "
+                f"SELECT * FROM read_parquet({_sql_literal(str(glob))}, "
                 f"union_by_name=true, hive_partitioning=false)"
             )
         self._views_registered = True
 
     # -- query ---------------------------------------------------------------
+    def _run(self, sql: str, fetch, profile: bool = False):
+        """Execute *sql* under the connection lock, retrying once on reconnect.
+
+        One path for both entry points. The lock is held across the execute so
+        another thread's `reconnect()` cannot close the connection mid-query,
+        and it is re-entrant because the retry below calls `reconnect()`.
+
+        *fetch* materializes the cursor **inside** the lock. Running any other
+        statement on the connection — including the profiling pragma in the
+        cleanup below — invalidates an unconsumed cursor, so the result has to
+        be pulled out before that happens.
+
+        Returns ``(result, elapsed_seconds)``.
+        """
+        with self._conn_lock:
+            try:
+                if profile:
+                    self._conn.execute("PRAGMA enable_profiling")
+                t0 = time.perf_counter()
+                result = fetch(self._conn.execute(sql))
+                return result, time.perf_counter() - t0
+            except duckdb.ConnectionException:
+                # Jupyter long-session reconnect: one retry after reconnect.
+                logger.warning("DuckDB connection lost; reconnecting once")
+                self.reconnect()
+                if profile:
+                    self._conn.execute("PRAGMA enable_profiling")
+                t0 = time.perf_counter()
+                result = fetch(self._conn.execute(sql))
+                return result, time.perf_counter() - t0
+            finally:
+                if profile:
+                    try:
+                        self._conn.execute("PRAGMA disable_profiling")
+                    except Exception:
+                        # The connection may be the dead one we just replaced;
+                        # never let cleanup mask the original error.
+                        logger.debug("disable_profiling failed", exc_info=True)
+
     def query(self, sql: str, profile: bool = False) -> pd.DataFrame:
         """Execute *sql* and return a DataFrame.  Logs a ``[COST]`` line."""
-        try:
-            if profile:
-                self._conn.execute("PRAGMA enable_profiling")
-            t0 = time.perf_counter()
-            result = self._conn.execute(sql).fetchdf()
-            elapsed = time.perf_counter() - t0
-        except duckdb.ConnectionException:
-            # Jupyter long-session reconnect: one retry after reconnect.
-            logger.warning("DuckDB connection lost; reconnecting once")
-            self.reconnect()
-            if profile:
-                self._conn.execute("PRAGMA enable_profiling")
-            t0 = time.perf_counter()
-            result = self._conn.execute(sql).fetchdf()
-            elapsed = time.perf_counter() - t0
-        finally:
-            if profile:
-                self._conn.execute("PRAGMA disable_profiling")
+        result, elapsed = self._run(sql, lambda c: c.fetchdf(), profile)
         level = logging.INFO
         if elapsed > 30:
             level = logging.CRITICAL
@@ -198,10 +227,8 @@ class DataAPI:
         return result
 
     def query_arrow(self, sql: str) -> pa.Table:
-        """Execute *sql* and return a PyArrow table."""
-        t0 = time.perf_counter()
-        result = self._conn.execute(sql).to_arrow_table()
-        elapsed = time.perf_counter() - t0
+        """Execute *sql* and return a PyArrow table. Same retry as `query`."""
+        result, elapsed = self._run(sql, lambda c: c.to_arrow_table())
         logger.info("[COST] time=%.3fs rows=%d sql=%s", elapsed, result.num_rows, sql[:200])
         return result
 
@@ -444,6 +471,16 @@ def load_bars(
     table = _resolve_table(asset_type, freq)
     has_adj = table in ("bars_daily", "continuous")
     is_agg = freq in _AGG_INTERVAL
+
+    # Validate the literal here, before any query. Leaving it to
+    # `_apply_adjustment` means an empty window (holiday-only range, an
+    # unpopulated view, a filtered-out symbol list) returns an empty frame for
+    # `adjust="qfq"` instead of raising — "no data" instead of "bad argument",
+    # the silent-failure shape `_symbol_list` already refuses.
+    if adjust not in ("none", "forward", "backward"):
+        raise ValueError(
+            f"unknown adjust {adjust!r}; expected 'none', 'forward', or 'backward'"
+        )
 
     if adjust != "none" and not has_adj:
         raise ValueError(

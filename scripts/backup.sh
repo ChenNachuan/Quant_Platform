@@ -185,8 +185,16 @@ if [[ "${dest_count}" -lt "${src_low}" ]]; then
     echo "backup.sh: FAIL — destination lost files (source-low=${src_low} dest=${dest_count})" >&2
     exit 1
 fi
-if [[ "${dest_count}" -gt "${src_count}" ]]; then
-    echo "backup.sh: FAIL — destination has files source does not (source=${src_count} dest=${dest_count})" >&2
+# Upper bound uses the LARGER of the two source samples. If cleanup_expired
+# deletes files after rsync finishes but before the post-sync source count,
+# DEST legitimately still holds them and dest > src_count would misreport a
+# correct backup as a failure.
+src_high="${src_count_before}"
+if [[ "${src_count}" -gt "${src_high}" ]]; then
+    src_high="${src_count}"
+fi
+if [[ "${dest_count}" -gt "${src_high}" ]]; then
+    echo "backup.sh: FAIL — destination has files source does not (source-high=${src_high} dest=${dest_count})" >&2
     exit 1
 fi
 

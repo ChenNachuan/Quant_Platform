@@ -46,6 +46,11 @@ from tests._layer import LAYER_MARKERS, layer_of_path
 
 
 def pytest_configure(config):
+    """Single registration point for the layer markers.
+
+    `pyproject.toml` used to declare these too; two sources drift (the
+    descriptions already disagreed) and `pytest --markers` listed each twice.
+    """
     for layer in LAYER_MARKERS:
         config.addinivalue_line(
             "markers", f"{layer}: test layer ({TIME_BUDGET_SECONDS[layer]}s budget)"
@@ -125,10 +130,15 @@ def reset_config_loader():
 # file. Guarding only `config/.env` guarded the wrong path.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REAL_ENV_PATHS = (_REPO_ROOT / "config" / ".env", _REPO_ROOT / ".env")
+# Resolved at **check** time, not here. Hoisting the resolutions is faster, and
+# it is also how a symlink planted at `config/.env` after import slips through:
+# the whole point of resolving per call is that the late-symlink case is still
+# caught. Two `resolve()` calls per open is the price; correctness first.
 
 _ORIGINAL_OPEN = builtins.open
 _ORIGINAL_IO_OPEN = io.open
 _ORIGINAL_OS_OPEN = os.open
+_ORIGINAL_FILEIO = io.FileIO
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 _ORIGINAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
 _ORIGINAL_CREATE_CONNECTION = socket.create_connection
@@ -146,11 +156,35 @@ def _blocked_network(*_args, **_kwargs):
 
 
 def _is_real_env(file) -> bool:
+    """True for a real secret path.  Fail **closed** on path-like input.
+
+    ``bytes`` paths are legitimate arguments to ``open``/``os.open``, and
+    ``Path(b"...")`` raises ``TypeError`` — swallowing that would return
+    ``False`` and let ``open(os.fsencode(_REPO_ROOT / "config" / ".env"))``
+    read the real secret unguarded.
+    """
+    if isinstance(file, (bytes, bytearray)):
+        try:
+            file = os.fsdecode(file)
+        except Exception:
+            return True
     try:
         resolved = Path(file).resolve()
     except (TypeError, ValueError, OSError):
         return False
     return resolved in {p.resolve() for p in _REAL_ENV_PATHS}
+
+
+class _GuardedFileIO(io.FileIO):
+    """``io.FileIO`` bypasses ``builtins.open``/``io.open`` entirely."""
+
+    def __init__(self, file, *args, **kwargs):
+        if _is_real_env(file):
+            raise RuntimeError(
+                "reading a real .env is forbidden in tests — write a fake "
+                "under tmp_path and pass that path"
+            )
+        super().__init__(file, *args, **kwargs)
 
 
 def _guarded_open(file, *args, **kwargs):
@@ -188,6 +222,7 @@ def _install_hard_rules() -> None:
     builtins.open = _guarded_open
     io.open = _guarded_io_open
     os.open = _guarded_os_open
+    io.FileIO = _GuardedFileIO
     socket.socket.connect = _blocked_network
     socket.socket.connect_ex = _blocked_network
     socket.create_connection = _blocked_network
@@ -201,6 +236,7 @@ def _remove_hard_rules() -> None:
     builtins.open = _ORIGINAL_OPEN
     io.open = _ORIGINAL_IO_OPEN
     os.open = _ORIGINAL_OS_OPEN
+    io.FileIO = _ORIGINAL_FILEIO
     socket.socket.connect = _ORIGINAL_SOCKET_CONNECT
     socket.socket.connect_ex = _ORIGINAL_SOCKET_CONNECT_EX
     socket.create_connection = _ORIGINAL_CREATE_CONNECTION
