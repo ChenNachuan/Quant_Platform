@@ -21,6 +21,7 @@ declaration, not an event subscription graph (red line 2).
 from __future__ import annotations
 
 import hashlib
+import warnings
 from collections import deque
 from typing import Any, Callable
 
@@ -55,29 +56,31 @@ CacheKey = tuple[str, str, tuple[str, str], str]
 # ---------------------------------------------------------------------------
 
 
+def _table_family() -> dict[str, tuple[str, str]]:
+    """Invert :data:`data.data_api.TABLE_MAP` — table name → (asset_type, freq).
+
+    Derived at call time so the mapping can never drift from the source.
+    """
+    from data.data_api import TABLE_MAP
+
+    return {v: k for k, v in TABLE_MAP.items()}
+
+
 def _default_table_loader(table_name: str, start: str, end: str) -> pd.DataFrame:
     """Load a raw data table via :func:`data.data_api.load_bars`.
 
-    The dependency name *table_name* is matched against the known table
-    families.  For T2 the only bare names exercised in tests are synthetic;
-    real table loading goes through ``load_bars`` with the appropriate
-    ``asset_type`` / ``freq``.
+    The dependency name *table_name* is looked up in the inverse of
+    :data:`data.data_api.TABLE_MAP` — no duplicate dict to drift.
     """
     from data.data_api import load_bars
 
-    # Table name → (asset_type, freq) — mirrors TABLE_MAP in data_api.
-    _TABLE_FAMILY: dict[str, tuple[str, str]] = {
-        "bars_daily": ("equity", "daily"),
-        "bars_minute": ("equity", "minute"),
-        "bars_daily_futures": ("futures", "daily"),
-        "continuous": ("continuous", "daily"),
-    }
-    if table_name not in _TABLE_FAMILY:
+    families = _table_family()
+    if table_name not in families:
         raise ValueError(
             f"unknown data table {table_name!r}; "
-            f"expected one of {sorted(_TABLE_FAMILY)}"
+            f"expected one of {sorted(families)}"
         )
-    asset_type, freq = _TABLE_FAMILY[table_name]
+    asset_type, freq = families[table_name]
     return load_bars(start=start, end=end, freq=freq, asset_type=asset_type)
 
 
@@ -120,16 +123,21 @@ class FactorDAG:
 
         Uses T1's :func:`parse_dependency` — bare names are data tables
         (no edge), ``"factor:xxx"`` creates an edge to upstream factor *xxx*.
+
+        All dependencies are parsed and validated **before** either dict is
+        mutated.  A rejected dep leaves the DAG exactly as it was.
         """
         name = factor.name
         if name in self.factors:
             raise ValueError(f"factor {name!r} is already registered")
-        self.factors[name] = factor
+        # Validate first — do not commit a node whose edges are unparseable.
         upstream: list[str] = []
         for dep in factor.depends_on():
             kind, dep_name = parse_dependency(dep)
             if kind == KIND_FACTOR:
                 upstream.append(dep_name)
+        # Both dicts commit together.
+        self.factors[name] = factor
         self._upstream[name] = upstream
 
     # -- topological ordering ---------------------------------------------
@@ -305,6 +313,7 @@ def _assemble_data(
     factor: Factor,
     start: str,
     end: str,
+    _visited: set[str] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Build the ``data`` dict for ``factor.compute()``.
 
@@ -319,7 +328,9 @@ def _assemble_data(
         if kind == KIND_TABLE:
             data[dep] = _canonicalise(dag._data_loader(name, start, end))
         elif kind == KIND_FACTOR:
-            data[dep] = _canonicalise(compute_factor(dag, name, start, end))
+            data[dep] = _canonicalise(
+                compute_factor(dag, name, start, end, _visited=_visited)
+            )
     return data
 
 
@@ -393,6 +404,7 @@ def compute_factor(
     start: str,
     end: str,
     force: bool = False,
+    _visited: set[str] | None = None,
 ) -> pd.DataFrame:
     """Compute one factor over ``[start, end]`` with caching.
 
@@ -412,6 +424,12 @@ def compute_factor(
     it.  A factor's values therefore never depend on which cache path its
     inputs came from.
 
+    Raises
+    ------
+    ValueError
+        If *factor_name* is not registered, or if following ``factor:``
+        dependencies leads back to *factor_name* (circular dependency).
+
     **Append is a provenance guarantee, not a speed-up.**  The historical
     rows come from the cache bit-identical, so a range extension never
     re-derives them; the new rows are computed with full dependency context
@@ -429,10 +447,24 @@ def compute_factor(
         raise ValueError(f"factor {factor_name!r} is not registered")
     factor = dag.factors[factor_name]
 
-    # Assemble inputs (tables + upstream factors) for depends_hash + compute.
-    data = _assemble_data(dag, factor, start, end)
-    dep_hash = compute_depends_hash(factor, data)
-    key = _make_cache_key(factor.name, factor.version, start, end, dep_hash)
+    # Cycle guard: track the in-flight recursion path.  If we re-enter a
+    # factor already on the path, the graph has a cycle — raise ValueError,
+    # not RecursionError.
+    if _visited is None:
+        _visited = set()
+    if factor_name in _visited:
+        raise ValueError(
+            f"circular dependency detected: {factor_name!r} is already "
+            f"being computed on this call path"
+        )
+    _visited.add(factor_name)
+    try:
+        # Assemble inputs (tables + upstream factors) for depends_hash + compute.
+        data = _assemble_data(dag, factor, start, end, _visited=_visited)
+        dep_hash = compute_depends_hash(factor, data)
+        key = _make_cache_key(factor.name, factor.version, start, end, dep_hash)
+    finally:
+        _visited.discard(factor_name)
 
     # 1. Exact cache hit.
     if not force and key in dag._cache:
@@ -478,11 +510,21 @@ def compute_factor(
 # ---------------------------------------------------------------------------
 
 
+def _warn_max_workers(max_workers: int | None) -> None:
+    """Warn that *max_workers* has no effect until the executor is selected."""
+    if max_workers is not None:
+        warnings.warn(
+            "max_workers has no effect until the layer-parallel executor "
+            "is selected (pending design question); execution is sequential",
+            stacklevel=3,
+        )
+
+
 def compute_all(
     dag: FactorDAG,
     start: str,
     end: str,
-    max_workers: int = 4,
+    max_workers: int | None = None,
     force: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Compute all registered factors in topological order.
@@ -490,8 +532,10 @@ def compute_all(
     Iterates :meth:`FactorDAG.topological_layers` and computes each factor
     in dependency order.  ML factors are computed serially (isolated from
     any future parallel pool).  *max_workers* is reserved for when the
-    layer-parallel executor is selected; execution is sequential for now.
+    layer-parallel executor is selected; execution is sequential for now
+    and a non-``None`` value triggers a warning.
     """
+    _warn_max_workers(max_workers)
     results: dict[str, pd.DataFrame] = {}
     for layer in dag.topological_layers():
         ml_names = {n for n in layer if isinstance(dag.factors[n], MLFactor)}
@@ -508,7 +552,7 @@ def compute_all_safe(
     dag: FactorDAG,
     start: str,
     end: str,
-    max_workers: int = 4,
+    max_workers: int | None = None,
     force: bool = False,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Exception]]:
     """Fault-tolerant compute: upstream failure skips downstream, same-layer
@@ -519,7 +563,9 @@ def compute_all_safe(
 
     *max_workers* is reserved for when the layer-parallel executor is
     selected; execution is sequential for now, matching :func:`compute_all`.
+    A non-``None`` value triggers a warning.
     """
+    _warn_max_workers(max_workers)
     results: dict[str, pd.DataFrame] = {}
     errors: dict[str, Exception] = {}
     failed: set[str] = set()

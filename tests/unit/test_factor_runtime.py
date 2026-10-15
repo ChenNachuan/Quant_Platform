@@ -8,6 +8,8 @@ look-ahead red line (test_no_lookahead).
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -708,3 +710,113 @@ class TestMLFactor:
         results = compute_all(dag, "2024-01-02", "2024-01-08")
         assert "my_ml_factor" in results
         assert "returns_1d" in results
+
+
+# ---------------------------------------------------------------------------
+# Second-review fixes: cycle guard, register atomicity, table map, max_workers
+# ---------------------------------------------------------------------------
+
+
+class BadPrefixFactor(Factor):
+    """Invalid dependency prefix — parse_dependency rejects at register time."""
+
+    name = "bad_prefix_factor"
+
+    def depends_on(self):
+        return ["bogus:dep"]
+
+    def compute(self, data):
+        return pd.DataFrame(columns=["date", "ticker", "bad_prefix_factor"])
+
+
+class TestComputeFactorCycleGuard:
+    def test_compute_factor_on_cycle_raises_value_error(self):
+        """compute_factor on a cyclic graph must raise ValueError, not
+        RecursionError — the guard is on the public entry point, not just
+        topological_sort()."""
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(CycleA())
+        dag.register(CycleB())
+        with pytest.raises(ValueError, match="[Cc]ircular|cycle"):
+            compute_factor(dag, "cycle_a", "2024-01-02", "2024-01-08")
+
+    def test_compute_factor_self_cycle_raises_value_error(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SelfCycle())
+        with pytest.raises(ValueError, match="[Cc]ircular|cycle"):
+            compute_factor(dag, "self_cycle", "2024-01-02", "2024-01-08")
+
+    def test_compute_factor_not_recursion_error(self):
+        """Explicitly assert the exception type is not RecursionError."""
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(CycleA())
+        dag.register(CycleB())
+        try:
+            compute_factor(dag, "cycle_a", "2024-01-02", "2024-01-08")
+        except RecursionError:
+            pytest.fail("cycle in compute_factor gave RecursionError, not ValueError")
+        except ValueError:
+            pass  # expected
+
+
+class TestRegisterAtomicity:
+    def test_rejected_dep_leaves_dag_clean(self):
+        """A failed register must not leave a phantom node in self.factors.
+
+        Before the fix, register() committed self.factors[name] before
+        parse_dependency raised, so topological_sort() silently succeeded
+        with a node that had no _upstream entry and an unparseable dep.
+        """
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        with pytest.raises(ValueError, match="prefix|dependency"):
+            dag.register(BadPrefixFactor())
+
+        assert "bad_prefix_factor" not in dag.factors
+        assert "bad_prefix_factor" not in dag._upstream
+
+    def test_sort_after_failed_register_is_consistent(self):
+        """topological_sort() must not silently include a phantom node."""
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        with pytest.raises(ValueError):
+            dag.register(BadPrefixFactor())
+
+        dag.register(SimpleReturn())
+        order = dag.topological_sort()
+        assert "bad_prefix_factor" not in order
+        assert "returns_1d" in order
+
+    def test_duplicate_check_still_works(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        with pytest.raises(ValueError, match="already registered"):
+            dag.register(SimpleReturn())
+
+
+class TestMaxWorkersWarn:
+    def test_max_workers_set_warns(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            compute_all(dag, "2024-01-02", "2024-01-08", max_workers=2)
+            assert any("max_workers" in str(x.message) for x in w), (
+                "compute_all should warn when max_workers is set"
+            )
+
+    def test_max_workers_default_no_warn(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            compute_all(dag, "2024-01-02", "2024-01-08")
+            assert not any("max_workers" in str(x.message) for x in w)
+
+    def test_max_workers_safe_warns(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(SimpleReturn())
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            compute_all_safe(dag, "2024-01-02", "2024-01-08", max_workers=8)
+            assert any("max_workers" in str(x.message) for x in w), (
+                "compute_all_safe should warn when max_workers is set"
+            )
