@@ -68,7 +68,7 @@ def pytest_collection_modifyitems(config, items):
     default to the ``unit`` layer.
     """
     for item in items:
-        layer = layer_of_path(item.fspath)
+        layer = layer_of_path(item.path)
         if not any(m.name == layer for m in item.iter_markers()):
             item.add_marker(getattr(pytest.mark, layer))
 
@@ -81,7 +81,7 @@ _layer_elapsed: dict[str, float] = {layer: 0.0 for layer in LAYER_MARKERS}
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
-    layer = layer_of_path(item.fspath)
+    layer = layer_of_path(item.path)
     start = time.perf_counter()
     yield
     _layer_elapsed[layer] += time.perf_counter() - start

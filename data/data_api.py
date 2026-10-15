@@ -146,6 +146,13 @@ class DataAPI:
         if not self._root.exists():
             logger.debug("data_root %s does not exist; no views registered", self._root)
             return
+        # Under the same lock as every other connection user: running a
+        # statement invalidates an unconsumed cursor, so a concurrent
+        # `register_views` could interleave with an in-flight fetch.
+        with self._conn_lock:
+            self._register_views_locked()
+
+    def _register_views_locked(self) -> None:
         for entry in sorted(self._root.iterdir()):
             if not entry.is_dir():
                 continue
@@ -325,6 +332,13 @@ def _build_daily_sql(
         if col == "adjfactor":
             if has_adj:
                 select_parts.append("adjfactor")
+            elif fields is not None:
+                # Explicitly requested and the table has none. Silently
+                # dropping it collapses `fields=["adjfactor"]` to a bare
+                # `SELECT date, ticker` — "no such column" disguised as success.
+                raise ValueError(
+                    f"field 'adjfactor' is not available in table {table!r}"
+                )
             continue
         select_parts.append(_validate_identifier(col))
     if fields is None and has_adj:

@@ -234,13 +234,7 @@ def _resolve_schema(table: str, value_column: str | None = None):
                 f"factor value_column {value_column!r} collides with a fixed "
                 f"column; factor_schema would silently overwrite it"
             )
-        schema = factor_schema(value_column)
-        if len(schema.columns) != 3:
-            raise ValueError(
-                f"factor value_column {value_column!r} produced "
-                f"{len(schema.columns)} columns, expected 3"
-            )
-        return schema
+        return factor_schema(value_column)
     return SCHEMA[table]
 
 
