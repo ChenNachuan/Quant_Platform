@@ -13,6 +13,7 @@ See :data:`TABLE_MAP`.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
@@ -104,6 +105,8 @@ class DataAPI:
     In-memory connection (no ``.duckdb`` file).  One instance per process;
     DuckDB connections are not process-safe.  Threads within one process may
     share an instance — DuckDB is thread-safe and uses all available CPUs.
+    Connection *lifecycle* is not free-threaded though: ``reconnect`` replaces
+    ``_conn``, so it and ``close`` serialize on ``_conn_lock``.
     """
 
     def __init__(
@@ -114,6 +117,7 @@ class DataAPI:
     ) -> None:
         self._root = Path(data_root)
         self._statement_timeout = statement_timeout
+        self._conn_lock = threading.Lock()
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect()
         self._apply_timeout()
         self._views_registered = False
@@ -144,7 +148,14 @@ class DataAPI:
             if not entry.is_dir():
                 continue
             glob = entry / "*.parquet"
-            if not glob.parent.exists():
+            # DuckDB binds `read_parquet` at CREATE VIEW time and raises
+            # `IO Error: No files found` on a zero match. One legitimately
+            # empty table directory — e.g. `asset/fundamental/` created before
+            # its first write lands — would otherwise abort registration, and
+            # since `__enter__` calls this, every `load_bars()` on that root
+            # would fail even though the other tables hold data.
+            if not any(entry.glob("*.parquet")):
+                logger.debug("no parquet files under %s; no view registered", entry)
                 continue
             self._conn.execute(
                 f"CREATE OR REPLACE VIEW {entry.name} AS "
@@ -199,18 +210,23 @@ class DataAPI:
         """Recreate the in-memory connection and re-register views.
 
         For Jupyter kernels where the old connection has gone stale.
+        Serialized: threads share one instance (see the class docstring), and
+        closing the connection under a thread that is mid-`execute` produces
+        sporadic failures that no one can reproduce on demand.
         """
-        try:
-            self._conn.close()
-        except Exception:
-            pass
-        self._conn = duckdb.connect()
-        self._apply_timeout()
-        if self._views_registered:
-            self.register_views()
+        with self._conn_lock:
+            try:
+                self._conn.close()
+            except Exception:
+                logger.debug("error closing stale DuckDB connection", exc_info=True)
+            self._conn = duckdb.connect()
+            self._apply_timeout()
+            if self._views_registered:
+                self.register_views()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._conn_lock:
+            self._conn.close()
 
     def __enter__(self) -> DataAPI:
         self.register_views()
@@ -238,10 +254,25 @@ def _validate_identifier(name: str) -> str:
     return name
 
 
-def _symbol_filter(symbol: str | list[str] | None) -> str:
+def _symbol_list(symbol: str | list[str] | None) -> list[str]:
+    """Normalize a ticker filter. ``None`` means "no filter"; [] raises.
+
+    An **empty** list is not the same as ``None``: it means "nothing was
+    selected", and silently widening it to "everything" turns an empty
+    watchlist into a full-universe pull — a silent wrong result (and, on
+    minute data, an OOM).
+    """
     if symbol is None:
-        return ""
+        return []
     symbols = [symbol] if isinstance(symbol, str) else list(symbol)
+    if not symbols:
+        raise ValueError("symbol list is empty; pass None to load all")
+    return [str(s) for s in symbols]
+
+
+def _symbol_filter(symbol: str | list[str] | None) -> str:
+    """SQL predicate for a ticker filter; empty string when unfiltered."""
+    symbols = _symbol_list(symbol)
     if not symbols:
         return ""
     joined = ", ".join(_sql_literal(s) for s in symbols)
@@ -254,7 +285,6 @@ def _build_daily_sql(
     end: str,
     symbol: str | list[str] | None,
     fields: list[str] | None,
-    freq: str = "daily",
 ) -> str:
     """Build the SELECT for a non-aggregated table (daily or raw minute)."""
     has_adj = table in ("bars_daily", "continuous")
@@ -278,15 +308,13 @@ def _build_daily_sql(
     where = (
         f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
     )
-    if ticker_col == "ticker":
-        where += _symbol_filter(symbol)
-    else:
-        # continuous: dominant_contract as ticker; symbol filter applies there
-        if symbol is not None:
-            symbols = [symbol] if isinstance(symbol, str) else list(symbol)
-            if symbols:
-                joined = ", ".join(_sql_literal(s) for s in symbols)
-                where += f" AND dominant_contract IN ({joined})"
+    # One rule for both table shapes. The continuous branch used to
+    # reimplement this inline and widened an empty list to "no filter", the
+    # very bug `_symbol_filter` exists to prevent.
+    symbols = _symbol_list(symbol)
+    if symbols:
+        joined = ", ".join(_sql_literal(s) for s in symbols)
+        where += f" AND {ticker_col} IN ({joined})"
 
     cols_sql = ", ".join(select_parts)
     return (
@@ -434,7 +462,7 @@ def load_bars(
         if is_agg:
             sql = _build_aggregated_sql(table, start, end, symbol, effective_fields, freq)
         else:
-            sql = _build_daily_sql(table, start, end, symbol, effective_fields, freq)
+            sql = _build_daily_sql(table, start, end, symbol, effective_fields)
         df = api.query(sql)
 
         if adjust != "none" and not df.empty:
@@ -475,7 +503,7 @@ def load_bars_chunked(
     """
     if chunk_by != "month":
         raise ValueError(f"unsupported chunk_by {chunk_by!r}; only 'month' is implemented")
-    for chunk_start, chunk_end in _date_chunks(start, end, chunk_by):
+    for chunk_start, chunk_end in _date_chunks(start, end):
         df = load_bars(
             symbol, chunk_start, chunk_end,
             freq=freq, fields=fields, adjust=adjust,
@@ -485,8 +513,12 @@ def load_bars_chunked(
             yield df
 
 
-def _date_chunks(start: str, end: str, chunk_by: str) -> list[tuple[str, str]]:
-    """Split [start, end] into calendar-month (chunk_by='month') chunks."""
+def _date_chunks(start: str, end: str) -> list[tuple[str, str]]:
+    """Split [start, end] into calendar-month chunks.
+
+    Chunking mode is the caller's concern (:func:`load_bars_chunked` validates
+    ``chunk_by``); only month chunks exist.
+    """
     from datetime import date, timedelta
 
     s = date.fromisoformat(start)

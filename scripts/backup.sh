@@ -172,8 +172,17 @@ src_count="$(count_files "${src_abs}")"
 dest_count="$(count_files "${dest_abs}")"
 
 echo "backup.sh: source files=${src_count} dest files=${dest_count} (pre-sync ${src_count_before})"
-if [[ "${dest_count}" -lt "${src_count_before}" ]]; then
-    echo "backup.sh: FAIL — destination lost files (source-before=${src_count_before} dest=${dest_count})" >&2
+# Lower bound tolerates a shrinking source: a concurrent
+# `data.storage_ops.cleanup_expired` legitimately removes files mid-sync and
+# `rsync --delete` correctly mirrors the smaller tree.  Taking the bound from
+# `min(before, after)` still catches a partial transfer, while not reporting
+# normal churn as a lost backup.
+src_low="${src_count_before}"
+if [[ "${src_count}" -lt "${src_low}" ]]; then
+    src_low="${src_count}"
+fi
+if [[ "${dest_count}" -lt "${src_low}" ]]; then
+    echo "backup.sh: FAIL — destination lost files (source-low=${src_low} dest=${dest_count})" >&2
     exit 1
 fi
 if [[ "${dest_count}" -gt "${src_count}" ]]; then

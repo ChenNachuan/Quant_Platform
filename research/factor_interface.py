@@ -121,7 +121,7 @@ def parse_dependency(dep: str) -> tuple[str, str]:
     prefix = prefix.strip()
     name = name.strip()
 
-    if prefix == "factor":
+    if prefix == FACTOR_DEP_PREFIX.rstrip(":"):
         if not name:
             raise ValueError(f"factor dependency {dep!r} has an empty factor name")
         return KIND_FACTOR, name
@@ -151,10 +151,11 @@ def extract_factor_meta(
 ) -> list[dict[str, Any]]:
     """Extract metadata from Factor classes.
 
-    Distinct from :func:`core.registry.list_factor_meta` (the nine-field
-    registry-level extractor) to avoid a same-name / different-shape
-    collision.  This returns the six Factor interface fields; the registry
-    version returns the full ``META_FIELDS`` contract.
+    Distinct from :func:`core.registry.list_factor_meta` to avoid a
+    same-name / different-shape collision.  This returns the six Factor
+    interface fields; the registry extractor returns the class-level
+    ``META_FIELDS`` contract and deliberately omits ``depends_on``, which is a
+    method here and so is not ``getattr``-able metadata.
 
     Parameters
     ----------
@@ -235,7 +236,11 @@ class Factor(ABC):
     #: ``core.types.AssetType``'s six-member enum.  Bridge through
     #: ``core.types.EQUITY_TYPES`` when per-asset rules (fees, price limits)
     #: are needed.
-    asset_types: list[str] = ["equity"]
+    #:
+    #: An immutable tuple on purpose: a class-level mutable default is shared
+    #: by every subclass and instance, so one ``append`` would rewrite the
+    #: asset-family selector for all factors at once.
+    asset_types: tuple[str, ...] = ("equity",)
 
     #: Semantic version.  Bump when ``compute()`` logic changes (see PR notes).
     version: str = "1.0"

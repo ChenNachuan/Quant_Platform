@@ -302,6 +302,15 @@ def write_parquet_atomic(
             finally:
                 os.close(fd)
             os.replace(tmp, target)
+            # The rename itself is not durable until the parent directory is
+            # fsynced: the data is on disk, but a power cut can still lose the
+            # new name.  The comment above claims power-cut durability — this
+            # is what delivers it.
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except BaseException:
             # Never leave a half-written file or a stray .tmp behind.
             try:
