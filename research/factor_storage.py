@@ -281,7 +281,9 @@ def save_factor_full(factor, result, base_dir="data_platform/factors") -> None:
     Unlike :func:`save_factor_append` there is no concatenation: stale year
     files are removed first so the directory is exactly *result* — a narrowed
     recompute does not leave earlier years behind.  Sibling version directories
-    are untouched; a new version is a new directory.
+    are untouched; a new version is a new directory.  Duplicate ``(date,
+    ticker)`` keys in *result* are collapsed to the first row before writing,
+    so a buggy ``compute()`` cannot persist ambiguous keys.
     """
     out_dir = _version_dir(base_dir, factor.name, factor.version)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -294,8 +296,10 @@ def save_factor_full(factor, result, base_dir="data_platform/factors") -> None:
         data = data.assign(_year=data["date"].str[:4])
         for year, chunk in data.groupby("_year", sort=True):
             chunk = chunk.drop(columns="_year")
-            chunk = chunk.sort_values(["date", "ticker"], kind="mergesort").reset_index(
-                drop=True
+            chunk = (
+                chunk.drop_duplicates(["date", "ticker"])
+                .sort_values(["date", "ticker"], kind="mergesort")
+                .reset_index(drop=True)
             )
             _write_parquet(chunk, out_dir / f"{year}.parquet")
         data = data.drop(columns=["_year"])

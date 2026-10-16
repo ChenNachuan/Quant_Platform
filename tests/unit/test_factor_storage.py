@@ -5,7 +5,8 @@ Covers every DoD row:
 * ``save_factor_append`` concatenates the year file and ``drop_duplicates``
   on ``["date", "ticker"]`` (stored rows win over the incoming batch)
 * ``save_factor_full`` overwrites the current version directory — stale year
-  files go away, sibling version directories stay
+  files go away, sibling version directories stay; duplicate input keys are
+  collapsed to the first row
 * ``metadata.json`` carries ``depends_on`` / ``depends_hash`` / ``date_range``
 * raw semantics: NaN is kept, nothing is filled
 
@@ -256,6 +257,31 @@ class TestSaveFactorFull:
 
         stored = pd.read_parquet(year_path(tmp_path, "mom_20d", "1.0", "2020"))
         assert stored["mom_20d"].item() == 9.0
+
+    def test_full_drops_duplicate_input_keys(self, tmp_path):
+        """Duplicate (date, ticker) rows in `result` are not persisted verbatim.
+
+        A buggy compute() returning two rows for one key must not land in the
+        year file — load_factor would then hand out ambiguous keys and
+        load_factor_matrix a wide table with duplicate index rows.
+        """
+        factor = Mom20D()
+        result = frame(
+            [
+                ("20200102", "000001.SZ", 1.0),
+                ("20200102", "000001.SZ", 99.0),  # duplicate key — first wins
+                ("20200103", "000002.SZ", 2.0),
+            ]
+        )
+
+        save_factor_full(factor, result, base_dir=str(tmp_path))
+
+        stored = pd.read_parquet(year_path(tmp_path, "mom_20d", "1.0", "2020"))
+        assert len(stored) == 2
+        keys = list(zip(stored["date"], stored["ticker"]))
+        assert keys == [("20200102", "000001.SZ"), ("20200103", "000002.SZ")]
+        # drop_duplicates keeps the first occurrence of the incoming batch
+        assert stored.loc[stored["date"] == "20200102", "mom_20d"].item() == 1.0
 
     def test_full_with_empty_result_clears_directory(self, tmp_path):
         factor = Mom20D()
