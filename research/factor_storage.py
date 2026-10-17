@@ -252,10 +252,14 @@ def save_factor_append(factor, result, base_dir="data_platform/factors") -> None
     values already stored win over the incoming batch.  Corrections go through
     :func:`save_factor_full`, never through a mixed append (factor_storage.md
     write-mode trigger table).
+
+    *result* is validated before any directory is created, so a rejected
+    write leaves no empty version directory behind — :func:`load_factor`
+    reports "not found" rather than a silent empty frame.
     """
+    data = _normalise(result, factor.name)
     out_dir = _version_dir(base_dir, factor.name, factor.version)
     out_dir.mkdir(parents=True, exist_ok=True)
-    data = _normalise(result, factor.name)
 
     if len(data):
         data = data.assign(_year=data["date"].str[:4])
@@ -284,10 +288,14 @@ def save_factor_full(factor, result, base_dir="data_platform/factors") -> None:
     are untouched; a new version is a new directory.  Duplicate ``(date,
     ticker)`` keys in *result* are collapsed to the first row before writing,
     so a buggy ``compute()`` cannot persist ambiguous keys.
+
+    *result* is validated before any directory is created, so a rejected
+    write leaves no empty version directory behind — :func:`load_factor`
+    reports "not found" rather than a silent empty frame.
     """
+    data = _normalise(result, factor.name)
     out_dir = _version_dir(base_dir, factor.name, factor.version)
     out_dir.mkdir(parents=True, exist_ok=True)
-    data = _normalise(result, factor.name)
 
     for stale in out_dir.glob("*.parquet"):
         stale.unlink()

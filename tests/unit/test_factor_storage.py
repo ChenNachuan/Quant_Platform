@@ -9,6 +9,8 @@ Covers every DoD row:
   collapsed to the first row
 * ``metadata.json`` carries ``depends_on`` / ``depends_hash`` / ``date_range``
 * raw semantics: NaN is kept, nothing is filled
+* a rejected write is side-effect free: no empty version directory, so
+  ``load_factor`` reports "not found" rather than a silent empty frame
 
 Plus the read path: ``[start, end]`` clipping on ``YYYYMMDD`` strings, the
 missing-directory error, and ``load_factor_matrix``'s outer join.
@@ -291,6 +293,34 @@ class TestSaveFactorFull:
         out = tmp_path / "mom_20d" / "v1.0"
         assert list(out.glob("*.parquet")) == []
         assert read_meta(tmp_path, "mom_20d", "1.0")["row_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# write-path ordering — validate before touching disk
+# ---------------------------------------------------------------------------
+
+
+class TestRejectedWriteLeavesNoDirectory:
+    @pytest.mark.parametrize("save", [save_factor_append, save_factor_full])
+    def test_rejected_write_on_fresh_version_leaves_no_dir(self, tmp_path, save):
+        """A rejected write must leave no empty version directory behind.
+
+        ``mkdir`` before ``_normalise`` created the directory first and only
+        then discovered the frame was invalid, leaving a bare version dir on
+        disk.  ``load_factor`` then returned an empty frame instead of raising
+        FileNotFoundError — silent empty data, the expensive failure mode.
+        """
+        factor = Mom20D()
+        bad = pd.DataFrame(
+            {"date": ["20200102"], "ticker": ["000001.SZ"], "not_mom": [1.0]}
+        )
+
+        with pytest.raises(ValueError, match="columns"):
+            save(factor, bad, base_dir=str(tmp_path))
+
+        assert not (tmp_path / "mom_20d" / "v1.0").exists()
+        with pytest.raises(FileNotFoundError):
+            load_factor("mom_20d", "20200101", "20201231", base_dir=str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
