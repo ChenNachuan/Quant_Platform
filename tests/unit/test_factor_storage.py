@@ -12,14 +12,27 @@ Covers every DoD row:
 * a rejected write is side-effect free: no empty version directory, so
   ``load_factor`` reports "not found" rather than a silent empty frame
 
-Plus the read path: ``[start, end]`` clipping on ``YYYYMMDD`` strings, the
-missing-directory error, and ``load_factor_matrix``'s outer join.
+Plus the date contract (human ruling 2026-10-18, option A) and crash safety:
+
+* ``date`` is Parquet ``DATE`` (``date32``), typed by
+  ``data.storage_schema.factor_schema`` — the single source of truth, not a
+  private column copy.  ``2024/01/05`` parses to its calendar date; ``NaT``
+  is refused by the column type rather than persisted as the string ``"NaT"``
+* year partitions come from the parsed date's year (``dt.year``), never from a
+  string prefix — ``str[:4]`` is exactly where a bad value used to hide
+* every year file is written tmp + ``os.replace``, and ``save_factor_full``
+  unlinks stale years only after all replacements exist, so a crash mid-loop
+  cannot leave truncated history that ``load_factor`` reports as complete
+
+Plus the read path: ``[start, end]`` clipping, the missing-directory error,
+and ``load_factor_matrix``'s outer join.
 
 Tests write under ``tmp_path`` only — no ``data_platform/`` in the repo tree.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -110,6 +123,11 @@ def read_meta(base: Path, name: str, version: str) -> dict:
     )
 
 
+def on_disk_dates(base: Path, name: str, version: str, year: str) -> list:
+    """Date column as persisted — Parquet DATE reads back as ``datetime.date``."""
+    return pd.read_parquet(year_path(base, name, version, year))["date"].tolist()
+
+
 # ---------------------------------------------------------------------------
 # save_factor_append
 # ---------------------------------------------------------------------------
@@ -139,12 +157,14 @@ class TestSaveFactorAppend:
         assert len(stored) == 3
         keys = list(zip(stored["date"], stored["ticker"]))
         assert keys == [
-            ("20200102", "000001.SZ"),
-            ("20200103", "000001.SZ"),
-            ("20200106", "000002.SZ"),
+            (dt.date(2020, 1, 2), "000001.SZ"),
+            (dt.date(2020, 1, 3), "000001.SZ"),
+            (dt.date(2020, 1, 6), "000002.SZ"),
         ]
         # drop_duplicates keeps the first occurrence = the already-stored row
-        assert stored.loc[stored["date"] == "20200103", "mom_20d"].item() == 2.0
+        assert (
+            stored.loc[stored["date"] == dt.date(2020, 1, 3), "mom_20d"].item() == 2.0
+        )
 
     def test_append_splits_by_year(self, tmp_path):
         factor = Mom20D()
@@ -281,9 +301,14 @@ class TestSaveFactorFull:
         stored = pd.read_parquet(year_path(tmp_path, "mom_20d", "1.0", "2020"))
         assert len(stored) == 2
         keys = list(zip(stored["date"], stored["ticker"]))
-        assert keys == [("20200102", "000001.SZ"), ("20200103", "000002.SZ")]
+        assert keys == [
+            (dt.date(2020, 1, 2), "000001.SZ"),
+            (dt.date(2020, 1, 3), "000002.SZ"),
+        ]
         # drop_duplicates keeps the first occurrence of the incoming batch
-        assert stored.loc[stored["date"] == "20200102", "mom_20d"].item() == 1.0
+        assert (
+            stored.loc[stored["date"] == dt.date(2020, 1, 2), "mom_20d"].item() == 1.0
+        )
 
     def test_full_with_empty_result_clears_directory(self, tmp_path):
         factor = Mom20D()
@@ -324,6 +349,302 @@ class TestRejectedWriteLeavesNoDirectory:
 
 
 # ---------------------------------------------------------------------------
+# date contract — Parquet DATE, typed by data.storage_schema.factor_schema
+# ---------------------------------------------------------------------------
+
+
+class TestDateContract:
+    def test_on_disk_date_column_is_parquet_date(self, tmp_path):
+        """Option A: `date` is Parquet DATE (date32), not VARCHAR YYYYMMDD.
+
+        ``data/storage_schema.py`` types every date column through
+        ``_date_column() -> pa.Date`` and registers this very file path as
+        ``PARTITION_PATHS["factor"]``.  One file path, one type.
+        """
+        import pyarrow.parquet as pq
+
+        factor = Mom20D()
+        save_factor_full(factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path))
+
+        schema = pq.read_schema(year_path(tmp_path, "mom_20d", "1.0", "2020"))
+        assert str(schema.field("date").type) == "date32[day]"
+        # and it reads back as datetime.date, the in-memory DATE convention
+        assert on_disk_dates(tmp_path, "mom_20d", "1.0", "2020") == [
+            dt.date(2020, 1, 2)
+        ]
+
+    def test_slash_date_normalises_to_calendar_date(self, tmp_path):
+        """Under DATE, `2024/01/05` is legal input and means 2024-01-05.
+
+        The VARCHAR contract forbade it and `_as_date_str` persisted it
+        verbatim — the row then sat under a date no reader could match.
+        """
+        factor = Mom20D()
+        result = pd.DataFrame(
+            {"date": ["2024/01/05"], "ticker": ["000001.SZ"], "mom_20d": [1.0]}
+        )
+
+        save_factor_full(factor, result, base_dir=str(tmp_path))
+
+        assert on_disk_dates(tmp_path, "mom_20d", "1.0", "2024") == [
+            dt.date(2024, 1, 5)
+        ]
+
+    @pytest.mark.parametrize("save", [save_factor_append, save_factor_full])
+    def test_nat_date_is_rejected_not_persisted(self, tmp_path, save):
+        """NaT is refused by the column type, never written as the string "NaT".
+
+        The VARCHAR path stringified NaT to `"NaT"`, derived a `NaT.parquet`
+        year file from `str[:4]`, and hid the row from every later read.
+        """
+        factor = Mom20D()
+        result = pd.DataFrame(
+            {"date": [pd.NaT], "ticker": ["000001.SZ"], "mom_20d": [1.0]}
+        )
+
+        with pytest.raises(Exception):
+            save(factor, result, base_dir=str(tmp_path))
+
+        out = tmp_path / "mom_20d" / "v1.0"
+        assert not out.exists() or not list(out.glob("*.parquet"))
+
+    def test_unparseable_date_is_rejected(self, tmp_path):
+        """A date the parser cannot read is an error, not a silent bad row."""
+        factor = Mom20D()
+        result = pd.DataFrame(
+            {"date": ["not-a-date"], "ticker": ["000001.SZ"], "mom_20d": [1.0]}
+        )
+
+        with pytest.raises(Exception):
+            save_factor_full(factor, result, base_dir=str(tmp_path))
+
+        assert not (tmp_path / "mom_20d" / "v1.0").exists() or not list(
+            (tmp_path / "mom_20d" / "v1.0").glob("*.parquet")
+        )
+
+
+# ---------------------------------------------------------------------------
+# year partitioning — dt.year, not date.str[:4]
+# ---------------------------------------------------------------------------
+
+
+class TestYearPartition:
+    def test_year_partition_derives_from_parsed_date(self, tmp_path):
+        """The year filename comes from the date's year, not a string prefix.
+
+        ``"31/12/2024"`` is 2024-12-31.  ``str[:4]`` of the raw value is
+        ``"31/1"`` — the row vanished into a bogus year file that no read
+        would ever open.  ``dt.year`` gets it right.
+        """
+        factor = Mom20D()
+        result = pd.DataFrame(
+            {"date": ["31/12/2024"], "ticker": ["000001.SZ"], "mom_20d": [1.0]}
+        )
+
+        save_factor_full(factor, result, base_dir=str(tmp_path))
+
+        out = tmp_path / "mom_20d" / "v1.0"
+        assert sorted(p.name for p in out.glob("*.parquet")) == ["2024.parquet"]
+        assert on_disk_dates(tmp_path, "mom_20d", "1.0", "2024") == [
+            dt.date(2024, 12, 31)
+        ]
+
+    def test_year_split_for_mixed_representations(self, tmp_path):
+        """Date objects, ISO strings and slash strings all split on dt.year."""
+        factor = Mom20D()
+        result = pd.DataFrame(
+            {
+                "date": [dt.date(2019, 12, 31), "2020/06/15", "2021-03-01"],
+                "ticker": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "mom_20d": [1.0, 2.0, 3.0],
+            }
+        )
+
+        save_factor_full(factor, result, base_dir=str(tmp_path))
+
+        out = tmp_path / "mom_20d" / "v1.0"
+        assert sorted(p.name for p in out.glob("*.parquet")) == [
+            "2019.parquet",
+            "2020.parquet",
+            "2021.parquet",
+        ]
+
+    def test_year_split_for_mixed_representations_append(self, tmp_path):
+        """Same derivation on the append path."""
+        factor = Mom20D()
+        result = pd.DataFrame(
+            {
+                "date": ["31/12/2024", dt.date(2025, 1, 1)],
+                "ticker": ["000001.SZ", "000002.SZ"],
+                "mom_20d": [1.0, 2.0],
+            }
+        )
+
+        save_factor_append(factor, result, base_dir=str(tmp_path))
+
+        out = tmp_path / "mom_20d" / "v1.0"
+        assert sorted(p.name for p in out.glob("*.parquet")) == [
+            "2024.parquet",
+            "2025.parquet",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# crash safety — tmp + os.replace per year, stale unlinked only after
+# ---------------------------------------------------------------------------
+
+
+def _failing_after(n, real, boom=OSError("disk full")):
+    """Return a write_parquet_atomic stand-in that fails after *n* successes."""
+    calls = {"n": 0}
+
+    def fake(df, path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > n:
+            raise boom
+        return real(df, path, **kwargs)
+
+    return fake, calls
+
+
+class TestCrashSafeWrites:
+    def test_full_never_unlinks_years_before_replacements_exist(
+        self, tmp_path, monkeypatch
+    ):
+        """A mid-loop failure must leave the previous years on disk intact.
+
+        ``save_factor_full`` used to unlink every year file first and only
+        then write.  A crash / disk-full / kill mid-loop left a subset of
+        years while ``metadata.json`` still described the old coverage —
+        ``load_factor`` then returned truncated history as complete.
+        """
+        import research.factor_storage as fs
+
+        factor = Mom20D()
+        save_factor_full(
+            factor,
+            frame(
+                [
+                    ("20191231", "000001.SZ", 1.0),
+                    ("20200102", "000001.SZ", 2.0),
+                    ("20210104", "000002.SZ", 3.0),
+                ]
+            ),
+            str(tmp_path),
+        )
+        out = tmp_path / "mom_20d" / "v1.0"
+        before = {p.name: p.read_bytes() for p in out.glob("*.parquet")}
+        assert sorted(before) == ["2019.parquet", "2020.parquet", "2021.parquet"]
+
+        fake, calls = _failing_after(
+            1, fs.write_parquet_atomic
+        )  # 1st year lands, 2nd blows up
+        monkeypatch.setattr(fs, "write_parquet_atomic", fake)
+
+        with pytest.raises(OSError, match="disk full"):
+            save_factor_full(
+                factor,
+                frame(
+                    [
+                        ("20191231", "000001.SZ", 10.0),
+                        ("20200102", "000001.SZ", 20.0),
+                        ("20210104", "000002.SZ", 30.0),
+                    ]
+                ),
+                str(tmp_path),
+            )
+        assert calls["n"] == 2  # second call is the one that raised
+
+        after = {p.name: p.read_bytes() for p in out.glob("*.parquet")}
+        # the years that were never reached are still the old ones
+        assert after["2021.parquet"] == before["2021.parquet"]
+        assert after["2020.parquet"] == before["2020.parquet"]
+        # and a load still sees the full pre-failure history
+        got = load_factor("mom_20d", "20190101", "20211231", base_dir=str(tmp_path))
+        assert len(got) == 3
+
+    def test_full_removes_stale_years_only_after_writes_succeed(self, tmp_path):
+        """Years absent from the new result go away — but only on success."""
+        factor = Mom20D()
+        save_factor_full(
+            factor,
+            frame(
+                [
+                    ("20191231", "000001.SZ", 1.0),
+                    ("20200102", "000001.SZ", 2.0),
+                ]
+            ),
+            str(tmp_path),
+        )
+        save_factor_full(
+            factor, frame([("20200102", "000001.SZ", 20.0)]), str(tmp_path)
+        )
+
+        out = tmp_path / "mom_20d" / "v1.0"
+        assert sorted(p.name for p in out.glob("*.parquet")) == ["2020.parquet"]
+
+    def test_failed_write_leaves_no_tmp_and_no_partial_target(
+        self, tmp_path, monkeypatch
+    ):
+        """A failed year write must not leave .tmp or a half-written target."""
+        import research.factor_storage as fs
+
+        factor = Mom20D()
+        fake, calls = _failing_after(0, fs.write_parquet_atomic)  # first write blows up
+        monkeypatch.setattr(fs, "write_parquet_atomic", fake)
+
+        with pytest.raises(OSError, match="disk full"):
+            save_factor_full(
+                factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path)
+            )
+
+        out = tmp_path / "mom_20d" / "v1.0"
+        assert not list(out.glob("*.tmp"))
+        assert not list(out.glob("*.parquet"))
+
+    def test_append_write_is_atomic(self, tmp_path, monkeypatch):
+        """A failed append write leaves the previously stored year intact."""
+        import research.factor_storage as fs
+
+        factor = Mom20D()
+        save_factor_append(
+            factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path)
+        )
+        before = year_path(tmp_path, "mom_20d", "1.0", "2020").read_bytes()
+
+        fake, calls = _failing_after(0, fs.write_parquet_atomic)
+        monkeypatch.setattr(fs, "write_parquet_atomic", fake)
+        with pytest.raises(OSError, match="disk full"):
+            save_factor_append(
+                factor, frame([("20200103", "000001.SZ", 2.0)]), str(tmp_path)
+            )
+
+        after = year_path(tmp_path, "mom_20d", "1.0", "2020")
+        assert after.read_bytes() == before
+        assert not list(after.parent.glob("*.tmp"))
+
+    def test_append_uses_tmp_then_replace(self, tmp_path, monkeypatch):
+        """The year file is created by a rename, never by a direct write."""
+        import research.factor_storage as fs
+
+        seen = {}
+        real = fs.write_parquet_atomic
+
+        def spy(df, path, **kwargs):
+            seen["target"] = Path(path)
+            seen["existed_before"] = Path(path).exists()
+            return real(df, path, **kwargs)
+
+        monkeypatch.setattr(fs, "write_parquet_atomic", spy)
+        factor = Mom20D()
+        save_factor_append(
+            factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path)
+        )
+        assert seen["existed_before"] is False
+        assert not list(seen["target"].parent.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
 # metadata.json
 # ---------------------------------------------------------------------------
 
@@ -344,7 +665,8 @@ class TestMetadata:
         assert meta["version"] == "1.0"
         assert meta["depends_on"] == ["bars_daily", "factor:mom_20d"]
         assert isinstance(meta["depends_hash"], str) and len(meta["depends_hash"]) == 12
-        assert meta["date_range"] == ["20200102", "20210304"]
+        # date_range is ISO — the DATE column's natural serialisation
+        assert meta["date_range"] == ["2020-01-02", "2021-03-04"]
         assert meta["row_count"] == 2
         assert meta["file_count"] == 2
         assert meta["compression"] == "zstd"
@@ -376,7 +698,7 @@ class TestMetadata:
 
         meta = read_meta(tmp_path, "mom_20d", "1.0")
         assert meta["row_count"] == 2
-        assert meta["date_range"] == ["20200102", "20200103"]
+        assert meta["date_range"] == ["2020-01-02", "2020-01-03"]
         assert meta["file_count"] == 1
 
     def test_created_at_preserved_across_rewrite(self, tmp_path):
@@ -402,7 +724,7 @@ class TestMetadata:
         assert meta["factor_name"] == "mom_20d"
         assert meta["depends_on"] == ["bars_daily"]
         assert len(meta["depends_hash"]) == 12
-        assert meta["date_range"] == ["20200102", "20200102"]
+        assert meta["date_range"] == ["2020-01-02", "2020-01-02"]
         assert meta["row_count"] == 1
 
     def test_path_components_cannot_escape_base_dir(self, tmp_path):
@@ -432,7 +754,7 @@ class TestLoadFactor:
         save_factor_full(factor, result, str(tmp_path))
 
         got = load_factor("mom_20d", "20200102", "20200103", "1.0", str(tmp_path))
-        assert got["date"].tolist() == ["20200102", "20200103"]
+        assert got["date"].tolist() == [dt.date(2020, 1, 2), dt.date(2020, 1, 3)]
         assert list(got.columns) == ["date", "ticker", "mom_20d"]
 
     def test_window_with_no_rows_returns_empty_contract_frame(self, tmp_path):
@@ -463,17 +785,31 @@ class TestLoadFactor:
 
         got = load_factor("mom_20d", "20191231", "20210104", "1.0", str(tmp_path))
         assert len(got) == 3
-        assert got["date"].tolist() == ["20191231", "20200102", "20210104"]
+        assert got["date"].tolist() == [
+            dt.date(2019, 12, 31),
+            dt.date(2020, 1, 2),
+            dt.date(2021, 1, 4),
+        ]
 
     def test_accepts_datetime_bounds(self, tmp_path):
-        import datetime as dt
-
         factor = Mom20D()
         save_factor_full(factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path))
         got = load_factor(
             "mom_20d", dt.date(2020, 1, 1), dt.date(2020, 1, 31), "1.0", str(tmp_path)
         )
         assert len(got) == 1
+
+    def test_accepts_slash_and_iso_bounds(self, tmp_path):
+        """Bounds in any parseable form clip the same window."""
+        factor = Mom20D()
+        save_factor_full(
+            factor,
+            frame([("20200102", "000001.SZ", 1.0), ("20200103", "000001.SZ", 2.0)]),
+            str(tmp_path),
+        )
+        for start, end in [("2020/01/02", "2020/01/03"), ("2020-01-02", "2020-01-03")]:
+            got = load_factor("mom_20d", start, end, "1.0", str(tmp_path))
+            assert len(got) == 2, (start, end)
 
 
 # ---------------------------------------------------------------------------
@@ -492,22 +828,24 @@ class TestLoadFactorMatrix:
         save_factor_full(
             vol,
             frame(
-                [("20200103", "000002.SZ", 3.0), ("20200104", "000003.SZ", 4.0)]
+                [("20200103", "000002.SZ", 20.0), ("20200104", "000003.SZ", 30.0)]
             ).rename(columns={"mom_20d": "vol_20d"}),
             str(tmp_path),
         )
 
         wide = load_factor_matrix(
-            ["mom_20d", "vol_20d"], "20200101", "20200131", "1.0", str(tmp_path)
+            ["mom_20d", "vol_20d"], "20200101", "20201231", "1.0", str(tmp_path)
         )
-
         assert list(wide.columns) == ["date", "ticker", "mom_20d", "vol_20d"]
-        assert len(wide) == 3
-        # outer join: keys only one factor has stay NaN — never filled
-        assert wide.loc[wide["date"] == "20200102", "vol_20d"].isna().item()
-        assert wide.loc[wide["date"] == "20200104", "mom_20d"].isna().item()
-        assert wide.loc[wide["date"] == "20200103", "mom_20d"].item() == 2.0
-        assert wide.loc[wide["date"] == "20200103", "vol_20d"].item() == 3.0
+        assert len(wide) == 3  # outer join on (date, ticker)
+        # each factor is missing exactly the key the other one owns
+        assert wide["mom_20d"].isna().sum() == 1
+        assert wide["vol_20d"].isna().sum() == 1
+        assert wide["date"].tolist() == [
+            dt.date(2020, 1, 2),
+            dt.date(2020, 1, 3),
+            dt.date(2020, 1, 4),
+        ]
 
     def test_empty_names_rejected(self, tmp_path):
         with pytest.raises(ValueError, match="non-empty"):
@@ -516,5 +854,5 @@ class TestLoadFactorMatrix:
     def test_missing_factor_directory_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_factor_matrix(
-                ["mom_20d", "vol_20d"], "20200101", "20201231", "1.0", str(tmp_path)
+                ["mom_20d"], "20200101", "20201231", "1.0", str(tmp_path)
             )
