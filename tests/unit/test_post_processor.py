@@ -301,6 +301,61 @@ class TestNeutralize:
         assert out.index.tolist() == df.index.tolist()
         np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)
 
+    @staticmethod
+    def _saturated_frame(n: int) -> pd.DataFrame:
+        """n names, n distinct industries — the design saturates the section."""
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02"] * n,
+                "ticker": [f"t{i:03d}" for i in range(n)],
+                "f": [float(2 * i + 1) for i in range(n)],
+                "industry": [f"I{i}" for i in range(n)],
+                "log_market_cap": [float(i * 0.5) for i in range(n)],
+            }
+        )
+
+    def test_saturated_design_passes_the_date_through(self):
+        """n-1 industry dummies plus the intercept interpolate every name.
+
+        `lstsq` then returns residuals ~0 and the date's factor would be
+        written out as nothing — the same silent wipe as a zero MAD.  The
+        date must pass through unchanged.
+        """
+        n = MIN_NEUTRALIZE_ROWS + 2
+        df = self._saturated_frame(n)
+
+        out = neutralize(df, "f")
+
+        pd.testing.assert_series_equal(out["f"], df["f"])
+
+    def test_saturated_design_without_size_also_passes(self):
+        n = MIN_NEUTRALIZE_ROWS + 2
+        df = self._saturated_frame(n)
+
+        out = neutralize(df, "f", method="industry")
+
+        pd.testing.assert_series_equal(out["f"], df["f"])
+
+    def test_unsaturated_design_still_neutralises(self):
+        """The guard must not fire when the section has room to be cleaned."""
+        df = _neutral_frame()  # 12 names, 2 industries → rank 3
+        out = neutralize(df, "f")
+
+        np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)
+
+    def test_saturation_guard_spares_other_dates(self):
+        """One dirty date must not stop the clean ones being neutralised."""
+        saturated = self._saturated_frame(MIN_NEUTRALIZE_ROWS + 2)
+        clean = _neutral_frame().assign(date="2024-01-03")
+        df = pd.concat([saturated, clean], ignore_index=True)
+
+        out = neutralize(df, "f")
+
+        kept = out.loc[out["date"] == "2024-01-02", "f"].to_numpy()
+        np.testing.assert_allclose(kept, saturated["f"].to_numpy())
+        cleaned = out.loc[out["date"] == "2024-01-03", "f"].to_numpy()
+        np.testing.assert_allclose(cleaned, 0.0, atol=1e-10)
+
 
 # ---------------------------------------------------------------------------
 # PostProcessor + step order
@@ -406,6 +461,27 @@ class TestPresets:
         assert PIPELINE_RESEARCH is not PIPELINE_STOCK_EVAL
         assert PIPELINE_RESEARCH is not PIPELINE_ETF
         assert PIPELINE_RESEARCH is not PIPELINE_RANK
+
+    def test_mutating_step_params_does_not_pollute_presets(self):
+        """The presets are module constants; a reader edits a copy, not them.
+
+        `PostProcessor` copies every step along with its `params`, so tuning
+        `n` on one instance cannot reach into `PIPELINE_*` and silently change
+        what the next caller gets.
+        """
+        from_explicit = PostProcessor(list(PIPELINE_RESEARCH))
+        from_default = PostProcessor()
+
+        from_explicit.steps[0].params["n"] = 0.25
+        from_default.steps[1].params["how"] = "ffill"
+
+        for preset in (
+            PIPELINE_RESEARCH,
+            PIPELINE_STOCK_EVAL,
+            PIPELINE_ETF,
+            PIPELINE_RANK,
+        ):
+            assert all(step.params == {} for step in preset)
 
 
 # ---------------------------------------------------------------------------

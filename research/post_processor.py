@@ -25,8 +25,8 @@ touches the parquet tree.
 
 Not this module: factor computation (:mod:`research.factor_interface`),
 persistence (:mod:`research.factor_storage`), evaluation / IC (S11), and a
-standalone orthogonalisation step (neutralising against extra factors is
-just more regressors inside :func:`neutralize`).
+standalone orthogonalisation step — :func:`neutralize` takes only the industry
+and size columns its signature names.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from numpy.linalg import lstsq
+from numpy.linalg import lstsq, matrix_rank
 
 __all__ = [
     "MAD_SCALE",
@@ -169,7 +169,8 @@ def neutralize(
     the default) or ``factor ~ 1 + industry dummies`` (``"industry"``).  One
     regression **per date**: a pooled fit would let other dates' cross-sections
     set today's betas.  A date with fewer than
-    :data:`MIN_NEUTRALIZE_ROWS` usable rows is passed through unchanged.
+    :data:`MIN_NEUTRALIZE_ROWS` usable rows is passed through unchanged, and so
+    is one whose design matrix is saturated — see the rank guard below.
 
     A row joins the fit only when everything the regression reads is sound:
     a finite factor, a known industry, and — when the method uses it — a
@@ -219,6 +220,16 @@ def neutralize(
         rhs = np.hstack(parts) if parts else np.empty((len(y), 0))
         x = np.column_stack([np.ones(len(y)), rhs])
 
+        # A saturated design interpolates the cross-section.  When the rank
+        # reaches n-1 — n-1 industry dummies plus the intercept, i.e. one
+        # industry per name — `lstsq` fits every name exactly, the residuals
+        # come out ~0 and the date's factor is silently wiped to nothing.
+        # Same shape of failure as a zero MAD.  Skip the date; the OLS is
+        # unchanged.
+        n_fit = int(valid.sum())
+        if int(matrix_rank(x[valid])) >= n_fit - 1:
+            continue
+
         beta, _, _, _ = lstsq(x[valid], y[valid], rcond=None)
         fitted = y - x @ beta
         y[valid] = fitted[valid]
@@ -251,7 +262,13 @@ class PostProcessor:
     """
 
     def __init__(self, steps: list[PostProcessStep] | None = None):
-        self.steps = list(PIPELINE_RESEARCH if steps is None else steps)
+        # Copy each step along with its `params`: the presets are shared module
+        # constants, so a caller who writes `steps[0].params["n"]` must not be
+        # editing `PIPELINE_RESEARCH` under the next reader.
+        self.steps = [
+            PostProcessStep(name=step.name, func=step.func, params=dict(step.params))
+            for step in (PIPELINE_RESEARCH if steps is None else steps)
+        ]
 
     def transform(
         self, df: pd.DataFrame, factor_col: str, date_col: str = "date"
