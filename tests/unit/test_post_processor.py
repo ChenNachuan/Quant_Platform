@@ -301,9 +301,14 @@ class TestNeutralize:
         assert out.index.tolist() == df.index.tolist()
         np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)
 
+    # Rank boundary: the guard must skip exactly the saturated design and
+    # nothing else.  Skipping too little wipes the date; skipping too much
+    # passes it through still carrying the industry effect — the same silent
+    # failure, in the other direction.
+
     @staticmethod
     def _saturated_frame(n: int) -> pd.DataFrame:
-        """n names, n distinct industries — the design saturates the section."""
+        """n names across n industries — design rank == n, no residual left."""
         return pd.DataFrame(
             {
                 "date": ["2024-01-02"] * n,
@@ -314,31 +319,57 @@ class TestNeutralize:
             }
         )
 
-    def test_saturated_design_passes_the_date_through(self):
-        """n-1 industry dummies plus the intercept interpolate every name.
+    @staticmethod
+    def _near_saturated_frame(n: int) -> pd.DataFrame:
+        """n names across n-1 industries — design rank == n-1, one dof left.
 
-        `lstsq` then returns residuals ~0 and the date's factor would be
-        written out as nothing — the same silent wipe as a zero MAD.  The
-        date must pass through unchanged.
+        The factor is constant within industry, so it sits entirely in the
+        column space and a correct fit takes it all out.  If the guard refuses
+        the date instead, the industry effect survives into the output.
         """
-        n = MIN_NEUTRALIZE_ROWS + 2
-        df = self._saturated_frame(n)
+        industries = [f"I{i}" for i in range(n - 1)] + ["I0"]
+        offsets = {f"I{i}": 10.0 * i for i in range(n - 1)}
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02"] * n,
+                "ticker": [f"t{i:03d}" for i in range(n)],
+                "f": [offsets[ind] for ind in industries],
+                "industry": industries,
+                "log_market_cap": [float(i * 0.5) for i in range(n)],
+            }
+        )
 
-        out = neutralize(df, "f")
-
-        pd.testing.assert_series_equal(out["f"], df["f"])
-
-    def test_saturated_design_without_size_also_passes(self):
+    def test_rank_equals_n_still_skips(self):
+        """rank == n interpolates every name → residuals ~0 → the date would
+        be wiped to nothing.  It must pass through unchanged."""
         n = MIN_NEUTRALIZE_ROWS + 2
         df = self._saturated_frame(n)
 
         out = neutralize(df, "f", method="industry")
-
         pd.testing.assert_series_equal(out["f"], df["f"])
 
-    def test_unsaturated_design_still_neutralises(self):
-        """The guard must not fire when the section has room to be cleaned."""
+        out = neutralize(df, "f")
+        pd.testing.assert_series_equal(out["f"], df["f"])
+
+    def test_rank_equals_n_minus_one_neutralises(self):
+        """rank == n-1 has one residual dof — it is not a saturated fit.
+
+        Refusing this date would let the factor through still carrying its
+        industry effect (Test's 12-name / 11-industry case).  It must be
+        cleaned.
+        """
+        n = MIN_NEUTRALIZE_ROWS + 2
+        df = self._near_saturated_frame(n)
+
+        out = neutralize(df, "f", method="industry")
+
+        assert (out["f"] != df["f"]).any()  # the date was not skipped
+        np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)
+
+    def test_low_rank_neutralises(self):
+        """A section with room to be cleaned must still be cleaned."""
         df = _neutral_frame()  # 12 names, 2 industries → rank 3
+
         out = neutralize(df, "f")
 
         np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)

@@ -220,14 +220,17 @@ def neutralize(
         rhs = np.hstack(parts) if parts else np.empty((len(y), 0))
         x = np.column_stack([np.ones(len(y)), rhs])
 
-        # A saturated design interpolates the cross-section.  When the rank
-        # reaches n-1 — n-1 industry dummies plus the intercept, i.e. one
-        # industry per name — `lstsq` fits every name exactly, the residuals
-        # come out ~0 and the date's factor is silently wiped to nothing.
-        # Same shape of failure as a zero MAD.  Skip the date; the OLS is
-        # unchanged.
+        # A saturated design interpolates the cross-section: rank == n means
+        # `lstsq` fits every name exactly, the residuals come out ~0 and the
+        # date's factor is silently wiped to nothing — the same shape of
+        # failure as a zero MAD.  Skip that date; the OLS is unchanged.
+        #
+        # The boundary is rank == n, not n-1.  At rank n-1 there is still one
+        # residual degree of freedom and the OLS removes the industry effect
+        # it should; refusing that date would pass the factor through still
+        # carrying it — the same silent failure, in the other direction.
         n_fit = int(valid.sum())
-        if int(matrix_rank(x[valid])) >= n_fit - 1:
+        if int(matrix_rank(x[valid])) >= n_fit:
             continue
 
         beta, _, _, _ = lstsq(x[valid], y[valid], rcond=None)
