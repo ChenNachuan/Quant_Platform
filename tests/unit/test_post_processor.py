@@ -123,6 +123,22 @@ class TestWinsorizeMad:
         result = winsorize_mad(s)
         assert result.isna().all()
 
+    def test_zero_mad_section_passes_through(self):
+        """Half or more tied at the median → band is a point.
+
+        `clip` would collapse the whole cross-section onto the median; there
+        is no dispersion to winsorise, so the section must come back intact.
+        The settled formula is unchanged — this is the degenerate-input guard.
+        """
+        s = pd.Series([1.0, 1.0, 1.0, 1.0, 50.0])
+        assert (s - s.median()).abs().median() == 0.0
+
+        result = winsorize_mad(s)
+
+        assert result.tolist() == [1.0, 1.0, 1.0, 1.0, 50.0]
+        # …and a non-zero MAD still clips by the same formula.
+        assert winsorize_mad(pd.Series([1.0, 2.0, 3.0, 50.0])).iloc[-1] < 50.0
+
 
 # ---------------------------------------------------------------------------
 # fillna
@@ -232,6 +248,58 @@ class TestNeutralize:
 
         assert np.isnan(out["f"].iloc[0])
         np.testing.assert_allclose(out["f"].iloc[1:].to_numpy(), 0.0, atol=1e-10)
+
+    @pytest.mark.parametrize("bad_size", [np.nan, np.inf, -np.inf])
+    def test_non_finite_size_excludes_the_row_and_does_not_abort(self, bad_size):
+        """A live factor with a non-finite size must not reach `lstsq`.
+
+        Before the mask covered the design columns this raised
+        `LinAlgError: SVD did not converge` and took every clean date in the
+        frame with it.  The row keeps its input value; the rest are fitted.
+        """
+        df = _neutral_frame()
+        df.loc[3, "log_market_cap"] = bad_size
+        original = df["f"].iloc[3]
+
+        out = neutralize(df, "f")
+
+        assert out["f"].iloc[3] == pytest.approx(original)
+        keep = [i for i in range(12) if i != 3]
+        np.testing.assert_allclose(out["f"].iloc[keep].to_numpy(), 0.0, atol=1e-10)
+
+    def test_missing_industry_excludes_the_row_from_the_fit(self):
+        """`get_dummies` renders a missing industry as the reference bucket.
+
+        Left in the fit, that name is neutralised against the wrong beta.
+        """
+        df = _neutral_frame()
+        df.loc[2, "industry"] = np.nan
+        original = df["f"].iloc[2]
+
+        out = neutralize(df, "f")
+
+        assert out["f"].iloc[2] == pytest.approx(original)
+        keep = [i for i in range(12) if i != 2]
+        np.testing.assert_allclose(out["f"].iloc[keep].to_numpy(), 0.0, atol=1e-10)
+
+    def test_missing_size_ignored_when_method_is_industry_only(self):
+        """Size is not a regressor here, so it cannot disqualify a row."""
+        df = _neutral_frame()
+        df.loc[4, "log_market_cap"] = np.nan
+
+        out = neutralize(df, "f", method="industry")
+
+        assert np.isfinite(out["f"]).all()
+
+    def test_non_unique_index_does_not_raise(self):
+        """Index labels are the caller's business; the fit is positional."""
+        df = pd.concat([_neutral_frame(), _neutral_frame()], ignore_index=True)
+        df.index = [0] * len(df)  # every label duplicated
+
+        out = neutralize(df, "f")
+
+        assert out.index.tolist() == df.index.tolist()
+        np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +556,13 @@ class TestHypothesis:
         out = winsorize_mad(s)
         med = s.median()
         mad = (s - med).abs().median()
-        half = 3.0 * MAD_SCALE * mad
-        if pd.isna(half):
+        if pd.isna(med) or pd.isna(mad):
             return
+        if mad == 0:
+            # Degenerate band (a point): the section passes through intact
+            # rather than collapsing onto the median.
+            assert out.tolist() == s.tolist()
+            return
+        half = 3.0 * MAD_SCALE * mad
         assert out.min() >= med - half - 1e-9
         assert out.max() <= med + half + 1e-9
