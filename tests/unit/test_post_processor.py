@@ -35,6 +35,7 @@ from research.post_processor import (
     PIPELINE_STOCK_EVAL,
     PostProcessStep,
     PostProcessor,
+    SIGMA_RTOL,
     fillna_cross_section,
     fillna_median,
     neutralize,
@@ -60,6 +61,21 @@ def _frame(dates_values: dict[str, list[float]], col: str = "f") -> pd.DataFrame
 
 def _section(df: pd.DataFrame, date: str, col: str = "f") -> pd.Series:
     return df.loc[df["date"] == date, col]
+
+
+def _frame_with_null_date(col: str = "f") -> pd.DataFrame:
+    """Two dated rows and one whose date is null.
+
+    The null-date row belongs to no ``groupby`` group, so a naive ``transform``
+    assignment writes NaN over its raw value.
+    """
+    return pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2024-01-02", pd.NaT],
+            "ticker": ["t000", "t001", "t002"],
+            col: [1.0, 3.0, 7.0],
+        }
+    )
 
 
 def _zscore(s: pd.Series) -> pd.Series:
@@ -167,6 +183,18 @@ class TestFillna:
         out = fillna_cross_section(df, "f")
         assert out["f"].isna().all()
 
+    def test_fillna_cross_section_keeps_null_date_rows(self):
+        """`groupby` drops null-key rows, so `transform` returns NaN there.
+
+        Assigning that back would write NaN over a raw value that was fine —
+        silent data loss, and the opposite of what `neutralize` does.
+        """
+        df = _frame_with_null_date()
+        out = fillna_cross_section(df, "f")
+
+        assert out["f"].iloc[2] == pytest.approx(7.0)
+        assert out["f"].iloc[:2].tolist() == [1.0, 3.0]
+
 
 # ---------------------------------------------------------------------------
 # standardize
@@ -182,6 +210,26 @@ class TestStandardize:
 
     def test_zscore_constant_section_is_zero_not_inf(self):
         z = standardize_zscore(pd.Series([4.0, 4.0, 4.0]))
+        assert (z == 0.0).all()
+
+    def test_zscore_flat_unrepresentable_section_is_zero_not_minus_one(self):
+        """`sigma == 0` does not catch a flat section.
+
+        ``[0.1, 0.1, 0.1]`` sums to a rounded mean, so its std comes out at
+        the float rounding level rather than at 0.  Dividing by that hands
+        back all -1.0 — a flat factor carrying a rounding-dependent signal —
+        instead of the documented zeros.
+        """
+        s = pd.Series([0.1, 0.1, 0.1])
+        assert s.std() != 0.0  # the exact comparison really would miss this
+
+        z = standardize_zscore(s)
+
+        assert (z == 0.0).all()
+
+    def test_zscore_tolerance_is_relative_to_section_scale(self):
+        """A large flat section must not be normalised either."""
+        z = standardize_zscore(pd.Series([1e8, 1e8, 1e8]))
         assert (z == 0.0).all()
 
     def test_zscore_single_value_is_zero(self):
@@ -432,6 +480,37 @@ class TestPostProcessor:
         PostProcessor().transform(df, "f")
         pd.testing.assert_frame_equal(df, before)
 
+    def test_transform_keeps_null_date_rows(self):
+        """A null-date row is in no group, so no step may overwrite it."""
+        df = _frame_with_null_date()
+        out = PostProcessor().transform(df, "f")
+
+        assert out["f"].iloc[2] == pytest.approx(7.0)
+
+    def test_null_date_rows_survive_every_entry_point(self):
+        """`transform` and `fillna_cross_section` match `neutralize` here.
+
+        All three leave the raw value alone rather than writing NaN over it.
+        """
+        n = MIN_NEUTRALIZE_ROWS + 2
+        df = pd.DataFrame(
+            {
+                "date": ["2024-01-02"] * n + [pd.NaT],
+                "ticker": [f"t{i:03d}" for i in range(n + 1)],
+                "f": [float(i) for i in range(n)] + [777.0],
+                "industry": ["A", "B"] * (n // 2) + ["A"],
+                "log_market_cap": [float(i) for i in range(n + 1)],
+            }
+        )
+        tail = df["f"].iloc[-1]
+
+        for out in (
+            PostProcessor().transform(df, "f"),
+            fillna_cross_section(df, "f"),
+            neutralize(df, "f"),
+        ):
+            assert out["f"].iloc[-1] == pytest.approx(tail)
+
     def test_custom_params_are_forwarded(self):
         df = _frame({"2024-01-02": [0.0, 1.0, 2.0, 3.0, 100.0]})
         tight = PostProcessor([PostProcessStep("winsorize", winsorize_mad, {"n": 0.1})])
@@ -536,6 +615,30 @@ class TestPresets:
             PIPELINE_RANK,
         ):
             assert all(step.params == {} for step in preset)
+
+    def test_presets_are_accepted_directly(self):
+        """The presets are tuples; passing one is the natural call.
+
+        `steps` is a Sequence for that reason — a list-only annotation rejects
+        `PostProcessor(PIPELINE_RESEARCH)` in a type checker, which is where a
+        caller would notice the mismatch.
+        """
+        pp = PostProcessor(PIPELINE_RESEARCH)
+
+        assert [s.name for s in pp.steps] == [s.name for s in PIPELINE_RESEARCH]
+        # …and it is still a copy, not the shared constant.
+        assert pp.steps[0] is not PIPELINE_RESEARCH[0]
+
+
+class TestExports:
+    def test_public_constants_are_in_all(self):
+        """`MIN_NEUTRALIZE_ROWS` is cited in `neutralize`'s docstring and
+        imported by callers; it belongs in the module's public surface."""
+        import research.post_processor as mod
+
+        for name in ("MAD_SCALE", "MIN_NEUTRALIZE_ROWS", "SIGMA_RTOL"):
+            assert name in mod.__all__, name
+            assert hasattr(mod, name)
 
 
 # ---------------------------------------------------------------------------
@@ -669,10 +772,13 @@ class TestHypothesis:
         )
 
         assert out.groupby("date").ngroups == len(sections)
-        for _, group in out.groupby("date"):
+        for date, group in out.groupby("date"):
+            raw = df.loc[df["date"] == date, "f"].astype("float64")
+            mu, sigma = raw.mean(), raw.std()
             vals = group["f"]
-            sigma = vals.std(ddof=1)
-            if pd.isna(sigma) or sigma == 0:
+            # Judge flatness from the *input*, with the same tolerance the
+            # implementation uses — `sigma == 0` is not a reliable test.
+            if pd.isna(sigma) or sigma <= SIGMA_RTOL * max(1.0, abs(mu)):
                 # No dispersion to standardise: the contract is zeros, not inf.
                 assert (vals == 0).all()
             else:

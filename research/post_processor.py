@@ -31,6 +31,7 @@ and size columns its signature names.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -40,12 +41,14 @@ from numpy.linalg import lstsq, matrix_rank
 
 __all__ = [
     "MAD_SCALE",
+    "MIN_NEUTRALIZE_ROWS",
     "PIPELINE_ETF",
     "PIPELINE_RANK",
     "PIPELINE_RESEARCH",
     "PIPELINE_STOCK_EVAL",
     "PostProcessStep",
     "PostProcessor",
+    "SIGMA_RTOL",
     "fillna_cross_section",
     "fillna_median",
     "neutralize",
@@ -62,6 +65,10 @@ MAD_SCALE: float = 1.4826
 #: Below it the regression has no degrees of freedom worth trusting, and the
 #: factor is passed through unchanged.
 MIN_NEUTRALIZE_ROWS: int = 10
+
+#: Below this fraction of a section's own scale, σ is float rounding rather
+#: than dispersion — see :func:`standardize_zscore`.
+SIGMA_RTOL: float = 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -111,19 +118,38 @@ def fillna_median(s: pd.Series) -> pd.Series:
     return values.fillna(med)
 
 
+def _keep_null_key_rows(
+    cleaned: pd.Series, original: pd.Series, keyed: pd.Series
+) -> pd.Series:
+    """Restore rows whose key is null — ``groupby`` never shows them to a step.
+
+    ``groupby`` drops null-key rows, so ``transform`` returns NaN at those
+    positions and a plain assignment writes NaN over a raw value that was
+    there — silent data loss, and the opposite of :func:`neutralize`, which
+    only writes the rows it fitted.  Put the original back.
+    """
+    return cleaned.where(keyed.notna(), original)
+
+
 def standardize_zscore(s: pd.Series) -> pd.Series:
     """Return ``(x - mean) / std`` over one cross-section.
 
     ``std`` is the sample standard deviation (pandas ``ddof=1``), so a
-    non-constant section comes back with mean 0 and std 1 exactly.  A constant
-    or single-row section has no dispersion and becomes zeros — dividing by
-    a zero σ would turn a flat factor into ``inf`` rather than "no signal".
+    section with real dispersion comes back with mean 0 and std 1 exactly.  A
+    flat or single-row section has none and becomes zeros — dividing by a
+    vanishing σ would turn it into ``inf`` (σ == 0) or, worse, into ±1.
+
+    That worse case is why the comparison is a tolerance and not ``sigma ==
+    0``: a flat ``[0.1, 0.1, 0.1]`` sums to a rounded mean, so its std comes
+    out at the float rounding level (~1e-17) rather than at 0, and the
+    division would hand back all -1.0 instead of the documented zeros — a
+    flat factor carrying a rounding-dependent signal.
     """
     values = s.astype("float64")
     mu = values.mean()
     sigma = values.std()
-    if pd.isna(sigma) or sigma == 0:
-        return values - mu
+    if pd.isna(sigma) or sigma <= SIGMA_RTOL * max(1.0, abs(mu)):
+        return values.where(values.isna(), 0.0)
     return (values - mu) / sigma
 
 
@@ -152,7 +178,8 @@ def fillna_cross_section(df: pd.DataFrame, col: str) -> pd.DataFrame:
     on.
     """
     out = df.copy()
-    out[col] = out.groupby("date")[col].transform(fillna_median)
+    filled = out.groupby("date")[col].transform(fillna_median)
+    out[col] = _keep_null_key_rows(filled, out[col], out["date"])
     return out
 
 
@@ -264,7 +291,7 @@ class PostProcessor:
     statistics a step computes are today's cross-section, never the sample's.
     """
 
-    def __init__(self, steps: list[PostProcessStep] | None = None):
+    def __init__(self, steps: Sequence[PostProcessStep] | None = None):
         # Copy each step along with its `params`: the presets are shared module
         # constants, so a caller who writes `steps[0].params["n"]` must not be
         # editing `PIPELINE_RESEARCH` under the next reader.
@@ -279,8 +306,11 @@ class PostProcessor:
         """Return a copy of *df* with *factor_col* cleaned, date by date."""
         result = df.copy()
         for step in self.steps:
-            result[factor_col] = result.groupby(date_col)[factor_col].transform(
+            cleaned = result.groupby(date_col)[factor_col].transform(
                 step.func, **step.params
+            )
+            result[factor_col] = _keep_null_key_rows(
+                cleaned, result[factor_col], result[date_col]
             )
         return result
 
