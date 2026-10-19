@@ -283,9 +283,17 @@ def neutralize(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class PostProcessStep:
-    """One pipeline stage: a ``Series → Series`` op applied per date group."""
+    """One pipeline stage: a ``Series → Series`` op applied per date group.
+
+    Frozen so a stage that lives in a shared preset cannot be edited in place:
+    ``PIPELINE_RESEARCH[0].func = ...`` would otherwise be a write to what every
+    later reader of that preset copies from.  ``params`` is a ``dict`` and is
+    therefore still open to writes through — the presets hand out a
+    write-refusing mapping (see :class:`_FrozenParams`), while
+    :class:`PostProcessor` gives each instance a plain dict to tune.
+    """
 
     name: str
     func: Callable[[pd.Series], pd.Series]
@@ -328,43 +336,103 @@ class PostProcessor:
 # Presets
 # ---------------------------------------------------------------------------
 
-#: Presets are ``list`` so they type-check against
-#: ``PostProcessor(steps: list[PostProcessStep] | None)`` — passing one
-#: straight through is the natural call.  They are shared module constants, so
-#: :class:`PostProcessor` copies every step and its ``params`` rather than
-#: aliasing them; write to an instance, not to the preset.
+# A preset write is a write to every later reader of that preset: the constant
+# is shared, and `PostProcessor` copies from it.  Silently accepting
+# `PIPELINE_RESEARCH[0] = x` or `.append(x)` is how one caller's edit becomes
+# another caller's pipeline.  So the presets are not plain lists — every
+# in-place write raises TypeError and points at the copy to make instead.
+# They stay `list` subclasses rather than tuples because
+# `PostProcessor(steps: list[PostProcessStep] | None)` is the pinned signature
+# and `PostProcessor(PIPELINE_RESEARCH)` is the call it is there to accept; a
+# tuple is rejected at exactly that call.
+_PRESET_WRITE_REFUSED = (
+    "preset pipelines are constants — derive a copy and edit that "
+    "(list(preset); rebuild a PostProcessStep to change its params)"
+)
+
+
+class _FrozenParams(dict):
+    """A preset step's ``params`` — readable, not writable.
+
+    ``dict`` rather than ``MappingProxyType`` so the field's ``dict``
+    annotation stays true and :class:`PostProcessor`'s ``dict(step.params)``
+    copy hands instances the plain, tunable dict they are meant to get.
+    """
+
+    def _refuse(self, *args, **kwargs):
+        raise TypeError(_PRESET_WRITE_REFUSED)
+
+    __setitem__ = __delitem__ = __ior__ = _refuse
+    clear = pop = popitem = setdefault = update = _refuse
+
+    def copy(self) -> dict:
+        """A plain, writable ``dict`` — the edit-the-copy escape hatch."""
+        return dict(self)
+
+
+class _PresetSteps(list):
+    """A ``PIPELINE_*`` preset — a ``list`` of steps that refuses writes.
+
+    See the note above for why this is a ``list`` subclass and not a tuple.
+    :meth:`copy` and ``list(preset)`` both hand back a plain, writable list;
+    that is the supported way to derive a variant.
+    """
+
+    def _refuse(self, *args, **kwargs):
+        raise TypeError(_PRESET_WRITE_REFUSED)
+
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _refuse
+    append = clear = extend = insert = pop = remove = reverse = sort = _refuse
+
+    def copy(self) -> list:
+        """A plain, writable ``list`` — the edit-the-copy escape hatch."""
+        return list(self)
+
+
+def _frozen_step(name: str, func: Callable[[pd.Series], pd.Series]) -> PostProcessStep:
+    """One preset stage: a frozen step carrying a write-refusing ``params``."""
+    return PostProcessStep(name, func, _FrozenParams())
+
 
 #: Research iteration — the three Series steps, no neutralise.  Quick screening
 #: of a raw factor before anyone claims an IC.
-PIPELINE_RESEARCH: list[PostProcessStep] = [
-    PostProcessStep("winsorize", winsorize_mad),
-    PostProcessStep("fillna", fillna_median),
-    PostProcessStep("standardize", standardize_zscore),
-]
+PIPELINE_RESEARCH: list[PostProcessStep] = _PresetSteps(
+    [
+        _frozen_step("winsorize", winsorize_mad),
+        _frozen_step("fillna", fillna_median),
+        _frozen_step("standardize", standardize_zscore),
+    ]
+)
 
 #: Stock evaluation — the same three steps, then **call :func:`neutralize`
 #: yourself**.  Neutralising needs the ``industry`` / ``log_market_cap``
 #: columns and so cannot be a Series step; on the 个股池 it is mandatory,
 #: because an un-neutralised IC is mostly sector and size in disguise.
-PIPELINE_STOCK_EVAL: list[PostProcessStep] = [
-    PostProcessStep("winsorize", winsorize_mad),
-    PostProcessStep("fillna", fillna_median),
-    PostProcessStep("standardize", standardize_zscore),
-]
+PIPELINE_STOCK_EVAL: list[PostProcessStep] = _PresetSteps(
+    [
+        _frozen_step("winsorize", winsorize_mad),
+        _frozen_step("fillna", fillna_median),
+        _frozen_step("standardize", standardize_zscore),
+    ]
+)
 
 #: ETF pool — the same three steps, and deliberately **no** neutralise: an ETF
 #: strategy earns sector/style rotation, which is exactly what neutralising
 #: would regress out.
-PIPELINE_ETF: list[PostProcessStep] = [
-    PostProcessStep("winsorize", winsorize_mad),
-    PostProcessStep("fillna", fillna_median),
-    PostProcessStep("standardize", standardize_zscore),
-]
+PIPELINE_ETF: list[PostProcessStep] = _PresetSteps(
+    [
+        _frozen_step("winsorize", winsorize_mad),
+        _frozen_step("fillna", fillna_median),
+        _frozen_step("standardize", standardize_zscore),
+    ]
+)
 
 #: Skewed factors — rank replaces z-score as the standardize step; winsorize
 #: and fillna are unchanged.
-PIPELINE_RANK: list[PostProcessStep] = [
-    PostProcessStep("winsorize", winsorize_mad),
-    PostProcessStep("fillna", fillna_median),
-    PostProcessStep("standardize", standardize_rank),
-]
+PIPELINE_RANK: list[PostProcessStep] = _PresetSteps(
+    [
+        _frozen_step("winsorize", winsorize_mad),
+        _frozen_step("fillna", fillna_median),
+        _frozen_step("standardize", standardize_rank),
+    ]
+)

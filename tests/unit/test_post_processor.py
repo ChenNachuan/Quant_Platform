@@ -20,6 +20,8 @@ cross-section independently (``-k hypothesis``).
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -677,6 +679,140 @@ class TestPresets:
         assert [s.name for s in pp.steps] == [s.name for s in PIPELINE_RESEARCH]
         # …and it is still a copy, not the shared constant.
         assert pp.steps[0] is not PIPELINE_RESEARCH[0]
+
+
+# ---------------------------------------------------------------------------
+# preset constants refuse writes — the constant side of the isolation
+# ---------------------------------------------------------------------------
+
+
+class TestPresetConstantsRefuseWrites:
+    """A write to a ``PIPELINE_*`` must not land and must not be silent.
+
+    `PostProcessor` copies every step off whatever list it is handed, so a
+    write that reaches a preset reaches every later instance built from it —
+    `PIPELINE_RESEARCH[0] = x` and `PIPELINE_RESEARCH.append(x)` used to do
+    exactly that.  The instance side was already isolated; this is the
+    constant side.
+
+    Every case below asserts the write is **refused** (raises) and, where the
+    shape matters, that the next instance still sees the original pipeline.
+    """
+
+    ALL = (PIPELINE_RESEARCH, PIPELINE_STOCK_EVAL, PIPELINE_ETF, PIPELINE_RANK)
+
+    def test_index_assignment_is_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH[0] = PIPELINE_RESEARCH[1]
+
+    def test_slice_assignment_is_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH[:] = []
+
+    def test_deletion_is_rejected(self):
+        with pytest.raises(TypeError):
+            del PIPELINE_RESEARCH[0]
+
+    def test_appending_is_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.append(PIPELINE_RESEARCH[0])
+
+    def test_extending_is_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.extend([PIPELINE_RESEARCH[0]])
+
+    def test_inserting_is_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.insert(0, PIPELINE_RESEARCH[0])
+
+    def test_removing_popping_and_clearing_are_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.remove(PIPELINE_RESEARCH[0])
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.pop(0)
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.clear()
+
+    def test_in_place_concat_and_repeat_are_rejected(self):
+        # `preset += …` binds the name, so run it through a local: the object
+        # under test is still the shared constant.
+        preset = PIPELINE_RESEARCH
+        before = list(preset)
+        with pytest.raises(TypeError):
+            preset += [preset[0]]
+        with pytest.raises(TypeError):
+            preset *= 2
+        assert list(preset) == before
+
+    def test_sorting_and_reversing_are_rejected(self):
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.sort()
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.reverse()
+
+    @pytest.mark.parametrize(
+        "attr",
+        ["PIPELINE_RESEARCH", "PIPELINE_STOCK_EVAL", "PIPELINE_ETF", "PIPELINE_RANK"],
+    )
+    def test_every_preset_refuses_writes_not_just_research(self, attr):
+        import research.post_processor as mod
+
+        preset = getattr(mod, attr)
+        with pytest.raises(TypeError):
+            preset.append(preset[0])
+        with pytest.raises(TypeError):
+            preset[0] = preset[0]
+
+    def test_writing_a_preset_step_params_is_rejected(self):
+        """`params` is the other handle on a shared step — same rule."""
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH[0].params["n"] = 99
+
+    def test_rebinding_a_preset_step_field_is_rejected(self):
+        with pytest.raises(FrozenInstanceError):
+            PIPELINE_RESEARCH[0].func = winsorize_mad
+        with pytest.raises(FrozenInstanceError):
+            PIPELINE_RESEARCH[0].name = "other"
+
+    def test_a_refused_write_leaves_the_next_instance_untouched(self):
+        """The point of the refusal: later instances still see the original."""
+        before = [s.name for s in PostProcessor(PIPELINE_RESEARCH).steps]
+
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH.append(PostProcessStep("extra", winsorize_mad))
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH[0] = PostProcessStep("extra", winsorize_mad)
+        with pytest.raises(TypeError):
+            PIPELINE_RESEARCH[0].params["n"] = 99
+
+        assert [s.name for s in PostProcessor(PIPELINE_RESEARCH).steps] == before
+        assert [s.name for s in PostProcessor().steps] == before
+        assert all(step.params == {} for step in PIPELINE_RESEARCH)
+
+    def test_copy_hands_back_a_writable_list(self):
+        """The supported way to derive a variant — edit a copy, not the preset.
+
+        The copy is shallow, like `list.copy`: the steps are shared value
+        objects, so changing one's `params` means building a new
+        `PostProcessStep` and replacing the element.
+        """
+        variant = PIPELINE_RESEARCH.copy()
+        assert type(variant) is list
+
+        variant.append(PostProcessStep("extra", winsorize_mad))
+        variant[0] = PostProcessStep("winsorize", winsorize_mad, {"n": 0.25})
+
+        assert len(PIPELINE_RESEARCH) == 3
+        assert PIPELINE_RESEARCH[0].params == {}
+        # …and a pipeline built from the variant really sees the edit.
+        pp = PostProcessor(variant)
+        assert [s.name for s in pp.steps] == [
+            "winsorize",
+            "fillna",
+            "standardize",
+            "extra",
+        ]
+        assert pp.steps[0].params == {"n": 0.25}
 
 
 class TestExports:
