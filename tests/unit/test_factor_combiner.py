@@ -145,6 +145,31 @@ class TestEqualWeight:
         with pytest.raises(ValueError, match="requires ic_history"):
             FactorCombiner(method="ic_ir_weight").combine(fs)
 
+    def test_misnamed_ic_history_is_refused_not_silently_equal_weight(self):
+        """A rename must raise, not quietly fall back to the baseline.
+
+        Non-matching factor columns assign 0 to every factor and
+        ``_normalise`` falls back to equal weights — exactly the degradation
+        the ``None`` guard's docstring names.  The caller asked for ICIR and
+        must be told the history does not match, not handed the baseline.
+        """
+        fs = pd.DataFrame(
+            {
+                "date": ["2024-01-02"] * 2,
+                "ticker": ["a", "b"],
+                "f1": [1.0, -1.0],
+                "f2": [1.0, -1.0],
+            }
+        )
+        ic = _ic_frame(
+            {
+                "2024-01-02": {"g1": 0.05, "g2": -0.02},
+                "2024-01-03": {"g1": 0.05, "g2": -0.02},
+            }
+        )
+        with pytest.raises(ValueError, match="shares no factor columns"):
+            FactorCombiner(method="ic_ir_weight", lookback=1).combine(fs, ic)
+
     def test_unknown_method_is_refused(self):
         with pytest.raises(ValueError, match="method must be one of"):
             FactorCombiner(method="pca")
@@ -167,7 +192,9 @@ class TestIcIrWeights:
                 "2024-01-03": {"f1": 0.05, "f2": -0.02},
             }
         )
-        w = FactorCombiner(method="ic_ir_weight")._ic_ir_weights(ic, ["f1", "f2"])
+        w = FactorCombiner(method="ic_ir_weight", lookback=2)._ic_ir_weights(
+            ic, ["f1", "f2"]
+        )
 
         assert w["f2"] == 0.0
         assert w["f1"] == pytest.approx(1.0)
@@ -180,7 +207,7 @@ class TestIcIrWeights:
                 "2024-01-03": {"f1": 0.02, "f2": -0.01},
             }
         )
-        w = FactorCombiner(method="ic_weight")._ic_weights(ic, ["f1", "f2"])
+        w = FactorCombiner(method="ic_weight", lookback=2)._ic_weights(ic, ["f1", "f2"])
 
         assert w["f2"] == 0.0
         assert w["f1"] == pytest.approx(1.0)
@@ -194,8 +221,11 @@ class TestIcIrWeights:
             }
         )
         for method, fn in (
-            ("ic_ir_weight", FactorCombiner(method="ic_ir_weight")._ic_ir_weights),
-            ("ic_weight", FactorCombiner(method="ic_weight")._ic_weights),
+            (
+                "ic_ir_weight",
+                FactorCombiner(method="ic_ir_weight", lookback=3)._ic_ir_weights,
+            ),
+            ("ic_weight", FactorCombiner(method="ic_weight", lookback=3)._ic_weights),
         ):
             w = fn(ic, ["f1", "f2", "f3"])
             assert sum(w.values()) == pytest.approx(1.0), method
@@ -209,7 +239,9 @@ class TestIcIrWeights:
                 "2024-01-03": {"f1": -0.01, "f2": -0.04},
             }
         )
-        w = FactorCombiner(method="ic_ir_weight")._ic_ir_weights(ic, ["f1", "f2"])
+        w = FactorCombiner(method="ic_ir_weight", lookback=2)._ic_ir_weights(
+            ic, ["f1", "f2"]
+        )
         assert w == {"f1": 0.5, "f2": 0.5}
 
     def test_icir_penalises_unstable_factor(self):
@@ -223,7 +255,9 @@ class TestIcIrWeights:
                 "2024-01-05": {"f1": 0.03, "f2": -0.14},
             }
         )
-        w = FactorCombiner(method="ic_ir_weight")._ic_ir_weights(ic, ["f1", "f2"])
+        w = FactorCombiner(method="ic_ir_weight", lookback=4)._ic_ir_weights(
+            ic, ["f1", "f2"]
+        )
         assert w["f1"] > w["f2"]
 
     def test_steady_positive_ic_takes_the_book(self):
@@ -234,7 +268,9 @@ class TestIcIrWeights:
                 "2024-01-03": {"f1": 0.03, "f2": -0.04},
             }
         )
-        w = FactorCombiner(method="ic_ir_weight")._ic_ir_weights(ic, ["f1", "f2"])
+        w = FactorCombiner(method="ic_ir_weight", lookback=2)._ic_ir_weights(
+            ic, ["f1", "f2"]
+        )
         assert w["f1"] == pytest.approx(1.0)
         assert w["f2"] == pytest.approx(0.0)
 
@@ -245,7 +281,9 @@ class TestIcIrWeights:
                 "2024-01-03": {"f1": 0.06},
             }
         )
-        w = FactorCombiner(method="ic_ir_weight")._ic_ir_weights(ic, ["f1", "f2"])
+        w = FactorCombiner(method="ic_ir_weight", lookback=2)._ic_ir_weights(
+            ic, ["f1", "f2"]
+        )
         assert w["f2"] == 0.0
         assert w["f1"] == pytest.approx(1.0)
 
@@ -299,6 +337,44 @@ class TestIcIrWeights:
             ic, ["f1", "f2"]
         )
         assert w["f2"] == 0.0
+
+    def test_lookback_is_per_factor_not_row_count(self):
+        """Ragged IC history: a factor with few ICs must not get a weight.
+
+        80 rows in the wide frame open the coarse gate, but f3 only ever
+        recorded 2 ICs (the rest NaN).  ``DEFAULT_LOOKBACK``'s rationale is
+        "an ICIR estimated on a handful of dates is noise"; the gate has to
+        apply that per factor, not to the frame's row count.
+        """
+        dates = pd.date_range("2023-01-02", periods=80, freq="B")
+        ic = pd.DataFrame(
+            {
+                "date": dates,
+                "f1": np.full(80, 0.05),
+                "f2": np.full(80, 0.03),
+                "f3": [np.nan] * 78 + [0.90, 0.90],  # 2 ICs only
+            }
+        )
+        assert len(ic) > DEFAULT_LOOKBACK  # coarse gate opens
+
+        for method in ("ic_weight", "ic_ir_weight"):
+            w = (
+                FactorCombiner(method=method)._ic_weights(ic, ["f1", "f2", "f3"])
+                if method == "ic_weight"
+                else FactorCombiner(method=method)._ic_ir_weights(
+                    ic, ["f1", "f2", "f3"]
+                )
+            )
+            assert w["f3"] == 0.0, method
+            assert sum(w.values()) == pytest.approx(1.0), method
+
+        # With enough ICs the same factor engages.
+        ic_full = ic.copy()
+        ic_full["f3"] = np.full(80, 0.90)
+        w_full = FactorCombiner(method="ic_ir_weight")._ic_ir_weights(
+            ic_full, ["f1", "f2", "f3"]
+        )
+        assert w_full["f3"] > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +751,19 @@ class TestFactorContribution:
         r = r.copy()
         r["factor_name"] = r["factor_name"].replace({"f2": "f9"})
         with pytest.raises(ValueError, match="not in factor_exposures"):
+            factor_contribution(w, r, e)
+
+    def test_orphan_exposure_column_is_refused(self):
+        """A factor in exposures but absent from returns must raise.
+
+        The inner merge would silently drop the orphan and renormalise the
+        remaining shares to sum to 1 — inflating them, so the "strongest
+        factor > 70%" fake-diversification check reads wrong numbers.
+        """
+        w, r, e = self._inputs()
+        e = e.copy()
+        e["f3"] = [1.0, 0.5, 1.0, 0.5]  # exposure with no factor_returns rows
+        with pytest.raises(ValueError, match="no factor_returns rows"):
             factor_contribution(w, r, e)
 
     def test_missing_columns_are_refused(self):

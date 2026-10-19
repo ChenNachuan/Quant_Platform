@@ -216,6 +216,14 @@ def factor_contribution(
         raise ValueError(
             f"factor_returns names {unknown} not in factor_exposures columns"
         )
+    orphan = sorted(set(exposure_cols) - set(names.unique()))
+    if orphan:
+        # An exposure with no return is a data gap, not a zero contribution.
+        # Dropping it here would inflate the remaining shares and make the
+        # "strongest factor > 70%" fake-diversification check read wrong numbers.
+        raise ValueError(
+            f"factor_exposures columns {orphan} have no factor_returns rows"
+        )
 
     # Long form: one row per (date, ticker, factor).
     wide = factor_exposures.melt(
@@ -388,6 +396,14 @@ class FactorCombiner:
             )
         if "date" not in ic_history.columns:
             raise ValueError("ic_history must carry a 'date' column")
+        if not set(factor_cols) & set(ic_history.columns):
+            # Every factor column is absent → the estimators would assign 0
+            # to all of them and _normalise would fall back to equal weights,
+            # silently degrading to the baseline the caller did not ask for.
+            raise ValueError(
+                f"ic_history shares no factor columns with {factor_cols}; "
+                f"its columns are {list(ic_history.columns)}"
+            )
 
         schedule = self._weight_schedule(factor_scores, ic_history, factor_cols)
         score = pd.Series(np.nan, index=factor_scores.index, dtype="float64")
@@ -417,7 +433,10 @@ class FactorCombiner:
             as_of = dates.loc[idx].min()
             hist = ic_history.loc[ic_dates < as_of]
             if len(hist) < self.lookback:
-                # Warm-up: too few IC observations to trust an ICIR.
+                # Fast-path warm-up.  The per-factor :attr:`lookback` gate in
+                # the estimators is what actually enforces the contract — it
+                # also covers a ragged history where this row count is high
+                # but one factor's IC column is mostly NaN.
                 w = self._equal_weights(factor_cols)
             elif self.method == "ic_weight":
                 w = self._ic_weights(hist, factor_cols)
@@ -440,10 +459,11 @@ class FactorCombiner:
 
         *ic_history* is already cut to the legal window (see
         :meth:`_weight_schedule`); this method does no slicing of its own, so
-        it cannot accidentally widen it.  A factor with no IC column, or with
-        no finite IC, gets 0.  If every factor's IC is non-positive the
-        book would sit at zero weight, which is not a portfolio — fall back to
-        equal weights so the returned dict always sums to 1.
+        it cannot accidentally widen it.  A factor with no IC column, with
+        fewer than :attr:`lookback` finite ICs, or with a non-positive mean
+        gets 0.  If every factor's IC is non-positive the book would sit at
+        zero weight, which is not a portfolio — fall back to equal weights so
+        the returned dict always sums to 1.
         """
         w = {}
         for c in factor_cols:
@@ -451,7 +471,10 @@ class FactorCombiner:
                 w[c] = 0.0
                 continue
             s = ic_history[c].astype("float64").dropna()
-            w[c] = 0.0 if s.empty else max(float(s.mean()), 0.0)
+            if s.size < self.lookback:
+                w[c] = 0.0
+                continue
+            w[c] = max(float(s.mean()), 0.0)
         return self._normalise(w, factor_cols)
 
     def _ic_ir_weights(self, ic_history, factor_cols) -> dict:
@@ -468,6 +491,12 @@ class FactorCombiner:
         scored as :data:`ZERO_SIGMA_IR` or 0 respectively — see that constant
         for why 0 is wrong for the first case.  Fewer than two observations
         has no dispersion estimate at all and gets 0.
+
+        Both the :attr:`lookback` warm-up and the two-observation floor apply
+        **per factor**, not to the wide frame's row count: a ragged IC history
+        (a 3–5 factor book with different launch dates) would otherwise let a
+        factor with a handful of ICs through on the strength of its siblings'
+        history.
         """
         w = {}
         for c in factor_cols:
@@ -475,6 +504,9 @@ class FactorCombiner:
                 w[c] = 0.0
                 continue
             s = ic_history[c].astype("float64").dropna()
+            if s.size < self.lookback:
+                w[c] = 0.0
+                continue
             if len(s) < 2:
                 w[c] = 0.0
                 continue
