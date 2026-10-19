@@ -320,22 +320,32 @@ class TestNeutralize:
         )
 
     @staticmethod
-    def _near_saturated_frame(n: int) -> pd.DataFrame:
+    def _near_saturated_frame(n: int, collinear_size: bool = False) -> pd.DataFrame:
         """n names across n-1 industries — design rank == n-1, one dof left.
 
         The factor is constant within industry, so it sits entirely in the
         column space and a correct fit takes it all out.  If the guard refuses
         the date instead, the industry effect survives into the output.
+
+        ``collinear_size`` keeps the rank at n-1 under ``industry_size``: size
+        is set constant within industry, which puts it in span{1, dummies}, so
+        it cannot spend the last degree of freedom.  Independent size would
+        push the design to rank n and the date would correctly be skipped.
         """
         industries = [f"I{i}" for i in range(n - 1)] + ["I0"]
         offsets = {f"I{i}": 10.0 * i for i in range(n - 1)}
+        if collinear_size:
+            size_map = {f"I{i}": float(i) for i in range(n - 1)}
+            sizes = [size_map[ind] for ind in industries]
+        else:
+            sizes = [float(i * 0.5) for i in range(n)]
         return pd.DataFrame(
             {
                 "date": ["2024-01-02"] * n,
                 "ticker": [f"t{i:03d}" for i in range(n)],
                 "f": [offsets[ind] for ind in industries],
                 "industry": industries,
-                "log_market_cap": [float(i * 0.5) for i in range(n)],
+                "log_market_cap": sizes,
             }
         )
 
@@ -351,17 +361,30 @@ class TestNeutralize:
         out = neutralize(df, "f")
         pd.testing.assert_series_equal(out["f"], df["f"])
 
-    def test_rank_equals_n_minus_one_neutralises(self):
+    @pytest.mark.parametrize(
+        ("method", "collinear_size"),
+        [
+            ("industry", False),
+            ("industry_size", True),
+        ],
+        ids=["industry", "industry_size-collinear-size"],
+    )
+    def test_rank_equals_n_minus_one_neutralises(self, method, collinear_size):
         """rank == n-1 has one residual dof — it is not a saturated fit.
 
         Refusing this date would let the factor through still carrying its
         industry effect (Test's 12-name / 11-industry case).  It must be
         cleaned.
+
+        Pinned for both methods: ``industry_size`` is the default and the
+        stock-pool path, and it only stays at rank n-1 when size is collinear
+        with the dummies — independent size spends the last dof and the date
+        is correctly skipped as rank n.
         """
         n = MIN_NEUTRALIZE_ROWS + 2
-        df = self._near_saturated_frame(n)
+        df = self._near_saturated_frame(n, collinear_size=collinear_size)
 
-        out = neutralize(df, "f", method="industry")
+        out = neutralize(df, "f", method=method)
 
         assert (out["f"] != df["f"]).any()  # the date was not skipped
         np.testing.assert_allclose(out["f"].to_numpy(), 0.0, atol=1e-10)
