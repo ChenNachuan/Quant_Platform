@@ -20,6 +20,8 @@ cross-section independently (``-k hypothesis``).
 
 from __future__ import annotations
 
+import copy
+import pickle
 from dataclasses import FrozenInstanceError
 
 import numpy as np
@@ -813,6 +815,34 @@ class TestPresetConstantsRefuseWrites:
             "extra",
         ]
         assert pp.steps[0].params == {"n": 0.25}
+
+    def test_copy_deepcopy_and_pickle_hand_back_a_plain_writable_list(self):
+        """`copy` / `pickle` rebuild a subclass through the mutators this
+        class refuses, so `__reduce__` serialises as a plain list instead of
+        raising on the way back.  Needed to ship a preset to a worker.
+        """
+        for clone in (
+            copy.copy(PIPELINE_RESEARCH),
+            copy.deepcopy(PIPELINE_RESEARCH),
+            pickle.loads(pickle.dumps(PIPELINE_RESEARCH)),
+        ):
+            assert type(clone) is list
+            clone.append(PostProcessStep("extra", winsorize_mad))
+            assert len(clone) == 4
+
+        assert len(PIPELINE_RESEARCH) == 3
+
+    def test_preset_step_params_survive_copy_and_pickle(self):
+        params = PIPELINE_RESEARCH[0].params
+        for clone in (
+            copy.copy(params),
+            copy.deepcopy(params),
+            pickle.loads(pickle.dumps(params)),
+        ):
+            assert type(clone) is dict
+            clone["n"] = 3.0
+
+        assert params == {}
 
 
 class TestExports:

@@ -369,6 +369,13 @@ class _FrozenParams(dict):
         """A plain, writable ``dict`` — the edit-the-copy escape hatch."""
         return dict(self)
 
+    def __reduce__(self):
+        # `copy` / `deepcopy` / `pickle` rebuild a dict subclass by writing
+        # into a fresh one through `__setitem__`, which this class refuses —
+        # so the standard paths would fail rather than hand back a copy.
+        # Serialise as a plain dict: a copy is meant to be editable.
+        return (dict, (dict(self),))
+
 
 class _PresetSteps(list):
     """A ``PIPELINE_*`` preset — a ``list`` of steps that refuses writes.
@@ -387,6 +394,13 @@ class _PresetSteps(list):
     def copy(self) -> list:
         """A plain, writable ``list`` — the edit-the-copy escape hatch."""
         return list(self)
+
+    def __reduce__(self):
+        # Same gap as `_FrozenParams`: `list.__reduce__` reconstructs through
+        # `append`/`extend`, both refused here, so `copy.copy`, `deepcopy` and
+        # pickling a preset into a worker process would raise instead of
+        # carrying it.  Serialise as a plain list.
+        return (list, (list(self),))
 
 
 def _frozen_step(name: str, func: Callable[[pd.Series], pd.Series]) -> PostProcessStep:
