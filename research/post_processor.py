@@ -90,7 +90,17 @@ def winsorize_mad(s: pd.Series, n: float = 3.0) -> pd.Series:
     limit-move tape) has a band that is a single point, which ``clip`` would
     use to collapse every name onto the median.  There is no dispersion to
     winsorise, so there is nothing to clip.
+
+    *n* must be positive and is rejected before the band is built.  Zero
+    collapses the band to a point and a negative value inverts its bounds —
+    either way ``clip`` silently wipes the section, the same degeneracy the
+    zero-MAD branch above exists to refuse.  This is reachable from
+    :attr:`PostProcessStep.params`, so it raises every time rather than only
+    on the dates whose section happens to have dispersion.
     """
+    if not n > 0:
+        raise ValueError(f"n must be positive, got {n!r}")
+
     values = s.astype("float64")
     med = values.median()
     mad = (values - med).abs().median()

@@ -155,6 +155,45 @@ class TestWinsorizeMad:
         # …and a non-zero MAD still clips by the same formula.
         assert winsorize_mad(pd.Series([1.0, 2.0, 3.0, 50.0])).iloc[-1] < 50.0
 
+    @pytest.mark.parametrize("n", [0, 0.0, -1.0, -0.0001, float("nan")])
+    def test_non_positive_n_is_rejected(self, n):
+        """Zero collapses the band to a point; negative inverts its bounds.
+
+        Either way `clip` silently wipes the section — the same degeneracy
+        the zero-MAD guard refuses.  `n` arrives through
+        `PostProcessStep.params`, so this has to be loud.
+        """
+        s = pd.Series([1.0, 2.0, 3.0, 4.0, 100.0])
+
+        with pytest.raises(ValueError, match="n must be positive"):
+            winsorize_mad(s, n=n)
+
+    def test_n_is_rejected_before_the_band_not_only_on_dispersed_sections(self):
+        """An invalid `n` must raise every time, not only when MAD is non-zero.
+
+        Checking after the degenerate early-returns would make the raise
+        data-dependent: a flat date would quietly return while a dispersed
+        one raised.
+        """
+        flat = pd.Series([1.0, 1.0, 1.0])
+        with pytest.raises(ValueError, match="n must be positive"):
+            winsorize_mad(flat, n=0.0)
+
+        all_nan = pd.Series([np.nan, np.nan])
+        with pytest.raises(ValueError, match="n must be positive"):
+            winsorize_mad(all_nan, n=-1.0)
+
+    def test_bad_n_in_a_pipeline_step_raises_rather_than_wiping(self):
+        """The reachable path: `PostProcessStep.params` carries `n`."""
+        df = _frame({"2024-01-02": [1.0, 2.0, 3.0, 4.0, 100.0]})
+        pp = PostProcessor([PostProcessStep("w", winsorize_mad, {"n": -1.0})])
+
+        with pytest.raises(ValueError, match="n must be positive"):
+            pp.transform(df, "f")
+
+    def test_positive_n_still_works(self):
+        assert winsorize_mad(pd.Series([1.0, 2.0, 3.0, 50.0]), n=3.0).iloc[-1] < 50.0
+
 
 # ---------------------------------------------------------------------------
 # fillna
