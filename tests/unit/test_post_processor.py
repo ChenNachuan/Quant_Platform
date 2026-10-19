@@ -602,7 +602,7 @@ class TestPresets:
         `n` on one instance cannot reach into `PIPELINE_*` and silently change
         what the next caller gets.
         """
-        from_explicit = PostProcessor(list(PIPELINE_RESEARCH))
+        from_explicit = PostProcessor(PIPELINE_RESEARCH)
         from_default = PostProcessor()
 
         from_explicit.steps[0].params["n"] = 0.25
@@ -617,12 +617,22 @@ class TestPresets:
             assert all(step.params == {} for step in preset)
 
     def test_presets_are_accepted_directly(self):
-        """The presets are tuples; passing one is the natural call.
+        """Passing a preset is the natural call and must type-check.
 
-        `steps` is a Sequence for that reason — a list-only annotation rejects
-        `PostProcessor(PIPELINE_RESEARCH)` in a type checker, which is where a
-        caller would notice the mismatch.
+        The signature is fixed at ``list[PostProcessStep] | None``, so the
+        presets are ``list`` rather than ``tuple`` — a tuple would be rejected
+        by a type checker at exactly the call a caller writes first.  The copy
+        in `PostProcessor` is what keeps that from making the constant mutable
+        through the instance.
         """
+        for preset in (
+            PIPELINE_RESEARCH,
+            PIPELINE_STOCK_EVAL,
+            PIPELINE_ETF,
+            PIPELINE_RANK,
+        ):
+            assert isinstance(preset, list), type(preset)
+
         pp = PostProcessor(PIPELINE_RESEARCH)
 
         assert [s.name for s in pp.steps] == [s.name for s in PIPELINE_RESEARCH]

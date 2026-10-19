@@ -31,7 +31,6 @@ and size columns its signature names.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -291,7 +290,7 @@ class PostProcessor:
     statistics a step computes are today's cross-section, never the sample's.
     """
 
-    def __init__(self, steps: Sequence[PostProcessStep] | None = None):
+    def __init__(self, steps: list[PostProcessStep] | None = None):
         # Copy each step along with its `params`: the presets are shared module
         # constants, so a caller who writes `steps[0].params["n"]` must not be
         # editing `PIPELINE_RESEARCH` under the next reader.
@@ -319,37 +318,43 @@ class PostProcessor:
 # Presets
 # ---------------------------------------------------------------------------
 
+#: Presets are ``list`` so they type-check against
+#: ``PostProcessor(steps: list[PostProcessStep] | None)`` — passing one
+#: straight through is the natural call.  They are shared module constants, so
+#: :class:`PostProcessor` copies every step and its ``params`` rather than
+#: aliasing them; write to an instance, not to the preset.
+
 #: Research iteration — the three Series steps, no neutralise.  Quick screening
 #: of a raw factor before anyone claims an IC.
-PIPELINE_RESEARCH: tuple[PostProcessStep, ...] = (
+PIPELINE_RESEARCH: list[PostProcessStep] = [
     PostProcessStep("winsorize", winsorize_mad),
     PostProcessStep("fillna", fillna_median),
     PostProcessStep("standardize", standardize_zscore),
-)
+]
 
 #: Stock evaluation — the same three steps, then **call :func:`neutralize`
 #: yourself**.  Neutralising needs the ``industry`` / ``log_market_cap``
 #: columns and so cannot be a Series step; on the 个股池 it is mandatory,
 #: because an un-neutralised IC is mostly sector and size in disguise.
-PIPELINE_STOCK_EVAL: tuple[PostProcessStep, ...] = (
+PIPELINE_STOCK_EVAL: list[PostProcessStep] = [
     PostProcessStep("winsorize", winsorize_mad),
     PostProcessStep("fillna", fillna_median),
     PostProcessStep("standardize", standardize_zscore),
-)
+]
 
 #: ETF pool — the same three steps, and deliberately **no** neutralise: an ETF
 #: strategy earns sector/style rotation, which is exactly what neutralising
 #: would regress out.
-PIPELINE_ETF: tuple[PostProcessStep, ...] = (
+PIPELINE_ETF: list[PostProcessStep] = [
     PostProcessStep("winsorize", winsorize_mad),
     PostProcessStep("fillna", fillna_median),
     PostProcessStep("standardize", standardize_zscore),
-)
+]
 
 #: Skewed factors — rank replaces z-score as the standardize step; winsorize
 #: and fillna are unchanged.
-PIPELINE_RANK: tuple[PostProcessStep, ...] = (
+PIPELINE_RANK: list[PostProcessStep] = [
     PostProcessStep("winsorize", winsorize_mad),
     PostProcessStep("fillna", fillna_median),
     PostProcessStep("standardize", standardize_rank),
-)
+]
