@@ -114,6 +114,24 @@ class TestAlphaSignalContract:
         assert sig.reason == "mom_top5 rebalance"
         assert sig.factor_snapshot == snap
 
+    def test_caller_frame_mutation_does_not_rewrite_signal(self):
+        frame = _score_frame([1.0, 2.0])
+        sig = AlphaSignal(frame=frame, meta={"strategy_id": "s"})
+        frame.loc[0, "score"] = 999.0
+        assert sig.frame.loc[0, "score"] != 999.0
+
+    def test_caller_meta_mutation_does_not_rewrite_signal(self):
+        meta = {"strategy_id": "s"}
+        sig = AlphaSignal(frame=_score_frame([1.0]), meta=meta)
+        meta["strategy_id"] = "hacked"
+        assert sig.meta["strategy_id"] == "s"
+
+    def test_caller_factor_snapshot_mutation_does_not_rewrite_signal(self):
+        snap = {"momentum": 1.0}
+        sig = AlphaSignal(frame=_score_frame([1.0]), meta={}, factor_snapshot=snap)
+        snap["momentum"] = 999.0
+        assert sig.factor_snapshot["momentum"] == 1.0
+
 
 # ---------------------------------------------------------------------------
 # from_multi_factor
@@ -266,8 +284,12 @@ class TestTopKWeights:
             signal_to_weights(_score_frame([1.0]), method="martingale")
 
     def test_rejects_nonpositive_k(self):
-        with pytest.raises(ValueError, match="k must be positive"):
+        with pytest.raises(ValueError, match="k must be a positive integer"):
             signal_to_weights(_score_frame([1.0]), method="top_k", k=0)
+
+    def test_rejects_fractional_k(self):
+        with pytest.raises(ValueError, match="k must be a positive integer"):
+            signal_to_weights(_score_frame([1.0]), method="top_k", k=0.5)
 
     def test_rejects_unexpected_keyword(self):
         with pytest.raises(ValueError, match="unexpected keyword"):
@@ -310,6 +332,27 @@ class TestProportionalWeights:
         out = signal_to_weights(frame, method="proportional")
         assert out.empty
         assert list(out.columns) == ["date", "ticker", "target_weight"]
+
+    def test_zero_dispersion_falls_back_to_equal_weight(self):
+        """All-zero scores after z-score are uninformative, not rejected."""
+        frame = _score_frame([0.0, 0.0, 0.0])
+        out = signal_to_weights(frame, method="proportional")
+        assert len(out) == 3
+        assert out["target_weight"].tolist() == [1 / 3, 1 / 3, 1 / 3]
+
+    def test_zero_dispersion_from_factory_falls_back(self):
+        """A flat section z-scores to all 0.0 — proportional must still invest."""
+        sig = AlphaSignal.from_ml_factor(_ml_scores([5.0, 5.0, 5.0]), strategy_id="s")
+        assert (sig.frame["score"] == 0.0).all()
+        out = sig.to_weights(method="proportional")
+        assert len(out) == 3
+        assert out["target_weight"].sum() == pytest.approx(1.0)
+
+    def test_zero_and_negative_hold_nothing(self):
+        """Zeros are uninformative; negatives are rejected — nothing survives."""
+        frame = _score_frame([0.0, -1.0, -2.0])
+        out = signal_to_weights(frame, method="proportional")
+        assert out.empty
 
     def test_zero_score_is_not_held(self):
         frame = _score_frame([0.0, 2.0, 0.0])
@@ -428,6 +471,25 @@ class TestWriteSignal:
         weights = sig.to_weights(method="top_k", k=1)
         with pytest.raises(ValueError, match="strategy_id"):
             write_signal(sig, weights, base_dir=str(tmp_path))
+
+    def test_date_type_mismatch_does_not_archive_all_cash(self, tmp_path):
+        """A Parquet/DB round-trip changes date dtype; the merge must not miss."""
+        import datetime
+
+        sig = AlphaSignal.from_multi_factor(
+            _combined([1.0, 2.0, 3.0, 4.0]),
+            strategy_id="mom_top5",
+        )
+        weights = sig.to_weights(method="top_k", k=2)
+        # Simulate a round-trip: frame dates stay str, weights dates become date.
+        weights["date"] = weights["date"].map(
+            lambda d: datetime.date.fromisoformat(str(d))
+        )
+        paths = write_signal(sig, weights, base_dir=str(tmp_path))
+        df = pd.read_parquet(paths["cross"][0])
+
+        assert df["target_weight"].sum() == pytest.approx(1.0)
+        assert (df["target_weight"] >= 0).all()
 
 
 # ---------------------------------------------------------------------------

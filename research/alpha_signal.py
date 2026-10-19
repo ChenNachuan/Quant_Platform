@@ -29,10 +29,11 @@ constraint solving (the authority is ``PortfolioConstraints``, S7
 value**; concentration / turnover / capital constraints are solved downstream.
 
 Gap #14 (clip-0 proposal): ``proportional`` truncates negative scores to 0 and
-normalises over the remainder.  All-non-positive cross-sections produce no
-rows — holding nothing is the honest answer when every name scores below the
-line, and a fallback to equal weight would silently re-introduce the names the
-score rejected.
+normalises over the remainder.  A cross-section with at least one strictly
+negative score and no positive score produces no rows — those names are
+rejected.  A cross-section whose scores are all zero (zero dispersion after
+z-score) is *uninformative, not rejected*, and falls back to ``1/n`` equal
+weight so ``proportional`` does not hold nothing while ``top_k`` invests.
 """
 
 from __future__ import annotations
@@ -172,6 +173,13 @@ class AlphaSignal:
 
     def __post_init__(self) -> None:
         _validate_frame(self.frame)
+        # Defensive copies: ``frozen`` blocks attribute reassignment but not
+        # in-place mutation of the DataFrame or dicts stored by reference.
+        # Mutating the caller's frame must not rewrite the archived score.
+        object.__setattr__(self, "frame", self.frame.copy())
+        object.__setattr__(self, "meta", dict(self.meta))
+        if self.factor_snapshot is not None:
+            object.__setattr__(self, "factor_snapshot", dict(self.factor_snapshot))
 
     # -- aggregation paths -------------------------------------------------
 
@@ -260,8 +268,9 @@ def signal_to_weights(
       ``n/k`` invested and the rest is cash; the sum never exceeds 1.
     * ``proportional`` — ``w_i ∝ max(score_i, 0)``, normalised within the
       date.  Negative scores clip to 0 (A-share cannot short).  A cross-section
-      with no positive score produces no rows: holding nothing is the honest
-      reading of "every name scores below the line".
+      with strictly negative scores and no positive score holds nothing (the
+      score rejected those names); a cross-section of all zeros (zero
+      dispersion) falls back to ``1/n``.
 
     Only rows with positive weight are returned.  The result is the
     **unconstrained** initial book — concentration / turnover / capital limits
@@ -278,8 +287,8 @@ def signal_to_weights(
     _validate_frame(signal_frame)
 
     if method == "top_k":
-        if not k > 0:
-            raise ValueError(f"k must be positive, got {k!r}")
+        if k <= 0 or k != int(k):
+            raise ValueError(f"k must be a positive integer, got {k!r}")
         return _top_k_weights(signal_frame, int(k))
     return _proportional_weights(signal_frame)
 
@@ -303,21 +312,46 @@ def _top_k_weights(frame: pd.DataFrame, k: int) -> pd.DataFrame:
 
 
 def _proportional_weights(frame: pd.DataFrame) -> pd.DataFrame:
-    """``w_i ∝ max(score_i, 0)`` per date, normalised; zeros dropped.
+    """``w_i ∝ max(score_i, 0)`` per date, normalised; zero weights dropped.
 
     Clipping before the normalisation is the no-short rule made arithmetic:
     a negative score contributes nothing to the denominator and holds nothing.
+
+    Two edge cases distinguish *rejected* from *uninformative*:
+
+    - At least one strictly negative score and no positive score → no rows.
+      Those names were rejected by the score; holding nothing is the answer.
+    - All scores zero (zero dispersion after z-score) → ``1/n`` equal weight.
+      A flat or single-name section is uninformative, not rejected; ``top_k``
+      would invest and ``proportional`` must not sit in cash by comparison.
     """
     valid = frame.dropna(subset=["score"]).copy()
     if valid.empty:
         return _empty_weights()
-    clipped = valid["score"].astype("float64").clip(lower=0.0)
-    totals = clipped.groupby(valid["date"]).transform("sum")
-    with np.errstate(invalid="ignore"):
-        weights = np.where(totals > 0, clipped / totals, 0.0)
-    valid["target_weight"] = weights
-    out = valid.loc[valid["target_weight"] > 0, ["date", "ticker", "target_weight"]]
-    return out.reset_index(drop=True)
+
+    parts: list[pd.DataFrame] = []
+    for _, group in valid.groupby("date", sort=True):
+        scores = group["score"].astype("float64")
+        positive = scores.clip(lower=0.0)
+        total = float(positive.sum())
+
+        if total > 0:
+            w = positive / total
+            keep = w > 0
+            part = group.loc[keep, ["date", "ticker"]].copy()
+            part["target_weight"] = w[keep]
+            parts.append(part)
+        elif (scores == 0).all():
+            # Zero dispersion: uninformative, not rejected.
+            n = len(scores)
+            part = group[["date", "ticker"]].copy()
+            part["target_weight"] = 1.0 / n
+            parts.append(part)
+        # else — strictly negative present, no positive: hold nothing.
+
+    if not parts:
+        return _empty_weights()
+    return pd.concat(parts, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -370,11 +404,20 @@ def write_signal(
     frame = signal.frame
     for date, group in frame.groupby("date", sort=True):
         date_key = _date_str(date)
-        day_w = weights.loc[pd.to_datetime(weights["date"]) == pd.to_datetime(date)]
+
+        # Join on a normalised date key so a Parquet/DB round-trip
+        # (datetime.date vs str) cannot silently miss the merge and
+        # archive an all-cash book under fillna(0.0).
+        group = group.copy()
+        group["_date_key"] = group["date"].map(_date_str)
+        day_w = weights.loc[
+            pd.to_datetime(weights["date"]) == pd.to_datetime(date)
+        ].copy()
+        day_w["_date_key"] = day_w["date"].map(_date_str)
 
         cross = group.merge(
-            day_w[["date", "ticker", "target_weight"]],
-            on=["date", "ticker"],
+            day_w[["_date_key", "ticker", "target_weight"]],
+            on=["_date_key", "ticker"],
             how="left",
         )
         cross["target_weight"] = cross["target_weight"].fillna(0.0)
