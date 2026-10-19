@@ -178,6 +178,19 @@ class TestEqualWeight:
         with pytest.raises(ValueError, match="lookback must be positive"):
             FactorCombiner(lookback=0)
 
+    def test_default_lookback_is_wired_to_the_constant(self):
+        """The constructor default must be ``DEFAULT_LOOKBACK``, not a literal.
+
+        A hard-coded ``60`` means changing the constant silently diverges from
+        the actual default.  The signature reads the constant so they cannot.
+        """
+        import inspect
+
+        source = inspect.getsource(FactorCombiner.__init__)
+        assert "DEFAULT_LOOKBACK" in source
+        assert "lookback: int = 60" not in source
+        assert FactorCombiner().lookback == DEFAULT_LOOKBACK
+
 
 # ---------------------------------------------------------------------------
 # ICIR weighting
@@ -641,6 +654,28 @@ class TestPreprocess:
             out_pert.loc[first, "f"].tolist()
         )
 
+    def test_neutralize_with_nonstandard_date_col_is_refused(self):
+        """``neutralize`` is hard-wired to ``"date"``; a custom date_col must raise.
+
+        Forwarding ``date_col="trade_date"`` would KeyError inside
+        ``research.post_processor.neutralize``, or worse, fit against a stale
+        ``"date"`` column the caller did not mean.
+        """
+        frame = pd.DataFrame(
+            {
+                "trade_date": ["2024-01-02"] * 12,
+                "ticker": [f"t{i:03d}" for i in range(12)],
+                "f": list(np.linspace(1.0, 12.0, 12)),
+                "industry": ["A"] * 6 + ["B"] * 6,
+                "log_market_cap": list(np.linspace(20.0, 23.0, 12)),
+            }
+        )
+        with pytest.raises(ValueError, match="requires date_col='date'"):
+            preprocess(frame, "f", date_col="trade_date", neutralize=True)
+        # neutralize=False with a custom date_col is fine — no neutralize call.
+        out = preprocess(frame, "f", date_col="trade_date", neutralize=False)
+        assert "trade_date" in out.columns
+
     def test_exports(self):
         assert callable(preprocess)
         assert callable(factor_contribution)
@@ -918,6 +953,32 @@ class TestEvaluate:
         expected = (1.01**2) ** (252 / 2) - 1
         assert metrics["ann_return"] == pytest.approx(expected)
 
+    def test_max_drawdown_counts_first_period_loss(self):
+        """A loss in the first period must show as a drawdown.
+
+        ``nav.cummax()`` without seeding at 1.0 starts at the post-loss NAV,
+        so the drawdown from initial capital is invisible and the metric
+        under-reports (and with it, calmar).
+        """
+        from research.factor_combiner import _max_drawdown
+
+        rets = pd.Series([-0.10, 0.05])
+        mdd = _max_drawdown(rets)
+        assert mdd == pytest.approx(-0.10, abs=1e-12)
+
+        # And through evaluate: the metric table carries the same number.
+        combined, forward, _p, weights, exposures, f_ret = _eval_inputs()
+        port = _portfolio_ret([("2024-01-02", -0.10), ("2024-01-03", 0.05)])
+        metrics = FactorCombiner().evaluate(
+            combined,
+            forward,
+            port,
+            weights=weights,
+            factor_exposures=exposures,
+            factor_returns=f_ret,
+        )
+        assert metrics["max_drawdown"] == pytest.approx(-0.10, abs=1e-12)
+
 
 class TestEvalReport:
     def _config_file(self, tmp_path) -> str:
@@ -1004,6 +1065,39 @@ class TestEvalReport:
         report = json.loads(text)
         assert "NaN" not in text
         assert report["metrics"]["ic_ir"] is None  # single-date IC series
+
+    def test_numpy_types_in_period_folds_and_combiner_are_serialised(self, tmp_path):
+        """``period`` / folds / combiner routinely hold numpy scalars and Timestamps.
+
+        ``json.dump`` raises ``TypeError`` on those — the report is then never
+        written and the run record is lost.  Every field goes through
+        ``_jsonable``.
+        """
+        combined, forward, port, weights, exposures, f_ret = _eval_inputs()
+        metrics = FactorCombiner().evaluate(
+            combined,
+            forward,
+            port,
+            weights=weights,
+            factor_exposures=exposures,
+            factor_returns=f_ret,
+        )
+        cfg = self._config_file(tmp_path)
+        path = write_eval_report(
+            "mom_vol_composite",
+            metrics,
+            cfg,
+            out_dir=str(tmp_path / "signals"),
+            period=(pd.Timestamp("2024-01-01"), pd.Timestamp("2024-02-28")),
+            walk_forward_folds=[
+                {"train": pd.Timestamp("2023-01-01"), "n": np.int64(5)}
+            ],
+            combiner={"lookback": np.int64(60), "factors": ["f1", "f2"]},
+        )
+        report = json.loads(path.read_text(encoding="utf-8"))
+        assert report["period"][0] == "2024-01-01T00:00:00"
+        assert report["walk_forward_folds"][0]["n"] == 5
+        assert report["combiner"]["lookback"] == 60
 
     def test_incomplete_metrics_are_refused(self, tmp_path):
         cfg = self._config_file(tmp_path)

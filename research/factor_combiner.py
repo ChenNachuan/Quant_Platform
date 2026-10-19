@@ -146,6 +146,14 @@ def preprocess(
     result[factor_col] = cleaned.where(result[date_col].notna(), result[factor_col])
 
     if neutralize:
+        if date_col != "date":
+            # research.post_processor.neutralize is hard-wired to "date".
+            # Forwarding a different column would KeyError, or worse, fit
+            # against a stale "date" column the caller did not mean.
+            raise ValueError(
+                "neutralize=True requires date_col='date': "
+                "research.post_processor.neutralize is hard-wired to 'date'"
+            )
         result = neutralize_residual(
             result,
             factor_col,
@@ -303,10 +311,10 @@ def write_eval_report(
     report = {
         "alpha_name": name,
         "config_snapshot": config_snapshot(config_path),
-        "period": list(period) if period is not None else None,
+        "period": _jsonable(list(period) if period is not None else None),
         "metrics": {k: _jsonable(metrics[k]) for k in EVAL_METRIC_KEYS},
-        "walk_forward_folds": list(walk_forward_folds or []),
-        "combiner": dict(combiner or {}),
+        "walk_forward_folds": _jsonable(list(walk_forward_folds or [])),
+        "combiner": _jsonable(dict(combiner or {})),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     path = out / "eval_report.json"
@@ -317,13 +325,15 @@ def write_eval_report(
 
 
 def _jsonable(value):
-    """JSON cannot carry numpy scalars or NaN; put them in their Python form."""
+    """JSON cannot carry numpy scalars, Timestamps or NaN; normalise them."""
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
     if isinstance(value, np.generic):
         value = value.item()
+    if isinstance(value, datetime):
+        return value.isoformat()
     if isinstance(value, float) and not np.isfinite(value):
         return None
     return value
@@ -349,7 +359,7 @@ class FactorCombiner:
     combiner never computes IC itself (single source, one definition).
     """
 
-    def __init__(self, method: str = "equal_weight", lookback: int = 60):
+    def __init__(self, method: str = "equal_weight", lookback: int = DEFAULT_LOOKBACK):
         if method not in WEIGHT_METHODS:
             raise ValueError(f"method must be one of {WEIGHT_METHODS}, got {method!r}")
         if not lookback > 0:
@@ -660,12 +670,18 @@ def _ann_sharpe(rets: pd.Series) -> float:
 
 
 def _max_drawdown(rets: pd.Series) -> float:
-    """Deepest peak-to-trough of the cumulative NAV; negative or 0."""
+    """Deepest peak-to-trough of the cumulative NAV; negative or 0.
+
+    The running peak is clipped at 1.0 so a loss in the first period is
+    measured: without it, ``nav.cummax()`` starts at the post-loss NAV and
+    the drawdown from the initial capital is invisible.
+    """
     r = rets.dropna()
     if r.empty:
         return float("nan")
     nav = (1.0 + r).cumprod()
-    return float((nav / nav.cummax() - 1.0).min())
+    peak = nav.cummax().clip(lower=1.0)
+    return float((nav / peak - 1.0).min())
 
 
 def _turnover_monthly(weights: pd.DataFrame) -> float:
