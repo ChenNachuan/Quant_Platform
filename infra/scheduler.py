@@ -6,7 +6,6 @@ Date: 2026-02-17
 from prefect import flow, task, get_run_logger
 from pathlib import Path
 import sys
-import os
 
 # 确保项目根目录在 Python 路径中
 project_root = Path(__file__).parent.parent
@@ -24,7 +23,7 @@ def fetch_and_store_data():
     logger.info("开始数据抓取任务...")
     
     # 初始化存储管理器
-    storage = StorageManager()
+    StorageManager()
     
     # TODO: 调用 Adapter 获取数据
     # df = zvt_adapter.fetch_data(...)
@@ -96,7 +95,7 @@ def daily_flow():
         
         # 4. 回测 
         # 注意: 这里的 wait_for 仅确保执行顺序，数据传递应通过参数或共享存储
-        backtest_result = run_backtest(wait_for=[update_result])
+        run_backtest(wait_for=[update_result])
         
         logger.info("每日量化工作流执行完毕")
         

@@ -159,7 +159,7 @@ def record_stockhk_data(data_provider="em", entity_provider="em", sleeping_time=
     # 港股标的
     run_data_recorder(domain=Stockhk, data_provider=data_provider, force_update=False)
     # 港股后复权行情
-    df = Stockhk.query_data(filters=[Stockhk.south == True], index="entity_id")
+    df = Stockhk.query_data(filters=[Stockhk.south], index="entity_id")
     run_data_recorder(
         domain=Stockhk1dHfqKdata,
         entity_ids=df.index.tolist(),

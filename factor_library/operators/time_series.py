@@ -4,7 +4,6 @@
 """
 import pandas as pd
 import numpy as np
-from typing import Union
 
 
 def ts_mean(series: pd.Series, window: int) -> pd.Series:

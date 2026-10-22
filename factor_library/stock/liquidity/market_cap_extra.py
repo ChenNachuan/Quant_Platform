@@ -7,7 +7,6 @@ from factor_library.base import Factor
 from factor_library.registry import register_factor
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Optional
 
 
 @register_factor

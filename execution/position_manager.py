@@ -1,7 +1,7 @@
 
 # 模型信息：Deepmind Antigravity | 70B | Chat | 2026-02-14
 
-from typing import Dict, Any
+from typing import Dict
 import logging
 from .router.base import BaseRouter
 
@@ -43,7 +43,7 @@ class PositionManager:
             logger.info(f"当前账户总权益: {total_equity:,.2f}")
         
         # 获取当前持仓
-        current_positions = self.router.query_position()
+        self.router.query_position()
         
         for symbol, weight in target_weights.items():
             # 计算目标市值

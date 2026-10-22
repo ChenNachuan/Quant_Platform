@@ -1,0 +1,9 @@
+# Ruff configuration for Quant_Platform
+# See QUANT-29 for cleanup history
+
+target-version = "py310"
+
+# Exclude ephemeral harness scripts (not source code)
+extend-exclude = [
+    "task/",
+]

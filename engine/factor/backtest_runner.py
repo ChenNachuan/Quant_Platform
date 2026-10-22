@@ -14,7 +14,7 @@ TODO：
 
 """
 
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional
 import pandas as pd
 import warnings
 from pathlib import Path
@@ -30,7 +30,7 @@ from factor_library.registry import FactorRegistry
 from engine.zvt_bridge.backtest import FactorAdapter
 from engine.simulation.models import (
     BaseFeeModel, AShareFeeModel,
-    BaseSlippageModel, ConstantSlippageModel,
+    BaseSlippageModel,
 )
 
 
@@ -190,7 +190,7 @@ class BatchBacktestRunner:
                 self.results[trader_name] = reader.data_df
                 return reader.data_df
             else:
-                print(f" 无回测结果")
+                print(" 无回测结果")
                 return None
                 
         except Exception as e:

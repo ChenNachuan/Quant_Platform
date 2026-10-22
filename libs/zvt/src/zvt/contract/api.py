@@ -360,10 +360,10 @@ def get_data(
         try:
             #: some schema has no level,just ignore it
             data_schema.level
-            if type(level) == IntervalLevel:
+            if isinstance(level, IntervalLevel):
                 level = level.value
             query = query.filter(data_schema.level == level)
-        except Exception as e:
+        except Exception:
             pass
 
     query = common_filter(

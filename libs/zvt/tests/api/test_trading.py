@@ -42,7 +42,7 @@ def test_000778_manager_trading():
     assert len(result) == 1
     assert result[0].trading_person == "巩国平"
     assert result[0].volume == 8400
-    assert result[0].price == None
+    assert result[0].price is None
     assert result[0].holding == 18700
     assert result[0].trading_way == "增持"
     assert result[0].manager_position == "职工监事"

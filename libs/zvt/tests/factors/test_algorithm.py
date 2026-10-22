@@ -19,8 +19,8 @@ def test_intersect():
 
     a = (1, 2)
     b = (3, 4)
-    assert intersect(a, b) == None
-    assert intersect(b, a) == None
+    assert intersect(a, b) is None
+    assert intersect(b, a) is None
 
     a = (1, 4)
     b = (2, 3)
@@ -39,9 +39,9 @@ def test_intersect_ranges():
     a = (1, 2)
     b = (1.5, 3)
     c = (4, 5)
-    assert intersect_ranges([a, b, c]) == None
-    assert intersect_ranges([b, a, c]) == None
-    assert intersect_ranges([a, c, b]) == None
+    assert intersect_ranges([a, b, c]) is None
+    assert intersect_ranges([b, a, c]) is None
+    assert intersect_ranges([a, c, b]) is None
 
     a = (1, 10)
     b = (1.5, 3)
@@ -59,8 +59,8 @@ def test_combine():
 
     a = (1, 2)
     b = (3, 4)
-    assert combine(a, b) == None
-    assert combine(b, a) == None
+    assert combine(a, b) is None
+    assert combine(b, a) is None
 
     a = (1, 4)
     b = (2, 3)

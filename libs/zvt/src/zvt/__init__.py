@@ -117,7 +117,6 @@ def init_env(zvt_home: str, **kwargs) -> dict:
 
 
 def init_resources(resource_path, force_overwrite=True):
-    package_name = "zvt"
     package_dir = os.path.join(os.path.dirname(__file__), "resources")
     from zvt.utils.file_utils import list_all_files
 
@@ -152,7 +151,7 @@ def init_config(pkg_name: str = None, current_config: dict = None, **kwargs) -> 
             sample_config = os.path.join(os.path.dirname(__file__), "config.json")
             if os.path.exists(sample_config):
                 shutil.copyfile(sample_config, config_path)
-        except Exception as e:
+        except Exception:
             logger.warning(f"could not load config.json from package {pkg_name}")
 
     if os.path.exists(config_path):

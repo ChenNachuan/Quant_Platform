@@ -11,8 +11,7 @@ TODO:  1. 修改数据源使用 Tushare 和 AKShare 两者加载后比对无误�
 """
 
 import pandas as pd
-from typing import List, Optional, Union
-from datetime import datetime
+from typing import List, Optional
 import sys
 import logging
 from pathlib import Path
@@ -31,8 +30,7 @@ from infra.storage import StorageManager, ConfigLoader
 ConfigLoader.load()
 
 # 导入 ZVT 模块
-from zvt.domain import Stock1dKdata, Stock, Stock1dHfqKdata
-from zvt.contract.api import get_data
+from zvt.domain import Stock1dKdata, Stock
 # 使用相对引用，更简洁
 from engine.zvt_bridge.recorders.akshare.stock_1d_kdata_recorder import register_akshare_recorders
 from engine.zvt_bridge.recorders.akshare.stock_adj_factor_recorder import register_akshare_factor_recorder
@@ -103,7 +101,7 @@ class ZvtDataSyncer:
         # 2. 获取复权因子
         df_factors = None
         try:
-            logger.info(f"正在抓取复权因子 (AKShare)...")
+            logger.info("正在抓取复权因子 (AKShare)...")
             StockAdjFactor.record_data(
                 codes=codes,
                 provider='akshare',
