@@ -9,13 +9,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from zvt.trader.trader import StockTrader
-from zvt.contract import IntervalLevel
-from factor_library.stock.technical.momentum import MomentumReturn
-from engine.zvt_bridge.backtest import FactorAdapter
-from zvt.trader.sim_account import SimAccountService
-from zvt.trader import TradingSignal, trading_signal_type_to_order_type
-import pandas as pd
+from zvt.trader.trader import StockTrader  # noqa: E402
+from zvt.contract import IntervalLevel  # noqa: E402
+from factor_library.stock.technical.momentum import MomentumReturn  # noqa: E402
+from engine.zvt_bridge.backtest import FactorAdapter  # noqa: E402
+from zvt.trader.sim_account import SimAccountService  # noqa: E402
+from zvt.trader import TradingSignal, trading_signal_type_to_order_type  # noqa: E402
+import pandas as pd  # noqa: E402
 
 class FactorDataAccountService(SimAccountService):
     """
@@ -103,7 +103,7 @@ class FactorDataAccountService(SimAccountService):
                         if isinstance(series, pd.DataFrame):
                             series = series.iloc[0]
                         closing_price = series['close']
-                except:
+                except Exception:
                     pass
             
             position.available_long = position.long_amount

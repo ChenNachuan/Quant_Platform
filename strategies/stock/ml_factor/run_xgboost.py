@@ -10,18 +10,18 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-import warnings
+import warnings  # noqa: E402
 warnings.filterwarnings('ignore')
 
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import seaborn as sns  # noqa: E402
 
-from strategies.stock.ml_factor.config import StrategyConfig, XGBoostConfig
-from strategies.stock.ml_factor.data_preprocessor import DataPreprocessor
-from strategies.stock.ml_factor.model_trainer import create_trainer
-from strategies.stock.ml_factor.backtest import BacktestEngine
-from strategies.stock.ml_factor.evaluator import (
+from strategies.stock.ml_factor.config import StrategyConfig, XGBoostConfig  # noqa: E402
+from strategies.stock.ml_factor.data_preprocessor import DataPreprocessor  # noqa: E402
+from strategies.stock.ml_factor.model_trainer import create_trainer  # noqa: E402
+from strategies.stock.ml_factor.backtest import BacktestEngine  # noqa: E402
+from strategies.stock.ml_factor.evaluator import (  # noqa: E402
     ICEvaluator, BarraEvaluator, FamaMacBethEvaluator,
     FactorModelEvaluator, GRSEvaluator
 )

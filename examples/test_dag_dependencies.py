@@ -8,8 +8,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import pandas as pd
-import numpy as np
+import pandas as pd  # noqa: E402
+import numpy as np  # noqa: E402
 
 print("\n" + "="*60)
 print("DAG 依赖调度测试")
@@ -17,8 +17,8 @@ print("="*60)
 
 # 导入因子（会自动注册）
 
-from factor_library.registry import FactorRegistry
-from factor_library.dag import FactorDAG
+from factor_library.registry import FactorRegistry  # noqa: E402
+from factor_library.dag import FactorDAG  # noqa: E402
 
 # ============================================================
 # 测试 1: 查看已注册因子

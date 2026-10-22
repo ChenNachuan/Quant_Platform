@@ -42,13 +42,13 @@ class CompanyType(enum.Enum):
 __all__ = ["BlockCategory", "IndexCategory", "ReportPeriod", "CompanyType"]
 
 # import from submodule quotes
-from .quotes import *
-from .quotes import __all__ as _quotes_all
+from .quotes import *  # noqa: E402
+from .quotes import __all__ as _quotes_all  # noqa: E402
 
 __all__ += _quotes_all
 
 # import from submodule meta
-from .meta import *
-from .meta import __all__ as _meta_all
+from .meta import *  # noqa: E402
+from .meta import __all__ as _meta_all  # noqa: E402
 
 __all__ += _meta_all

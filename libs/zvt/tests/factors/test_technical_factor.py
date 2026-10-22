@@ -6,7 +6,7 @@ from ..context import init_test_context
 
 init_test_context()
 
-from zvt.factors.technical_factor import TechnicalFactor
+from zvt.factors.technical_factor import TechnicalFactor  # noqa: E402
 
 
 def test_ma():

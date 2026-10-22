@@ -7,3 +7,8 @@ target-version = "py310"
 extend-exclude = [
     "task/",
 ]
+
+[lint.per-file-ignores]
+# E402: Jupyter notebooks have cell-based structure — imports in later cells
+# are idiomatic and cannot be moved to the top of the "file".
+"**/*.ipynb" = ["E402"]

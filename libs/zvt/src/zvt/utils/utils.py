@@ -163,7 +163,7 @@ def to_positive_number(number):
 def multiple_number(number, factor):
     try:
         return number * factor
-    except:
+    except Exception:
         return number
 
 

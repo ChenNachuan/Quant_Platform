@@ -24,17 +24,17 @@ project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from infra.storage import StorageManager, ConfigLoader
+from infra.storage import StorageManager, ConfigLoader  # noqa: E402
 
 # 必须在导入 ZVT 之前加载配置，以确保 ZVT_HOME 环境变量被正确设置
 ConfigLoader.load()
 
 # 导入 ZVT 模块
-from zvt.domain import Stock1dKdata, Stock
+from zvt.domain import Stock1dKdata, Stock  # noqa: E402
 # 使用相对引用，更简洁
-from engine.zvt_bridge.recorders.akshare.stock_1d_kdata_recorder import register_akshare_recorders
-from engine.zvt_bridge.recorders.akshare.stock_adj_factor_recorder import register_akshare_factor_recorder
-from engine.zvt_bridge.domain.stock_adj_factor import StockAdjFactor
+from engine.zvt_bridge.recorders.akshare.stock_1d_kdata_recorder import register_akshare_recorders  # noqa: E402
+from engine.zvt_bridge.recorders.akshare.stock_adj_factor_recorder import register_akshare_factor_recorder  # noqa: E402
+from engine.zvt_bridge.domain.stock_adj_factor import StockAdjFactor  # noqa: E402
 
 
 class ZvtDataSyncer:

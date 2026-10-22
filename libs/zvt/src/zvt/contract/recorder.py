@@ -383,7 +383,7 @@ class TimeSeriesDataRecorder(EntityEventRecorder):
                 else:
                     first_timestamp = domain_list[0].timestamp
                     last_timestamp = domain_list[-1].timestamp
-            except:
+            except Exception:
                 first_timestamp = domain_list[0].timestamp
                 last_timestamp = domain_list[-1].timestamp
 

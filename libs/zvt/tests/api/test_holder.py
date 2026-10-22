@@ -3,9 +3,9 @@ from ..context import init_test_context
 
 init_test_context()
 
-from typing import List
+from typing import List  # noqa: E402
 
-from zvt.domain import TopTenHolder, TopTenTradableHolder
+from zvt.domain import TopTenHolder, TopTenTradableHolder  # noqa: E402
 
 session = get_db_session(provider="eastmoney", db_name="holder")  # type: sqlalchemy.orm.Session
 

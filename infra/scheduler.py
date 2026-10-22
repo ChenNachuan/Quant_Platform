@@ -12,7 +12,7 @@ project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from infra.storage import StorageManager
+from infra.storage import StorageManager  # noqa: E402
 
 @task(name="数据抓取与存储")
 def fetch_and_store_data():

@@ -267,7 +267,7 @@ def get_entity_exchanges(entity_type):
     return tradable_type_map_exchanges.get(entity_type)
 
 
-from .context import zvt_context
+from .context import zvt_context  # noqa: E402
 
 zvt_context = zvt_context
 
@@ -280,7 +280,7 @@ __all__ = ["IntervalLevel", "AdjustType", "ActorType", "TradableType", "Exchange
 # export interface in __all__ which contains __all__ of its sub modules
 
 # import all from submodule schema
-from .schema import *
-from .schema import __all__ as _schema_all
+from .schema import *  # noqa: E402
+from .schema import __all__ as _schema_all  # noqa: E402
 
 __all__ += _schema_all

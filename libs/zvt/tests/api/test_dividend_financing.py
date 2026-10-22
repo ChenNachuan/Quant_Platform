@@ -2,9 +2,9 @@ from ..context import init_test_context
 
 init_test_context()
 
-from zvt.domain import SpoDetail, RightsIssueDetail, DividendFinancing
-from zvt.contract.api import get_db_session
-from zvt.utils.time_utils import to_pd_timestamp
+from zvt.domain import SpoDetail, RightsIssueDetail, DividendFinancing  # noqa: E402
+from zvt.contract.api import get_db_session  # noqa: E402
+from zvt.utils.time_utils import to_pd_timestamp  # noqa: E402
 
 session = get_db_session(provider="eastmoney", db_name="dividend_financing")  # type: sqlalchemy.orm.Session
 

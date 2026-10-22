@@ -32,7 +32,7 @@ __all__ = [
 ]
 
 # import from submodule stock
-from .stock import *
-from .stock import __all__ as _stock_all
+from .stock import *  # noqa: E402
+from .stock import __all__ as _stock_all  # noqa: E402
 
 __all__ += _stock_all

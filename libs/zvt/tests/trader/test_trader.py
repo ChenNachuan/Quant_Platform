@@ -159,5 +159,5 @@ def test_basic_trader():
             trader_name="000338_bull_trader",
             draw_result=False,
         ).run()
-    except:
+    except Exception:
         assert False

@@ -3,7 +3,7 @@ from ...context import init_test_context
 
 init_test_context()
 
-from zvt.recorders.eastmoney import EastmoneyStockRecorder
+from zvt.recorders.eastmoney import EastmoneyStockRecorder  # noqa: E402
 
 
 def test_china_stock_recorder():
@@ -11,5 +11,5 @@ def test_china_stock_recorder():
 
     try:
         recorder.run()
-    except:
+    except Exception:
         assert False

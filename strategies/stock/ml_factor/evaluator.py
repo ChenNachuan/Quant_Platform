@@ -152,7 +152,7 @@ class BarraEvaluator:
         try:
             model = sm.OLS(Y, X).fit()
             return model.params
-        except:
+        except Exception:
             return None
 
 

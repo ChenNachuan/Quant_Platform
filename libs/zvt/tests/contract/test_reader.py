@@ -3,14 +3,14 @@ from ..context import init_test_context
 
 init_test_context()
 
-import time
+import time  # noqa: E402
 
-from zvt.domain import Stock1dKdata, Stock
+from zvt.domain import Stock1dKdata, Stock  # noqa: E402
 
-from zvt.utils.time_utils import to_date_time_str
+from zvt.utils.time_utils import to_date_time_str  # noqa: E402
 
-from zvt.contract.reader import DataReader
-from zvt.contract import IntervalLevel
+from zvt.contract.reader import DataReader  # noqa: E402
+from zvt.contract import IntervalLevel  # noqa: E402
 
 
 def test_china_stock_reader():

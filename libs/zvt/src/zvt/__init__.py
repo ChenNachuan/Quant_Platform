@@ -228,6 +228,6 @@ else:
 old_db_to_provider_dir(zvt_env["data_path"])
 
 # register to meta
-import zvt.contract as zvt_contract
+import zvt.contract as zvt_contract  # noqa: E402
 
 __all__ = ["zvt_env", "zvt_config", "init_log", "init_env", "init_config", "__version__"]
