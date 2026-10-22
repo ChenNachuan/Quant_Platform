@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import numbers
-from decimal import *
+from decimal import Decimal, getcontext
 from urllib import parse
 
 import pandas as pd

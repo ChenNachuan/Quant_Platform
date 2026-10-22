@@ -3,6 +3,7 @@ import importlib
 import json
 import logging
 import os
+import pkgutil
 import pprint
 import shutil
 from logging.handlers import RotatingFileHandler
@@ -217,7 +218,7 @@ if os.getenv("TESTING_ZVT"):
         same = filecmp.cmp(ZVT_TEST_ZIP_DATA_PATH, DATA_SAMPLE_ZIP_PATH)
 
     if not same:
-        from zvt.contract import *
+        from zvt.contract import *  # noqa: F403, F405
         from zvt.utils.zip_utils import unzip
 
         shutil.copyfile(DATA_SAMPLE_ZIP_PATH, ZVT_TEST_ZIP_DATA_PATH)
@@ -228,6 +229,6 @@ else:
 old_db_to_provider_dir(zvt_env["data_path"])
 
 # register to meta
-import zvt.contract as zvt_contract  # noqa: E402
+import zvt.contract as zvt_contract  # noqa: E402, F401
 
 __all__ = ["zvt_env", "zvt_config", "init_log", "init_env", "init_config", "__version__"]

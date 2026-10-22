@@ -156,12 +156,7 @@ class FactorDataAccountService(SimAccountService):
 
 class MomentumTrader(StockTrader):
     """基于动量因子的交易策略"""
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # The default SimAccountService will be used, which fetches data from ZVT DB.
-        # We will inject data into ZVT DB before running the backtest.
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Use FactorDataAccountService
