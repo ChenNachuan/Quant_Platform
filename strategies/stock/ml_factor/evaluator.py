@@ -4,7 +4,7 @@ Evaluation module for ML Factor Strategy.
 包含 IC 检验、Barra 检验、Fama-MacBeth 检验、因子模型检验等。
 """
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -152,7 +152,7 @@ class BarraEvaluator:
         try:
             model = sm.OLS(Y, X).fit()
             return model.params
-        except:
+        except Exception:
             return None
 
 

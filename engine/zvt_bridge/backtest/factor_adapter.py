@@ -7,12 +7,12 @@ from typing import List, Optional
 import pandas as pd
 import warnings
 
-from zvt.contract.factor import Factor as ZVTFactor, TargetType
+from zvt.contract.factor import Factor as ZVTFactor
 from zvt.contract import IntervalLevel
 from zvt.domain import Stock1dHfqKdata
 
 from factor_library.base import Factor as CustomFactor
-from factor_library.universe import UniverseFilter, UniverseConfig
+from factor_library.universe import UniverseFilter
 
 
 class FactorAdapter(ZVTFactor):
@@ -326,7 +326,7 @@ class CustomStrategyAdapter(FactorAdapter):
             self.result_df = self.strategy_func(self.factor_df)
             
             # 确保结果为 0/1
-            if not (self.result_df.dtypes == int).all():
+            if not (self.result_df.dtypes == 'int64').all():
                 self.result_df = self.result_df.astype(int)
 
 

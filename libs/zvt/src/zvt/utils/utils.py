@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import numbers
-from decimal import *
+from decimal import Decimal, getcontext
 from urllib import parse
 
 import pandas as pd
@@ -163,7 +163,7 @@ def to_positive_number(number):
 def multiple_number(number, factor):
     try:
         return number * factor
-    except:
+    except Exception:
         return number
 
 
@@ -188,7 +188,7 @@ def iterate_with_step(data, sub_size=100):
         step_count = 1
 
     for step in range(step_count):
-        if type(data) == pd.DataFrame or type(data) == pd.Series:
+        if isinstance(data, (pd.DataFrame, pd.Series)):
             yield data.iloc[sub_size * step : sub_size * (step + 1)]
         else:
             yield data[sub_size * step : sub_size * (step + 1)]

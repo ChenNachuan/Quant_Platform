@@ -4,7 +4,7 @@ Backtest module for ML Factor Strategy.
 包含分组测试、收益率计算、统计指标等。
 """
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 
 import numpy as np
 import pandas as pd

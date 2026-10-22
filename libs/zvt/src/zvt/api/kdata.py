@@ -12,9 +12,6 @@ from zvt.utils.time_utils import (
     to_date_time_str,
     TIME_FORMAT_DAY,
     TIME_FORMAT_ISO8601,
-    to_pd_timestamp,
-    date_time_by_interval,
-    current_date,
 )
 
 
@@ -23,9 +20,9 @@ def get_kdata_schema(
     level: Union[IntervalLevel, str] = IntervalLevel.LEVEL_1DAY,
     adjust_type: Union[AdjustType, str] = None,
 ) -> Mixin:
-    if type(level) == str:
+    if isinstance(level, str):
         level = IntervalLevel(level)
-    if type(adjust_type) == str:
+    if isinstance(adjust_type, str):
         adjust_type = AdjustType(adjust_type)
 
     # kdata schema rule

@@ -4,7 +4,7 @@
 __all__ = []
 
 # import from submodule stock_meta
-from .stock_meta import *
+from .stock_meta import *  # noqa: F403, F405
 from .stock_meta import __all__ as _stock_meta_all
 
 __all__ += _stock_meta_all

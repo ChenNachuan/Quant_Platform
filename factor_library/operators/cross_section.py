@@ -3,7 +3,6 @@
 截面算子库
 """
 import pandas as pd
-import numpy as np
 
 
 def cs_rank(series: pd.Series) -> pd.Series:

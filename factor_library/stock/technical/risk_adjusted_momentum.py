@@ -5,7 +5,6 @@
 """
 from factor_library.base import Factor
 from factor_library.registry import register_factor
-from factor_library.operators import cs_rank
 import pandas as pd
 from typing import List, Dict, Optional
 

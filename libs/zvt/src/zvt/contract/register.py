@@ -65,7 +65,7 @@ def register_schema(
     schemas = []
     for item in schema_base.registry.mappers:
         cls = item.class_
-        if type(cls) == DeclarativeMeta:
+        if type(cls) is DeclarativeMeta:
             # register provider to the schema
             for provider in providers:
                 if issubclass(cls, Mixin):

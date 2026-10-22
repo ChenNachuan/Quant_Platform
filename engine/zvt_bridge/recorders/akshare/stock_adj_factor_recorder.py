@@ -9,15 +9,13 @@ TODO: 1. Entity 依赖问题：entity_provider='em'，必须先运行 Stock.reco
 """
 
 
-from typing import List
 import akshare as ak
 import pandas as pd
-from zvt.contract import IntervalLevel, AdjustType
+from zvt.contract import IntervalLevel
 from zvt.contract.api import df_to_db, get_db_session_factory, get_db_engine, _get_db_name
 from zvt.contract.recorder import FixedCycleDataRecorder
 from zvt.domain import Stock
-from zvt.utils.time_utils import to_pd_timestamp, to_date_time_str, TIME_FORMAT_DAY
-from zvt.utils.pd_utils import pd_is_not_null
+from zvt.utils.time_utils import to_date_time_str, TIME_FORMAT_DAY
 
 from engine.zvt_bridge.domain.stock_adj_factor import StockAdjFactor
 

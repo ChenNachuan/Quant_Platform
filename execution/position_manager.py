@@ -1,7 +1,7 @@
 
 # 模型信息：Deepmind Antigravity | 70B | Chat | 2026-02-14
 
-from typing import Dict, Any
+from typing import Dict
 import logging
 from .router.base import BaseRouter
 
@@ -59,6 +59,6 @@ class PositionManager:
             # order_vol = delta_val / P_t
             
             # 为演示目的，直接记录日志
-            logger.info(f"标的: {symbol} | 目标权重: {weight:.2%} | 目标市值: {target_val:,.2f}")
+            logger.info(f"标的: {symbol} | 目标权重: {weight:.2%} | 目标市值: {target_val:,.2f} | 当前持仓: {current_positions.get(symbol, 0)}")
             
         logger.info("再平衡逻辑执行完毕 (模拟模式)")

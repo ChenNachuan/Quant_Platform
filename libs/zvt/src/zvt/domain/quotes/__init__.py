@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from sqlalchemy import String, Column, Float, Integer, JSON, Boolean
+from sqlalchemy import String, Column, Float, Boolean
 
 from zvt.contract import Mixin
 
@@ -32,7 +32,7 @@ __all__ = [
 ]
 
 # import from submodule stock
-from .stock import *
-from .stock import __all__ as _stock_all
+from .stock import *  # noqa: E402, F403, F405
+from .stock import __all__ as _stock_all  # noqa: E402
 
 __all__ += _stock_all

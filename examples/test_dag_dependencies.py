@@ -5,23 +5,20 @@ DAG 依赖测试
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-
-import pandas as pd
-import numpy as np
 
 print("\n" + "="*60)
 print("DAG 依赖调度测试")
 print("="*60)
 
 # 导入因子（会自动注册）
-from factor_library.stock.technical.momentum import MomentumReturn
-from factor_library.stock.technical.volatility import Volatility
-from factor_library.stock.technical.risk_adjusted_momentum import RiskAdjustedMomentum
 
-from factor_library.registry import FactorRegistry
-from factor_library.dag import FactorDAG
+from factor_library.registry import FactorRegistry  # noqa: E402
+from factor_library.dag import FactorDAG  # noqa: E402
 
 # ============================================================
 # 测试 1: 查看已注册因子
@@ -63,7 +60,7 @@ print("="*60)
 target_factors = ['risk_adjusted_momentum']
 sorted_order = dag.topological_sort(target_factors)
 
-print(f"✅ 计算顺序（拓扑排序）:")
+print("✅ 计算顺序（拓扑排序）:")
 for i, factor_name in enumerate(sorted_order, 1):
     print(f"  {i}. {factor_name}")
 
@@ -117,7 +114,7 @@ try:
         timeframe='1d',
         para={'window': 20}
     )
-    print(f"  ✅ momentum_return 计算完成 (cached)")
+    print("  ✅ momentum_return 计算完成 (cached)")
     
     # 计算 volatility
     result_vol = dag_auto.compute_with_cache(
@@ -127,7 +124,7 @@ try:
         timeframe='1d',
         para={'window': 20}
     )
-    print(f"  ✅ volatility 计算完成 (cached)")
+    print("  ✅ volatility 计算完成 (cached)")
     
     # 计算复合因子（会从缓存读取依赖）
     result_composite = dag_auto.compute_with_cache(
@@ -137,10 +134,10 @@ try:
         timeframe='1d',
         para={'window': 20}
     )
-    print(f"  ✅ risk_adjusted_momentum 计算完成")
+    print("  ✅ risk_adjusted_momentum 计算完成")
     
     # 显示结果
-    print(f"\n结果预览 (最近5个值):")
+    print("\n结果预览 (最近5个值):")
     print(f"  momentum: {result_momentum.tail(5).values}")
     print(f"  volatility: {result_vol.tail(5).values}")
     print(f"  risk_adj: {result_composite.tail(5).values}")

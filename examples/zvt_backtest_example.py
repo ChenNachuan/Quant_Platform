@@ -6,18 +6,17 @@ ZVT 回测示例
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from zvt.trader.trader import StockTrader
-from zvt.contract import IntervalLevel
-from factor_library.stock.technical.momentum import MomentumReturn
-from engine.zvt_bridge.backtest import FactorAdapter
-from zvt.contract.api import df_to_db
-from zvt.domain import Stock1dHfqKdata
-from zvt.trader.sim_account import SimAccountService
-from zvt.trader import TradingSignal, OrderType, trading_signal_type_to_order_type
-import pandas as pd
+from zvt.trader.trader import StockTrader  # noqa: E402
+from zvt.contract import IntervalLevel  # noqa: E402
+from factor_library.stock.technical.momentum import MomentumReturn  # noqa: E402
+from engine.zvt_bridge.backtest import FactorAdapter  # noqa: E402
+from zvt.trader.sim_account import SimAccountService  # noqa: E402
+from zvt.trader import TradingSignal, trading_signal_type_to_order_type  # noqa: E402
 
 class FactorDataAccountService(SimAccountService):
     """
@@ -105,7 +104,7 @@ class FactorDataAccountService(SimAccountService):
                         if isinstance(series, pd.DataFrame):
                             series = series.iloc[0]
                         closing_price = series['close']
-                except:
+                except Exception:
                     pass
             
             position.available_long = position.long_amount
@@ -157,12 +156,7 @@ class FactorDataAccountService(SimAccountService):
 
 class MomentumTrader(StockTrader):
     """基于动量因子的交易策略"""
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # The default SimAccountService will be used, which fetches data from ZVT DB.
-        # We will inject data into ZVT DB before running the backtest.
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Use FactorDataAccountService
@@ -336,11 +330,11 @@ if __name__ == "__main__":
     print("ZVT 回测示例 - 动量因子")
     print("="*60)
     
-    print(f"\n回测参数:")
+    print("\n回测参数:")
     print(f"  股票池: {codes}")
     print(f"  开始日期: {start_date}")
     print(f"  结束日期: {end_date}")
-    print(f"  因子: MomentumReturn(window=20)")
+    print("  因子: MomentumReturn(window=20)")
     
     # 临时 Provider 名称，用于注入数据到 ZVT DB
     TEMP_PROVIDER = 'duck_temp'
@@ -358,13 +352,13 @@ if __name__ == "__main__":
     # 但为了确保 FactorAdapter 加载数据，我们在 init_factors 中已经触发了 loading/computing
     # 所以直接运行即可
     
-    print(f"\n开始回测...")
+    print("\n开始回测...")
     
     try:
         # 运行回测
         trader.run()
         
-        print(f"\n✅ 回测完成！")
+        print("\n✅ 回测完成！")
         
         # 读取结果并生成报表
         from zvt.trader.trader_info_api import AccountStatsReader

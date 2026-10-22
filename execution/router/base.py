@@ -2,7 +2,7 @@
 # 模型信息：Deepmind Antigravity | 70B | Chat | 2026-02-14
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 class BaseRouter(ABC):
     """

@@ -2,9 +2,8 @@
 Model training module for ML Factor Strategy.
 """
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 

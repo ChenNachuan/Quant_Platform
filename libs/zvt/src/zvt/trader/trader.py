@@ -271,7 +271,7 @@ class Trader(object):
                 current_holdings = [
                     position.entity_id
                     for position in account.positions
-                    if position != None and position.available_long > 0
+                    if position is not None and position.available_long > 0
                 ]
 
             entity_ids = set(entity_ids) - set(current_holdings)
@@ -298,7 +298,7 @@ class Trader(object):
         current_holdings = []
         if account.positions:
             current_holdings = [
-                position.entity_id for position in account.positions if position != None and position.available_long > 0
+                position.entity_id for position in account.positions if position is not None and position.available_long > 0
             ]
 
         shorted = set(current_holdings) & set(entity_ids)
@@ -362,26 +362,26 @@ class Trader(object):
         self.logger.debug(f"current timestamp:{timestamp}")
 
     def on_trading_signals(self, trading_signals: List[TradingSignal]):
-        for l in self.trading_signal_listeners:
-            l.on_trading_signals(trading_signals)
+        for listener in self.trading_signal_listeners:
+            listener.on_trading_signals(trading_signals)
         # clear after all listener handling
         self.trading_signals = []
 
     def on_trading_open(self, timestamp):
-        for l in self.trading_signal_listeners:
-            l.on_trading_open(timestamp)
+        for listener in self.trading_signal_listeners:
+            listener.on_trading_open(timestamp)
 
     def on_trading_close(self, timestamp):
-        for l in self.trading_signal_listeners:
-            l.on_trading_close(timestamp)
+        for listener in self.trading_signal_listeners:
+            listener.on_trading_close(timestamp)
 
     def on_trading_finish(self, timestamp):
-        for l in self.trading_signal_listeners:
-            l.on_trading_finish(timestamp)
+        for listener in self.trading_signal_listeners:
+            listener.on_trading_finish(timestamp)
 
     def on_trading_error(self, timestamp, error):
-        for l in self.trading_signal_listeners:
-            l.on_trading_error(timestamp, error)
+        for listener in self.trading_signal_listeners:
+            listener.on_trading_error(timestamp, error)
 
     def on_non_trading_day(self, timestamp):
         self.logger.info(f"on_non_trading_day: {timestamp}")
@@ -437,7 +437,7 @@ class Trader(object):
         for timestamp in self.entity_schema.get_interval_timestamps(
             start_date=self.start_timestamp, end_date=self.end_timestamp, level=self.level
         ):
-            self.logger.info(f">>>>>>>>>>")
+            self.logger.info(">>>>>>>>>>")
 
             self.entity_ids = self.init_entities(timestamp=timestamp)
             self.logger.info(f"current entities: {self.entity_ids}")
@@ -519,7 +519,7 @@ class Trader(object):
             ):
                 self.on_trading_close(timestamp)
 
-            self.logger.info(f"<<<<<<<<<<\n")
+            self.logger.info("<<<<<<<<<<\n")
 
         self.on_finish(timestamp)
 

@@ -6,7 +6,7 @@ from ..context import init_test_context
 
 init_test_context()
 
-from zvt.factors.technical_factor import TechnicalFactor
+from zvt.factors.technical_factor import TechnicalFactor  # noqa: E402
 
 
 def test_ma():
@@ -90,12 +90,12 @@ def test_cross_ma():
 
     score = factor.result_df["filter_result"]
 
-    assert score[("stock_sz_000338", "2019-06-03")] == True
-    assert score[("stock_sz_000338", "2019-06-04")] == True
-    assert ("stock_sz_000338", "2019-06-05") not in score or score[("stock_sz_000338", "2019-06-05")] == False
-    assert ("stock_sz_000338", "2019-06-06") not in score or score[("stock_sz_000338", "2019-06-06")] == False
-    assert ("stock_sz_000338", "2019-06-10") not in score or score[("stock_sz_000338", "2019-06-10")] == False
+    assert score[("stock_sz_000338", "2019-06-03")] == True  # noqa: E712
+    assert score[("stock_sz_000338", "2019-06-04")] == True  # noqa: E712
+    assert ("stock_sz_000338", "2019-06-05") not in score or score[("stock_sz_000338", "2019-06-05")] == False  # noqa: E712
+    assert ("stock_sz_000338", "2019-06-06") not in score or score[("stock_sz_000338", "2019-06-06")] == False  # noqa: E712
+    assert ("stock_sz_000338", "2019-06-10") not in score or score[("stock_sz_000338", "2019-06-10")] == False  # noqa: E712
 
     factor.move_on()
     score = factor.result_df["filter_result"]
-    assert score[("stock_sz_000338", "2019-06-17")] == True
+    assert score[("stock_sz_000338", "2019-06-17")] == True  # noqa: E712

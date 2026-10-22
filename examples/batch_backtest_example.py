@@ -25,10 +25,10 @@ def run_batch_backtest():
     start_date = '2023-01-01'
     end_date = '2024-01-01'
     
-    print(f"\n回测配置:")
+    print("\n回测配置:")
     print(f"  股票池: {len(codes)} 只股票")
     print(f"  时间范围: {start_date} 至 {end_date}")
-    print(f"  频率: 日线 (1d)")
+    print("  频率: 日线 (1d)")
     
     # 创建批量回测器
     runner = BatchBacktestRunner(
@@ -63,7 +63,7 @@ def run_batch_backtest():
     print("导出结果")
     print("="*60)
     
-    summary_df = runner.export_summary_table()
+    runner.export_summary_table()
     
     # 绘制对比图表
     runner.draw_comparison_dashboard(show=False)
@@ -146,10 +146,10 @@ def run_custom_strategy_example():
                 )
             ]
     
-    print(f"\n策略说明:")
-    print(f"  - 做多因子值最高的3只股票")
-    print(f"  - 做空因子值最低的3只股票")
-    print(f"  - 实现多空对冲")
+    print("\n策略说明:")
+    print("  - 做多因子值最高的3只股票")
+    print("  - 做空因子值最低的3只股票")
+    print("  - 实现多空对冲")
     
     try:
         trader = CustomTrader(
@@ -160,9 +160,9 @@ def run_custom_strategy_example():
             trader_name='custom_long_short_strategy'
         )
         
-        print(f"\n开始回测...")
+        print("\n开始回测...")
         trader.run()
-        print(f"✅ 自定义策略回测完成")
+        print("✅ 自定义策略回测完成")
         
     except Exception as e:
         print(f"❌ 回测失败: {e}")

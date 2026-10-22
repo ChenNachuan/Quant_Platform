@@ -1,11 +1,11 @@
+from typing import List
+
 from zvt.contract.api import get_db_session
 from ..context import init_test_context
 
 init_test_context()
 
-from typing import List
-
-from zvt.domain import HolderTrading, ManagerTrading
+from zvt.domain import HolderTrading, ManagerTrading  # noqa: E402
 
 session = get_db_session(provider="eastmoney", db_name="trading")  # type: sqlalchemy.orm.Session
 
@@ -42,7 +42,7 @@ def test_000778_manager_trading():
     assert len(result) == 1
     assert result[0].trading_person == "巩国平"
     assert result[0].volume == 8400
-    assert result[0].price == None
+    assert result[0].price is None
     assert result[0].holding == 18700
     assert result[0].trading_way == "增持"
     assert result[0].manager_position == "职工监事"
