@@ -5,11 +5,11 @@ DAG 依赖测试
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-
-import pandas as pd  # noqa: E402
-import numpy as np  # noqa: E402
 
 print("\n" + "="*60)
 print("DAG 依赖调度测试")

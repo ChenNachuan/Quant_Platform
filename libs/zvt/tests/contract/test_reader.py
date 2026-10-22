@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
+import time
+
 from ..context import init_test_context
 
 init_test_context()
-
-import time  # noqa: E402
 
 from zvt.domain import Stock1dKdata, Stock  # noqa: E402
 

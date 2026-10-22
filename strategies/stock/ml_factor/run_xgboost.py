@@ -4,18 +4,18 @@ XGBoost Strategy Runner.
 运行 XGBoost ML 因子策略的完整流程。
 """
 import sys
+import warnings
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+
+warnings.filterwarnings('ignore')
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-
-import warnings  # noqa: E402
-warnings.filterwarnings('ignore')
-
-import pandas as pd  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import seaborn as sns  # noqa: E402
 
 from strategies.stock.ml_factor.config import StrategyConfig, XGBoostConfig  # noqa: E402
 from strategies.stock.ml_factor.data_preprocessor import DataPreprocessor  # noqa: E402

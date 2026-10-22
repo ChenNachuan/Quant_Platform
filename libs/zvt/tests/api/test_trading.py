@@ -1,9 +1,9 @@
+from typing import List
+
 from zvt.contract.api import get_db_session
 from ..context import init_test_context
 
 init_test_context()
-
-from typing import List  # noqa: E402
 
 from zvt.domain import HolderTrading, ManagerTrading  # noqa: E402
 
