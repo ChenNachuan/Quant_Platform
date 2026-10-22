@@ -626,9 +626,9 @@ class Factor(DataReader, EntityStateService, DataListener):
         target_df = None
         if pd_is_not_null(filter_df):
             if target_type == TargetType.positive:
-                selected_df = filter_df[filter_df["filter_result"]]
+                selected_df = filter_df[filter_df["filter_result"].eq(True)]
             elif target_type == TargetType.negative:
-                selected_df = filter_df[not filter_df["filter_result"]]
+                selected_df = filter_df[filter_df["filter_result"].eq(False)]
             else:
                 selected_df = filter_df[filter_df["filter_result"].isna()]
 

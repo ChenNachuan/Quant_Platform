@@ -11,7 +11,7 @@ from zvt.tag.tag_schemas import StockTags
 def query_json():
 
     df = StockTags.query_data(
-        filters=[func.json_extract(StockTags.sub_tags, '$."低空经济"') is not None], columns=[StockTags.sub_tags]
+        filters=[func.json_extract(StockTags.sub_tags, '$."低空经济"').isnot(None)], columns=[StockTags.sub_tags]
     )
     print(df)
 
@@ -46,7 +46,7 @@ def get_block_stocks(name="低空经济"):
 def get_sub_tag_stocks(tag="低空经济"):
     df = StockTags.query_data(
         provider="zvt",
-        filters=[func.json_extract(StockTags.sub_tags, f'$."{tag}"') is not None],
+        filters=[func.json_extract(StockTags.sub_tags, f'$."{tag}"').isnot(None)],
         columns=[StockTags.entity_id],
     )
     return df["entity_id"].tolist()
