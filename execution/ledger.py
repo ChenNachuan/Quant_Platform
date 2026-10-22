@@ -102,37 +102,27 @@ def settle_fill(order: Order, account: Account, trade: Trade) -> None:
     Remaining frozen is refunded by :func:`release_frozen` at terminal state.
 
     Commission may exceed the frozen base amount (price * qty).  The excess is
-    taken from available cash so frozen never goes negative.
+    taken from available cash so frozen never goes negative.  All validation
+    happens before any mutation — frozen survives a raise.
     """
     total_cost = trade.fill_price * trade.filled_qty + trade.commission
 
     if order.direction == Direction.BUY:
-        # Spend from frozen first; any shortfall (e.g. commission) from cash.
         from_frozen = min(total_cost, order.frozen_cash)
         from_cash = total_cost - from_frozen
 
+        # Validate before mutating — frozen must survive a raise.
+        if from_cash > 1e-9 and account.cash < from_cash - 1e-6:
+            raise ValueError(
+                f"{order.order_id}: insufficient cash for settlement "
+                f"(need {from_cash:.2f}, have {account.cash:.2f})"
+            )
+
+        # All checks passed — mutate atomically.
         order.frozen_cash -= from_frozen
         account.frozen_cash -= from_frozen
-
         if from_cash > 1e-9:
-            if account.cash < from_cash - 1e-6:
-                raise ValueError(
-                    f"{order.order_id}: insufficient cash for settlement "
-                    f"(need {from_cash:.2f}, have {account.cash:.2f})"
-                )
             account.cash -= from_cash
-
-        # Guards: neither pool may go negative.
-        if order.frozen_cash < -1e-6:
-            raise ValueError(
-                f"{order.order_id}: settle overdraws frozen "
-                f"(remaining {order.frozen_cash:.2f})"
-            )
-        if account.frozen_cash < -1e-6:
-            raise ValueError(
-                f"account frozen overdrawn after settling {order.order_id} "
-                f"(remaining {account.frozen_cash:.2f})"
-            )
     else:  # SELL
         account.cash += trade.fill_price * trade.filled_qty - trade.commission
 
@@ -283,9 +273,12 @@ def _safe_json(obj) -> str:
 
 
 class SimAccount:
-    """Convenience wrapper: account + positions with NAV identity.
+    """Convenience wrapper: account + positions with independently tracked NAV.
 
-    ``cash + Σ market_value == nav`` holds after every mutation.
+    ``nav`` is a running ledger balance updated by operation deltas
+    (settlement fees, mark-to-market P&L), not derived from component sums.
+    The identity ``cash + frozen + Σ market_value == nav`` is therefore a
+    real cross-check — it fails if settlement corrupts any pool.
     """
 
     def __init__(self, cash: float, account_id: str = "sim"):
@@ -295,6 +288,7 @@ class SimAccount:
             cash=cash,
         )
         self._positions: dict[str, Position] = {}  # ticker -> Position
+        self._nav = cash  # independently tracked running balance
 
     @property
     def cash(self) -> float:
@@ -310,12 +304,8 @@ class SimAccount:
 
     @property
     def nav(self) -> float:
-        """Net asset value = available cash + Σ market_value.
-
-        Frozen cash is committed (not counted); it returns to cash or
-        converts to position on settlement.
-        """
-        return self._account.cash + self.market_value
+        """Independently tracked NAV — not derived from cash + market_value."""
+        return self._nav
 
     @property
     def account(self) -> Account:
@@ -326,21 +316,24 @@ class SimAccount:
         return dict(self._positions)
 
     def mark_to_market(self, market_value: float) -> None:
-        """Set a synthetic single-position market value (for identity tests)."""
-        if not self._positions:
+        """Set a synthetic single-position market value.  Adjusts tracked NAV."""
+        if "__synthetic__" not in self._positions:
             self._positions["__synthetic__"] = Position(
                 portfolio_id="sim",
                 ticker="__synthetic__",
                 quantity=0,
                 avg_cost=0.0,
             )
+        old_mv = self._positions["__synthetic__"].market_value
         self._positions["__synthetic__"].market_value = market_value
+        self._nav += market_value - old_mv
 
     def update_position(
         self, ticker: str, quantity: int, avg_cost: float,
         market_value: float = 0.0,
     ) -> None:
-        """Create or update a position entry."""
+        """Create or update a position entry.  Adjusts tracked NAV by Δmv."""
+        old_mv = self._positions[ticker].market_value if ticker in self._positions else 0.0
         self._positions[ticker] = Position(
             portfolio_id=self._account.account_id,
             ticker=ticker,
@@ -348,16 +341,51 @@ class SimAccount:
             avg_cost=avg_cost,
             market_value=market_value,
         )
+        self._nav += market_value - old_mv
 
     def settle_fill(self, order: Order, trade: Trade) -> None:
-        """Settle a fill against this account."""
+        """Settle a fill: cash-flow + position bookkeeping.  NAV changes by −commission.
+
+        Position fill effects are nav-neutral (cash already reflects the
+        outflow/inflow); only mark-to-market deltas move tracked NAV beyond
+        the commission cost.
+        """
         settle_fill(order, self._account, trade)
+        self._nav -= trade.commission
+
+        ticker = trade.ticker
+        fill_value = trade.fill_price * trade.filled_qty
+
+        if order.direction == Direction.BUY:
+            # Add to position at cost — nav-neutral (frozen/cash already debited).
+            if ticker in self._positions:
+                pos = self._positions[ticker]
+                total_qty = pos.quantity + trade.filled_qty
+                total_cost = pos.avg_cost * pos.quantity + fill_value
+                pos.quantity = total_qty
+                pos.avg_cost = total_cost / total_qty if total_qty else 0.0
+                pos.market_value += fill_value
+            else:
+                self._positions[ticker] = Position(
+                    portfolio_id=trade.portfolio_id,
+                    ticker=ticker,
+                    quantity=trade.filled_qty,
+                    avg_cost=trade.fill_price,
+                    market_value=fill_value,
+                )
+        else:  # SELL — reduce position, nav-neutral (cash already credited).
+            if ticker in self._positions:
+                pos = self._positions[ticker]
+                pos.quantity -= trade.filled_qty
+                pos.market_value -= fill_value
+                if pos.quantity <= 0:
+                    del self._positions[ticker]
 
     def release_frozen(self, order: Order) -> None:
-        """Release remaining frozen cash for a terminal order."""
+        """Release remaining frozen cash.  No NAV change (internal transfer)."""
         release_frozen(order, self._account)
 
     def check_identity(self, atol: float = 1e-6) -> bool:
-        """Return True if ``cash + Σ market_value == nav``."""
-        computed = self._account.cash + self.market_value
-        return abs(computed - self.nav) < atol
+        """Return True if ``cash + frozen + Σ market_value == nav``."""
+        computed = self._account.cash + self._account.frozen_cash + self.market_value
+        return abs(computed - self._nav) < atol

@@ -195,7 +195,7 @@ class TestNavIdentity:
     def test_cash_plus_market_value_equals_nav(
         self, initial_cash, fill_price, fill_qty, commission, market_value
     ):
-        """After every fill: cash + Σ market_value == nav."""
+        """After every fill: cash + frozen + Σ market_value == independently tracked nav."""
         # Ensure freeze amount is affordable.
         freeze_amount = fill_price * fill_qty
         if freeze_amount > initial_cash:
@@ -208,13 +208,15 @@ class TestNavIdentity:
             filled_qty=fill_qty, fill_price=fill_price, commission=commission
         )
 
-        # Freeze then settle
+        # Freeze then settle via SimAccount (manages positions too)
         freeze_cash(order, acct.account, price=fill_price)
-        settle_fill(order, acct.account, trade)
+        acct.settle_fill(order, trade)
         acct.mark_to_market(market_value)
 
-        # Identity: cash + Σ market_value == nav
-        assert acct.cash + acct.market_value == pytest.approx(acct.nav, abs=1e-4)
+        # Identity: cash + frozen + Σ market_value == independently tracked nav
+        assert acct.cash + acct.frozen_cash + acct.market_value == pytest.approx(
+            acct.nav, abs=1e-4
+        )
 
     @given(
         initial_cash=st.floats(min_value=10_000, max_value=1e6),
@@ -224,8 +226,15 @@ class TestNavIdentity:
     )
     @settings(max_examples=80, deadline=None)
     def test_sell_fill_identity(self, initial_cash, sell_price, sell_qty, commission):
-        """SELL adds proceeds to cash; nav stays consistent."""
+        """SELL converts position to cash; nav identity holds (minus commission)."""
         acct = SimAccount(cash=initial_cash)
+        position_value = sell_price * sell_qty
+
+        # Set up a position to sell (ticker must match trade's ticker).
+        acct.update_position(
+            "600519.SH", sell_qty, sell_price, market_value=position_value
+        )
+
         order = _make_order(
             direction=Direction.SELL, quantity=sell_qty, ref_price=sell_price
         )
@@ -236,10 +245,12 @@ class TestNavIdentity:
             commission=commission,
         )
 
-        settle_fill(order, acct.account, trade)
+        acct.settle_fill(order, trade)
 
-        expected_cash = initial_cash + sell_price * sell_qty - commission
+        expected_cash = initial_cash + position_value - commission
         assert acct.cash == pytest.approx(expected_cash, abs=1e-4)
+        # Position fully sold — should be gone.
+        assert "600519.SH" not in acct.positions
         total = acct.cash + acct.frozen_cash + acct.market_value
         assert total == pytest.approx(acct.nav, abs=1e-4)
 
@@ -319,8 +330,8 @@ class TestFrozenCash:
         assert acct.frozen_cash == pytest.approx(0)
         assert acct.cash == pytest.approx(99_000 - 1_000)  # 98_000
 
-    def test_settle_insufficient_raises(self):
-        """When cash cannot cover the shortfall, settle raises."""
+    def test_settle_insufficient_raises_frozen_survives(self):
+        """When cash cannot cover the shortfall, settle raises — frozen survives."""
         acct = _make_account(cash=500)  # barely enough to freeze
         order = _make_order(quantity=100, ref_price=5.0)
         freeze_cash(order, acct, price=5.0)  # frozen=500, cash=0
@@ -329,6 +340,11 @@ class TestFrozenCash:
         trade = _make_trade(filled_qty=100, fill_price=20.0, commission=0.0)
         with pytest.raises(ValueError, match="insufficient cash"):
             settle_fill(order, acct, trade)
+
+        # Frozen must survive the raise — not zeroed.
+        assert order.frozen_cash == pytest.approx(500)
+        assert acct.frozen_cash == pytest.approx(500)
+        assert acct.cash == pytest.approx(0)
 
     @given(
         initial_cash=st.floats(min_value=50_000, max_value=1e6),
