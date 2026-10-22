@@ -7,11 +7,11 @@ import sys
 import warnings
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import pandas as pd
-import seaborn as sns
-
 warnings.filterwarnings('ignore')
+
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
+import seaborn as sns  # noqa: E402
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent.parent

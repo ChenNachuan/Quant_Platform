@@ -6,6 +6,8 @@ ZVT 回测示例
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -15,7 +17,6 @@ from factor_library.stock.technical.momentum import MomentumReturn  # noqa: E402
 from engine.zvt_bridge.backtest import FactorAdapter  # noqa: E402
 from zvt.trader.sim_account import SimAccountService  # noqa: E402
 from zvt.trader import TradingSignal, trading_signal_type_to_order_type  # noqa: E402
-import pandas as pd  # noqa: E402
 
 class FactorDataAccountService(SimAccountService):
     """

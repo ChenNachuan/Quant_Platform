@@ -3,20 +3,9 @@ import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from zvt.domain import StockTradeDay
-
-logger = logging.getLogger(__name__)
-
-sched = BackgroundScheduler()
-
-# -*- coding: utf-8 -*-
-import logging  # noqa: E402
-
-from apscheduler.schedulers.background import BackgroundScheduler  # noqa: E402
-
-from zvt.utils.recorder_utils import run_data_recorder  # noqa: E402
-from zvt import init_log  # noqa: E402
-from zvt.domain import Stock, Stock1dHfqKdata  # noqa: E402
+from zvt import init_log
+from zvt.domain import Stock, Stock1dHfqKdata, StockTradeDay
+from zvt.utils.recorder_utils import run_data_recorder
 
 logger = logging.getLogger(__name__)
 
