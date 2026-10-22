@@ -254,6 +254,98 @@ class TestNavIdentity:
         total = acct.cash + acct.frozen_cash + acct.market_value
         assert total == pytest.approx(acct.nav, abs=1e-4)
 
+    @given(
+        initial_cash=st.floats(min_value=10_000, max_value=1e6),
+        mark_price=st.floats(min_value=1, max_value=200),
+        fill_price=st.floats(min_value=1, max_value=200),
+        sell_qty=st.integers(min_value=1, max_value=500),
+        commission=st.floats(min_value=0, max_value=50),
+    )
+    @settings(max_examples=100, deadline=None)
+    def test_sell_divergent_price_full_close(
+        self, initial_cash, mark_price, fill_price, sell_qty, commission
+    ):
+        """Full-close SELL at fill price ≠ mark price — nav identity must hold."""
+        acct = SimAccount(cash=initial_cash)
+        position_value = mark_price * sell_qty
+        acct.update_position(
+            "600519.SH", sell_qty, mark_price, market_value=position_value
+        )
+
+        order = _make_order(
+            direction=Direction.SELL, quantity=sell_qty, ref_price=fill_price
+        )
+        trade = _make_trade(
+            direction=Direction.SELL,
+            filled_qty=sell_qty,
+            fill_price=fill_price,
+            commission=commission,
+        )
+
+        acct.settle_fill(order, trade)
+
+        # Full close — position must be gone with no residual.
+        assert "600519.SH" not in acct.positions
+        # Identity: cash + frozen + Σ mv == independently tracked nav.
+        total = acct.cash + acct.frozen_cash + acct.market_value
+        assert total == pytest.approx(acct.nav, abs=1e-4)
+
+    @given(
+        initial_cash=st.floats(min_value=10_000, max_value=1e6),
+        existing_qty=st.integers(min_value=1, max_value=200),
+        existing_mark=st.floats(min_value=1, max_value=200),
+        fill_price=st.floats(min_value=1, max_value=200),
+        fill_qty=st.integers(min_value=1, max_value=200),
+        commission=st.floats(min_value=0, max_value=50),
+    )
+    @settings(max_examples=100, deadline=None)
+    def test_buy_divergent_price_adds_to_position(
+        self,
+        initial_cash,
+        existing_qty,
+        existing_mark,
+        fill_price,
+        fill_qty,
+        commission,
+    ):
+        """BUY at fill price ≠ mark price on existing position — nav identity must hold."""
+        # Ensure freeze amount is affordable.
+        freeze_amount = fill_price * fill_qty
+        if freeze_amount > initial_cash:
+            fill_qty = max(1, int(initial_cash / fill_price) - 1)
+            freeze_amount = fill_price * fill_qty
+
+        acct = SimAccount(cash=initial_cash)
+        # Existing position at mark price (divergent from fill).
+        existing_mv = existing_mark * existing_qty
+        acct.update_position(
+            "600519.SH", existing_qty, existing_mark, market_value=existing_mv
+        )
+
+        order = _make_order(quantity=fill_qty, ref_price=fill_price)
+        trade = _make_trade(
+            filled_qty=fill_qty, fill_price=fill_price, commission=commission
+        )
+
+        freeze_cash(order, acct.account, price=fill_price)
+        acct.settle_fill(order, trade)
+
+        # Identity: cash + frozen + Σ mv == independently tracked nav.
+        total = acct.cash + acct.frozen_cash + acct.market_value
+        assert total == pytest.approx(acct.nav, abs=1e-4)
+
+    @pytest.mark.parametrize("status", list(TERMINAL_STATES))
+    def test_settle_fill_on_terminal_order_raises(self, status):
+        """Fills on terminal-state orders are rejected."""
+        acct = _make_account()
+        order = _make_order(status=status)
+        trade = _make_trade()
+        with pytest.raises(ValueError, match="terminal"):
+            settle_fill(order, acct, trade)
+        # Cash and frozen unchanged.
+        assert acct.cash == pytest.approx(100_000)
+        assert acct.frozen_cash == pytest.approx(0)
+
 
 # ── 3. Frozen cash: refund remainder, never overdraw ─────────────────────────
 

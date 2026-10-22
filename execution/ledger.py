@@ -104,7 +104,15 @@ def settle_fill(order: Order, account: Account, trade: Trade) -> None:
     Commission may exceed the frozen base amount (price * qty).  The excess is
     taken from available cash so frozen never goes negative.  All validation
     happens before any mutation — frozen survives a raise.
+
+    Raises ValueError on terminal-state orders — no fills after close.
     """
+    if order.status in TERMINAL_STATES:
+        raise ValueError(
+            f"{order.order_id}: cannot settle fill on terminal order "
+            f"(status={order.status.value})"
+        )
+
     total_cost = trade.fill_price * trade.filled_qty + trade.commission
 
     if order.direction == Direction.BUY:
@@ -344,11 +352,11 @@ class SimAccount:
         self._nav += market_value - old_mv
 
     def settle_fill(self, order: Order, trade: Trade) -> None:
-        """Settle a fill: cash-flow + position bookkeeping.  NAV changes by −commission.
+        """Settle a fill: cash-flow + position bookkeeping.
 
-        Position fill effects are nav-neutral (cash already reflects the
-        outflow/inflow); only mark-to-market deltas move tracked NAV beyond
-        the commission cost.
+        Position market_value moves at *mark price* (the implied price from the
+        existing position), not at fill price.  The price difference between
+        fill and mark is booked to tracked NAV as realized P&L.
         """
         settle_fill(order, self._account, trade)
         self._nav -= trade.commission
@@ -357,15 +365,22 @@ class SimAccount:
         fill_value = trade.fill_price * trade.filled_qty
 
         if order.direction == Direction.BUY:
-            # Add to position at cost — nav-neutral (frozen/cash already debited).
             if ticker in self._positions:
                 pos = self._positions[ticker]
+                mark_price = (
+                    pos.market_value / pos.quantity if pos.quantity > 0
+                    else trade.fill_price
+                )
                 total_qty = pos.quantity + trade.filled_qty
                 total_cost = pos.avg_cost * pos.quantity + fill_value
                 pos.quantity = total_qty
                 pos.avg_cost = total_cost / total_qty if total_qty else 0.0
-                pos.market_value += fill_value
+                # New shares enter at mark price, not cost basis.
+                pos.market_value += mark_price * trade.filled_qty
+                # Instant P&L: bought below/above mark.
+                self._nav += (mark_price - trade.fill_price) * trade.filled_qty
             else:
+                # New position — initial mark = fill price (no instant P&L).
                 self._positions[ticker] = Position(
                     portfolio_id=trade.portfolio_id,
                     ticker=ticker,
@@ -373,12 +388,21 @@ class SimAccount:
                     avg_cost=trade.fill_price,
                     market_value=fill_value,
                 )
-        else:  # SELL — reduce position, nav-neutral (cash already credited).
+        else:  # SELL
             if ticker in self._positions:
                 pos = self._positions[ticker]
+                mark_price = (
+                    pos.market_value / pos.quantity if pos.quantity > 0
+                    else trade.fill_price
+                )
+                # Proportional market-value reduction at mark price.
+                pos.market_value -= mark_price * trade.filled_qty
                 pos.quantity -= trade.filled_qty
-                pos.market_value -= fill_value
+                # Realized P&L: sold above/below mark.
+                self._nav += (trade.fill_price - mark_price) * trade.filled_qty
                 if pos.quantity <= 0:
+                    # Absorb floating-point residue before close.
+                    self._nav -= pos.market_value
                     del self._positions[ticker]
 
     def release_frozen(self, order: Order) -> None:
