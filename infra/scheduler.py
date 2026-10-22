@@ -21,10 +21,7 @@ def fetch_and_store_data():
     """
     logger = get_run_logger()
     logger.info("开始数据抓取任务...")
-    
-    # 初始化存储管理器
-    StorageManager()
-    
+
     # TODO: 调用 Adapter 获取数据
     # df = zvt_adapter.fetch_data(...)
     # storage.write_market_data(df)

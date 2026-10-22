@@ -43,7 +43,7 @@ class PositionManager:
             logger.info(f"当前账户总权益: {total_equity:,.2f}")
         
         # 获取当前持仓
-        self.router.query_position()
+        current_positions = self.router.query_position()
         
         for symbol, weight in target_weights.items():
             # 计算目标市值
@@ -59,6 +59,6 @@ class PositionManager:
             # order_vol = delta_val / P_t
             
             # 为演示目的，直接记录日志
-            logger.info(f"标的: {symbol} | 目标权重: {weight:.2%} | 目标市值: {target_val:,.2f}")
+            logger.info(f"标的: {symbol} | 目标权重: {weight:.2%} | 目标市值: {target_val:,.2f} | 当前持仓: {current_positions.get(symbol, 0)}")
             
         logger.info("再平衡逻辑执行完毕 (模拟模式)")
