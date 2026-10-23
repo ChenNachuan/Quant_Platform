@@ -36,9 +36,18 @@ class FeeModel:
         *side* follows the order-dict convention: ``"BUY"`` or ``"SELL"``.
         Stamp tax is charged on SELL only and is waived for tickers whose
         prefix is stamp-tax-exempt per :mod:`core.asset_rules` (gap #17).
+
+        Raises ``ValueError`` on non-positive *price* or *shares*: a negative
+        share count would turn cost into a credit and falsify both advertised
+        invariants (fee >= 0, sell >= buy).  Rejection, not precondition, is
+        what makes those invariants hold over the whole input space.
         """
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
+        if price <= 0 or shares <= 0:
+            raise ValueError(
+                f"price and shares must be positive, got price={price!r}, shares={shares!r}"
+            )
         value = price * shares
         commission = max(value * self.COMMISSION_RATE, self.COMMISSION_MIN)
         stamp = (

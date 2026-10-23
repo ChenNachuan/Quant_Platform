@@ -78,6 +78,27 @@ class TestHandCalc:
         with pytest.raises(ValueError):
             FeeModel().compute("buy", PRICE, SHARES, "600519.SH")
 
+    def test_non_positive_price_or_shares_rejected(self):
+        # Review finding 2: buy_fee(10.0, -100000) used to return -1005.0 and
+        # the SELL side -1505.0 — a negative share count turned cost into a
+        # credit.  These are refused, not scored.
+        model = FeeModel()
+        for price, shares in (
+            (10.0, -100_000),
+            (10.0, -1),
+            (10.0, 0),
+            (0.0, 100),
+            (-1.0, 100),
+        ):
+            with pytest.raises(ValueError):
+                model.compute("BUY", price, shares, "600519.SH")
+            with pytest.raises(ValueError):
+                model.compute("SELL", price, shares, "600519.SH")
+            with pytest.raises(ValueError):
+                model.buy_fee(price, shares)
+            with pytest.raises(ValueError):
+                model.sell_fee(price, shares)
+
 
 class TestHypothesis:
     @settings(max_examples=50)
@@ -89,6 +110,24 @@ class TestHypothesis:
         model = FeeModel()
         buy = model.buy_fee(price, shares)
         sell = model.sell_fee(price, shares)
+        assert buy >= 0
+        assert sell >= buy
+
+    @settings(max_examples=80)
+    @given(
+        price=st.floats(min_value=-100, max_value=1000),
+        shares=st.integers(min_value=-10000, max_value=10000),
+    )
+    def test_invariants_hold_over_whole_input_space(self, price, shares):
+        # The advertised invariants must not rest on a positive-domain
+        # precondition: outside it compute refuses, and refusal is what makes
+        # fee >= 0 and sell >= buy true for every input.
+        model = FeeModel()
+        try:
+            buy = model.buy_fee(price, shares)
+            sell = model.sell_fee(price, shares)
+        except ValueError:
+            return
         assert buy >= 0
         assert sell >= buy
 

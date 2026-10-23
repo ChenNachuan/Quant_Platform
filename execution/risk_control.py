@@ -74,7 +74,9 @@ def pre_trade_risk_check(
 
     Order dicts follow the order_generation contract:
     ``ticker`` / ``side`` (``"BUY"``|``"SELL"``) / ``shares`` / ``limit_price``.
-    Rule 4 mutates its order in place (``o["skip"] = True``).
+    ``shares`` and ``limit_price`` must be positive — malformed orders raise
+    ``ValueError`` rather than get scored.  Rule 4 mutates its order in place
+    (``o["skip"] = True``).
 
     Config knobs (defaults = the §66.3 rule table):
     ``max_single_weight`` 0.25 · ``max_total_weight`` 0.95 ·
@@ -104,6 +106,15 @@ def pre_trade_risk_check(
     for o in orders:
         if o["side"] not in ("BUY", "SELL"):
             raise ValueError(f"order side must be 'BUY' or 'SELL', got {o['side']!r}")
+        # Malformed quantities invert the verdicts rather than fail them: a
+        # SELL of -2000 passes rule 5 and flips rule 1's post-trade weight.
+        # Refuse them instead of scoring them.
+        if o["shares"] <= 0:
+            raise ValueError(f"order shares must be positive, got {o['shares']!r}")
+        if o["limit_price"] <= 0:
+            raise ValueError(
+                f"order limit_price must be positive, got {o['limit_price']!r}"
+            )
         if o["side"] == "BUY" and o["shares"] * o["limit_price"] < min_trade:
             o["skip"] = True
         if not o.get("skip"):
@@ -157,10 +168,12 @@ def pre_trade_risk_check(
             blocked.append(f"st_forbidden:{ticker}")
 
     # Rule 7 — liquidity: per-order shares vs daily volume.  Warn only (same
-    # treatment as the order_generation split warning).
+    # treatment as the order_generation split warning).  Volume 0 is real
+    # input (a halted name), not "absent": 1% of 0 is 0, so any order is over
+    # the cap.  Only a missing entry stays silent.
     for o in active:
         volume = daily_volumes.get(o["ticker"])
-        if volume and o["shares"] > max_vol_share * volume:
+        if volume is not None and o["shares"] > max_vol_share * volume:
             warnings.append(f"liquidity:{o['ticker']}")
 
     return RiskCheckResult(not blocked, blocked, warnings)

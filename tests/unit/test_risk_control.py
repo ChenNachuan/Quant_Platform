@@ -164,6 +164,25 @@ class TestSevenRules:
         )
         assert result.warnings == []
 
+    def test_rule7_zero_volume_warns(self):
+        # Review finding 1: volume 0 is a halted name, not "absent" — 1% of 0
+        # is 0, so any order is over the cap and must warn.
+        account = _Account(cash=NAV)
+        orders = [_order("600519.SH", "BUY", 1000, 10.0)]
+        result = pre_trade_risk_check(
+            orders, account, NAV, {"daily_volumes": {"600519.SH": 0}}
+        )
+        assert result.warnings == ["liquidity:600519.SH"]
+        assert result.passed is True
+
+    def test_rule7_absent_volume_stays_silent(self):
+        # counterpart: a ticker with no volume entry is unevaluated, not over
+        account = _Account(cash=NAV)
+        orders = [_order("600519.SH", "BUY", 1000, 10.0)]
+        result = pre_trade_risk_check(orders, account, NAV, {"daily_volumes": {}})
+        assert result.warnings == []
+        assert result.blocked_by == []
+
 
 class TestBatchSemantics:
     def test_block_refuses_whole_batch(self):
@@ -194,6 +213,30 @@ class TestBatchSemantics:
         orders = [_order("600519.SH", "HOLD", 1000, 10.0)]
         with pytest.raises(ValueError):
             pre_trade_risk_check(orders, _Account(cash=NAV), NAV, {})
+
+    def test_non_positive_shares_or_price_rejected(self):
+        # Review finding 3: a SELL of -2000 against 30% holdings used to pass
+        # rule 5 (-2000 > 3000 is False) while rule 1 scored a 50% post-trade
+        # weight — the guard inverted the verdict on a malformed order.
+        account = _Account(cash=NAV, holdings={"600519.SH": 3000})
+        for bad in (
+            _order("600519.SH", "SELL", -2000, 10.0),
+            _order("600519.SH", "SELL", 0, 10.0),
+            _order("600519.SH", "BUY", -100, 10.0),
+            _order("600519.SH", "BUY", 100, 0.0),
+            _order("600519.SH", "BUY", 100, -1.0),
+        ):
+            with pytest.raises(ValueError):
+                pre_trade_risk_check([bad], account, NAV, {})
+
+    def test_malformed_order_not_skipped_by_rule4(self):
+        # validation runs before the min-value filter — a zero-share BUY must
+        # not be quietly filtered instead of refused
+        account = _Account(cash=NAV)
+        tiny_bad = _order("600519.SH", "BUY", 0, 10.0)  # 0 < 5000, would skip
+        with pytest.raises(ValueError):
+            pre_trade_risk_check([tiny_bad], account, NAV, {})
+        assert not tiny_bad.get("skip")
 
 
 class TestRiskAudit:
