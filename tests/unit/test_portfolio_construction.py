@@ -211,6 +211,12 @@ class TestSolveInvariants:
         pre_opt = book.pre_opt_weights
         assert pre_opt is not None
         assert sum(pre_opt.values()) <= 1 + 1e-9
+        # The delivered book honours the total cap too — not just <= 1. The
+        # turnover clip is a convex combination with w_cur, which can carry
+        # the sum back through max_total_weight / min_cash; step 3b's
+        # re-normalize is what keeps this true.
+        total_cap = min(max_total_weight, 1.0 - min_cash)
+        assert sum(pre_opt.values()) <= total_cap + 1e-9
         assert all(v >= 0 for v in pre_opt.values())
         assert book.cash_weight >= -1e-9
         assert book.solver_status in ("optimal", "suboptimal", "infeasible")
@@ -427,6 +433,62 @@ class TestSolveClipHelpers:
         assert pre_total <= 0.2 + 1e-12
         assert delivered_total <= 0.2 + 1e-12
         assert "max_industry_weight" in book.constraints_applied
+
+    def test_drifted_book_cannot_exceed_total_cap_after_turnover(self):
+        # current A: 100_000 @ 10 on nav 1e6 -> w_cur = {A: 1.0}. Raw sums to
+        # 0.55 < max_total_weight 0.6, so step 2 is a no-op; the turnover clip
+        # mixes the target toward the fully invested book and lands the total
+        # at ~0.883. The step-3b total normalize must pull it back to 0.6.
+        account = make_account(1_000_000.0, cash=0.0)
+        current = {"A": make_position("A", 100_000)}
+        book = solve(
+            {"A": 0.2, "B": 0.2, "C": 0.15},
+            {"A": 10.0, "B": 10.0, "C": 10.0},
+            current=current,
+            account=account,
+            constraints=PortfolioConstraints(
+                max_weight=1.0,
+                max_total_weight=0.6,
+                max_turnover=0.15,
+                lot_size=100,
+                min_trade_value=0.0,
+            ),
+        )
+        pre_total = sum(book.pre_opt_weights.values())
+        delivered_total = sum(p.target_weight for p in book.positions.values())
+        assert pre_total <= 0.6 + 1e-12
+        assert delivered_total <= 0.6 + 1e-12
+        assert "max_turnover" in book.constraints_applied
+        assert "max_total_weight" in book.constraints_applied
+
+    def test_drifted_book_cannot_exceed_min_cash_cap_after_turnover(self):
+        # Same drift, tighter bound: min_cash 0.2 caps the total at 1-0.2=0.8
+        # (max_total_weight 0.95 is looser). Raw sums to exactly 0.8, so step
+        # 2 stays quiet; the convex combo with w_cur total 1.0 lands at 0.95.
+        # min_cash is only ever noted by the normalize, so its presence in
+        # constraints_applied pins that step 3b ran it.
+        account = make_account(1_000_000.0, cash=0.0)
+        current = {"A": make_position("A", 100_000)}
+        book = solve(
+            {"A": 0.3, "B": 0.3, "C": 0.2},
+            {"A": 10.0, "B": 10.0, "C": 10.0},
+            current=current,
+            account=account,
+            constraints=PortfolioConstraints(
+                max_weight=1.0,
+                max_total_weight=0.95,
+                min_cash=0.2,
+                max_turnover=0.15,
+                lot_size=100,
+                min_trade_value=0.0,
+            ),
+        )
+        pre_total = sum(book.pre_opt_weights.values())
+        delivered_total = sum(p.target_weight for p in book.positions.values())
+        assert pre_total <= 0.8 + 1e-12
+        assert delivered_total <= 0.8 + 1e-12
+        assert "min_cash" in book.constraints_applied
+        assert "max_total_weight" in book.constraints_applied
 
 
 class TestSolveStatus:
