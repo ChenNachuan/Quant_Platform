@@ -74,9 +74,10 @@ def pre_trade_risk_check(
 
     Order dicts follow the order_generation contract:
     ``ticker`` / ``side`` (``"BUY"``|``"SELL"``) / ``shares`` / ``limit_price``.
-    ``shares`` and ``limit_price`` must be positive — malformed orders raise
-    ``ValueError`` rather than get scored.  Rule 4 mutates its order in place
-    (``o["skip"] = True``).
+    ``shares`` and ``limit_price`` must be strictly positive, NaN refused —
+    malformed orders raise ``ValueError`` rather than get scored (every rule
+    compares False against NaN, so a scored NaN order would pass as
+    tradable).  Rule 4 mutates its order in place (``o["skip"] = True``).
 
     Config knobs (defaults = the §66.3 rule table):
     ``max_single_weight`` 0.25 · ``max_total_weight`` 0.95 ·
@@ -107,13 +108,19 @@ def pre_trade_risk_check(
         if o["side"] not in ("BUY", "SELL"):
             raise ValueError(f"order side must be 'BUY' or 'SELL', got {o['side']!r}")
         # Malformed quantities invert the verdicts rather than fail them: a
-        # SELL of -2000 passes rule 5 and flips rule 1's post-trade weight.
-        # Refuse them instead of scoring them.
-        if o["shares"] <= 0:
-            raise ValueError(f"order shares must be positive, got {o['shares']!r}")
-        if o["limit_price"] <= 0:
+        # SELL of -2000 passes rule 5 and flips rule 1's post-trade weight,
+        # and every rule compares False against NaN so a NaN order would be
+        # waved through as tradable.  Refuse instead of scoring.  NaN-safe
+        # direction: `not (x > 0)`, since `nan <= 0` is False.
+        if not o["shares"] > 0:
             raise ValueError(
-                f"order limit_price must be positive, got {o['limit_price']!r}"
+                f"order shares must be strictly positive (NaN refused), "
+                f"got {o['shares']!r}"
+            )
+        if not o["limit_price"] > 0:
+            raise ValueError(
+                f"order limit_price must be strictly positive (NaN refused), "
+                f"got {o['limit_price']!r}"
             )
         if o["side"] == "BUY" and o["shares"] * o["limit_price"] < min_trade:
             o["skip"] = True

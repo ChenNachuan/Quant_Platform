@@ -218,6 +218,11 @@ class TestBatchSemantics:
         # Review finding 3: a SELL of -2000 against 30% holdings used to pass
         # rule 5 (-2000 > 3000 is False) while rule 1 scored a 50% post-trade
         # weight — the guard inverted the verdict on a malformed order.
+        # NaN is refused too (follow-up ruling): every rule compares False
+        # against NaN, so a scored NaN order used to return passed=True with
+        # empty findings — operator error waved through as tradable.  The
+        # guard is the NaN-safe `not (x > 0)`, since `nan <= 0` is False.
+        nan = float("nan")
         account = _Account(cash=NAV, holdings={"600519.SH": 3000})
         for bad in (
             _order("600519.SH", "SELL", -2000, 10.0),
@@ -225,6 +230,10 @@ class TestBatchSemantics:
             _order("600519.SH", "BUY", -100, 10.0),
             _order("600519.SH", "BUY", 100, 0.0),
             _order("600519.SH", "BUY", 100, -1.0),
+            _order("600519.SH", "BUY", nan, 10.0),
+            _order("600519.SH", "SELL", nan, 10.0),
+            _order("600519.SH", "BUY", 100, nan),
+            _order("600519.SH", "SELL", 100, nan),
         ):
             with pytest.raises(ValueError):
                 pre_trade_risk_check([bad], account, NAV, {})

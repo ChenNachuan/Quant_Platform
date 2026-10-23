@@ -37,16 +37,19 @@ class FeeModel:
         Stamp tax is charged on SELL only and is waived for tickers whose
         prefix is stamp-tax-exempt per :mod:`core.asset_rules` (gap #17).
 
-        Raises ``ValueError`` on non-positive *price* or *shares*: a negative
-        share count would turn cost into a credit and falsify both advertised
-        invariants (fee >= 0, sell >= buy).  Rejection, not precondition, is
-        what makes those invariants hold over the whole input space.
+        Raises ``ValueError`` unless *price* and *shares* are strictly
+        positive.  The guard is NaN-safe (``not (x > 0)``, not ``x <= 0``):
+        ``nan <= 0`` is False, so the naive form scores a NaN fee and returns
+        NaN — falsifying both advertised invariants (fee >= 0, sell >= buy).
+        Refusal is what makes those invariants true of every fee this
+        function can return.
         """
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
-        if price <= 0 or shares <= 0:
+        if not (price > 0 and shares > 0):
             raise ValueError(
-                f"price and shares must be positive, got price={price!r}, shares={shares!r}"
+                f"price and shares must be strictly positive (NaN refused), "
+                f"got price={price!r}, shares={shares!r}"
             )
         value = price * shares
         commission = max(value * self.COMMISSION_RATE, self.COMMISSION_MIN)

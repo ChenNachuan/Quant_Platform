@@ -81,7 +81,9 @@ class TestHandCalc:
     def test_non_positive_price_or_shares_rejected(self):
         # Review finding 2: buy_fee(10.0, -100000) used to return -1005.0 and
         # the SELL side -1505.0 — a negative share count turned cost into a
-        # credit.  These are refused, not scored.
+        # credit.  These are refused, not scored.  NaN is refused too: the
+        # guard is NaN-safe (`not (x > 0)`), since `nan <= 0` is False and the
+        # naive form scored a NaN fee (Review's follow-up ruling).
         model = FeeModel()
         for price, shares in (
             (10.0, -100_000),
@@ -89,6 +91,9 @@ class TestHandCalc:
             (10.0, 0),
             (0.0, 100),
             (-1.0, 100),
+            (float("nan"), 100),
+            (10.0, float("nan")),
+            (float("nan"), float("nan")),
         ):
             with pytest.raises(ValueError):
                 model.compute("BUY", price, shares, "600519.SH")
@@ -115,13 +120,20 @@ class TestHypothesis:
 
     @settings(max_examples=80)
     @given(
-        price=st.floats(min_value=-100, max_value=1000),
-        shares=st.integers(min_value=-10000, max_value=10000),
+        price=st.one_of(
+            st.floats(min_value=-100, max_value=1000),
+            st.sampled_from([float("nan"), float("inf"), float("-inf")]),
+        ),
+        shares=st.one_of(
+            st.integers(min_value=-10000, max_value=10000),
+            st.sampled_from([float("nan"), float("inf"), float("-inf")]),
+        ),
     )
-    def test_invariants_hold_over_whole_input_space(self, price, shares):
-        # The advertised invariants must not rest on a positive-domain
-        # precondition: outside it compute refuses, and refusal is what makes
-        # fee >= 0 and sell >= buy true for every input.
+    def test_invariants_hold_or_input_refused(self, price, shares):
+        # Every input either raises ValueError or satisfies fee >= 0 and
+        # sell >= buy.  The property is not a positive-domain precondition
+        # and not a finiteness one either: NaN and non-positives are refused
+        # by the guard, and +inf yields inf, which satisfies both comparisons.
         model = FeeModel()
         try:
             buy = model.buy_fee(price, shares)
