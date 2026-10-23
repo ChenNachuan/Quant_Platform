@@ -76,8 +76,11 @@ class TestSevenRules:
         for t in tickers:
             assert result.is_blocked(t)
 
-    def test_rule3_turnover_warns_without_blocking(self):
-        # gross 310k / nav 200k = 155% > 150% — warn only, batch still passes
+    def test_rule3_rotation_at_normal_turnover_is_silent(self):
+        # OCR2 finding 3: turnover is one-sided (sum(|dw|)/2), the layer
+        # measure.  This rotation is gross 310k / nav 200k = 155% but one-
+        # sided 77.5% — inside the 30-100% monthly range the fee doc calls
+        # normal.  Counting gross would have warned on an ordinary rebalance.
         account = _Account(
             cash=10_000.0, holdings={"000001.SZ": 16_000, "600519.SH": 3_000}
         )
@@ -90,11 +93,35 @@ class TestSevenRules:
         result = pre_trade_risk_check(orders, account, 200_000.0, {})
         assert result.passed is True
         assert result.blocked_by == []
+        assert result.warnings == []
+
+    def test_rule3_turnover_warns_without_blocking(self):
+        # one-sided 800k/2/200k = 200% > 150% — warn only, batch still passes
+        account = _Account(
+            cash=20_000.0, holdings={"600519.SH": 20_000, "000001.SZ": 20_000}
+        )
+        buy_tickers = [
+            "300750.SZ",
+            "688001.SH",
+            "601318.SH",
+            "600000.SH",
+            "000002.SZ",
+            "002415.SZ",
+            "300059.SZ",
+            "603288.SH",
+        ]
+        orders = [
+            _order("600519.SH", "SELL", 20_000, 10.0),
+            _order("000001.SZ", "SELL", 20_000, 10.0),
+            *(_order(t, "BUY", 5_000, 10.0) for t in buy_tickers),
+        ]
+        result = pre_trade_risk_check(orders, account, 200_000.0, {})
+        assert result.passed is True
+        assert result.blocked_by == []
         assert set(result.warnings) == {
+            "turnover:600519.SH",
             "turnover:000001.SZ",
-            "turnover:300750.SZ",
-            "turnover:688001.SH",
-            "turnover:601318.SH",
+            *(f"turnover:{t}" for t in buy_tickers),
         }
 
     def test_rule4_small_buy_skipped_without_refusing_batch(self):
@@ -118,6 +145,32 @@ class TestSevenRules:
         assert a.get("skip") is True and b.get("skip") is True
         assert result.passed is True
         assert result.blocked_by == []
+
+    def test_stale_skip_flag_recomputed(self):
+        # OCR2 finding 2: a pre-set skip is leftover state from an earlier pass
+        # — honouring it drops the order from every rule and lets a bad batch
+        # through.  The flag is derived fresh, never trusted.
+        account = _Account(cash=NAV)
+        order = _order("600519.SH", "BUY", 3000, 10.0)  # 30% > 25%
+        order["skip"] = True  # stale
+        result = pre_trade_risk_check([order], account, NAV, {})
+        assert order["skip"] is False
+        assert result.passed is False
+        assert result.blocked_by == ["single_weight:600519.SH"]
+
+    def test_recheck_after_threshold_change_is_idempotent(self):
+        # same dicts, re-checked: the decision follows the current threshold
+        account = _Account(cash=NAV)
+        order = _order("600519.SH", "BUY", 400, 10.0)  # 4_000 < 5_000 -> skip
+        cfg = {"daily_volumes": {"600519.SH": 1_000}}
+        first = pre_trade_risk_check([order], account, NAV, cfg)
+        assert order["skip"] is True
+        assert first.warnings == []  # a skipped order joins no rule
+        second = pre_trade_risk_check(
+            [order], account, NAV, {**cfg, "min_trade_value": 1_000.0}
+        )
+        assert order["skip"] is False  # re-derived, not inherited
+        assert second.warnings == ["liquidity:600519.SH"]  # scored again
 
     def test_rule5_short_forbidden_blocks(self):
         account = _Account(cash=50_000.0, holdings={"600519.SH": 1000})

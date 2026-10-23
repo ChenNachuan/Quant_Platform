@@ -39,7 +39,7 @@ RISK_AUDIT_PATH = Path("data/execution/risk_audit.jsonl")
 RULE_REASONS: dict[str, str] = {
     "single_weight": "post-trade single-name weight exceeds max_single_weight",
     "total_weight": "post-trade total position weight exceeds max_total_weight",
-    "turnover": "daily gross turnover exceeds max_daily_turnover",
+    "turnover": "daily one-sided turnover (gross/2) exceeds max_daily_turnover",
     "short_forbidden": "sell quantity exceeds holdings; short selling prohibited",
     "st_forbidden": "ST instrument is outside the tradable universe",
     "liquidity": "order shares exceed max_volume_share of daily volume",
@@ -61,7 +61,9 @@ class RiskCheckResult:
 
     def is_blocked(self, ticker: str) -> bool:
         # Elements are "rule:ticker"; match the ticker suffix exactly.
-        return any(b == ticker or b.split(":", 1)[-1] == ticker for b in self.blocked_by)
+        return any(
+            b == ticker or b.split(":", 1)[-1] == ticker for b in self.blocked_by
+        )
 
 
 def pre_trade_risk_check(
@@ -83,7 +85,8 @@ def pre_trade_risk_check(
 
     Config knobs (defaults = the §66.3 rule table):
     ``max_single_weight`` 0.25 · ``max_total_weight`` 0.95 ·
-    ``max_daily_turnover`` 1.5 · ``min_trade_value`` 5000 ·
+    ``max_daily_turnover`` 1.5 (one-sided, gross/2 — the layer measure) ·
+    ``min_trade_value`` 5000 ·
     ``max_volume_share`` 0.01 · ``st_tickers`` iterable of tickers ·
     ``daily_volumes`` mapping ticker -> daily volume in shares (rule 7;
     the data source is gap #10, so volumes are injected here, not fetched).
@@ -127,9 +130,15 @@ def pre_trade_risk_check(
                 f"order limit_price must be strictly positive (NaN refused), "
                 f"got {o['limit_price']!r}"
             )
-        if o["side"] == "BUY" and o["shares"] * o["limit_price"] < min_trade:
-            o["skip"] = True
-        if not o.get("skip"):
+        # Rule 4 — derive the skip decision fresh from the current threshold
+        # (OCR2 finding 2).  Nothing else writes o["skip"], so a pre-set flag
+        # is leftover state from an earlier pass on these dicts; honouring it
+        # would silently drop the order from every later rule and could make a
+        # batch pass that should be blocked.  Re-running on the same orders is
+        # idempotent: the flag is recomputed, never trusted.
+        skip = o["side"] == "BUY" and o["shares"] * o["limit_price"] < min_trade
+        o["skip"] = skip
+        if not skip:
             active.append(o)
 
     # Batch aggregates: per-ticker post-trade value, per-ticker sell shares.
@@ -171,10 +180,14 @@ def pre_trade_risk_check(
     if (nav - post_cash) / nav > max_total:
         blocked.extend(f"total_weight:{ticker}" for ticker in tickers)
 
-    # Rule 3 — daily turnover = gross traded notional / nav.  Warn only:
-    # hard-blocking turnover destroys the signal (§66.3 key decision).
+    # Rule 3 — daily turnover, one-sided like the rest of the execution layer
+    # (portfolio_construction.md: turnover = sum(|Δw|)/2; OCR2 finding 3).
+    # A rotation sells one name and buys another, and gross counts both legs:
+    # warning on gross would fire ordinary rebalances at half the threshold.
+    # Warn only: hard-blocking turnover destroys the signal (§66.3).
     gross = sum(buy_value.values()) + sum(sell_value.values())
-    if gross / nav > max_turnover:
+    turnover = gross / 2.0 / nav
+    if turnover > max_turnover:
         warnings.extend(f"turnover:{ticker}" for ticker in tickers)
 
     # Rule 5 — no short selling.  The prohibition is the ASSET_RULES
@@ -204,9 +217,7 @@ def pre_trade_risk_check(
     return RiskCheckResult(not blocked, blocked, warnings)
 
 
-def log_risk_audit(
-    check: RiskCheckResult, path: str | Path = RISK_AUDIT_PATH
-) -> None:
+def log_risk_audit(check: RiskCheckResult, path: str | Path = RISK_AUDIT_PATH) -> None:
     """Append one JSONL record per finding to *path* (append-only).
 
     Records carry ``timestamp`` / ``rule`` / ``ticker`` / ``action`` /
