@@ -77,7 +77,9 @@ def pre_trade_risk_check(
     ``shares`` and ``limit_price`` must be strictly positive, NaN refused —
     malformed orders raise ``ValueError`` rather than get scored (every rule
     compares False against NaN, so a scored NaN order would pass as
-    tradable).  Rule 4 mutates its order in place (``o["skip"] = True``).
+    tradable).  One ``limit_price`` per ticker per batch: a conflict raises
+    rather than letting rule 1's verdict flip on walk order.  Rule 4 mutates
+    its order in place (``o["skip"] = True``); rule 6 blocks ST *buys* only.
 
     Config knobs (defaults = the §66.3 rule table):
     ``max_single_weight`` 0.25 · ``max_total_weight`` 0.95 ·
@@ -131,6 +133,11 @@ def pre_trade_risk_check(
             active.append(o)
 
     # Batch aggregates: per-ticker post-trade value, per-ticker sell shares.
+    # One price basis per ticker (OCR finding 5): the held shares are valued
+    # at the batch's limit price for that ticker, so two different prices for
+    # one ticker would make rule 1's verdict depend on walk order.  The
+    # pipeline emits one limit price per ticker per day (decision-day close);
+    # anything else is refused rather than scored.
     px: dict[str, float] = {}
     buy_value: dict[str, float] = {}
     sell_value: dict[str, float] = {}
@@ -138,6 +145,12 @@ def pre_trade_risk_check(
     for o in active:
         ticker = o["ticker"]
         value = o["shares"] * o["limit_price"]
+        if ticker in px and px[ticker] != o["limit_price"]:
+            raise ValueError(
+                f"conflicting limit_price for {ticker} in one batch: "
+                f"{px[ticker]!r} vs {o['limit_price']!r} — one price basis "
+                f"per ticker, or the rule-1 verdict depends on walk order"
+            )
         px.setdefault(ticker, o["limit_price"])
         if o["side"] == "BUY":
             buy_value[ticker] = buy_value.get(ticker, 0.0) + value
@@ -172,9 +185,11 @@ def pre_trade_risk_check(
                 blocked.append(f"short_forbidden:{ticker}")
 
     # Rule 6 — ST instruments are excluded upstream (research filter); this
-    # is the defense-in-depth backstop on the order stream.
+    # is the defense-in-depth backstop against *adding* them (OCR finding 3).
+    # Sells of an ST name are allowed: a position that became ST after
+    # purchase must stay exitable, or risk control strands it.
     for ticker in tickers:
-        if ticker in st_tickers:
+        if ticker in st_tickers and ticker in buy_value:
             blocked.append(f"st_forbidden:{ticker}")
 
     # Rule 7 — liquidity: per-order shares vs daily volume.  Warn only (same

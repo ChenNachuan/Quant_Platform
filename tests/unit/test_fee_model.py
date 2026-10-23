@@ -102,7 +102,7 @@ class TestHandCalc:
             with pytest.raises(ValueError):
                 model.buy_fee(price, shares)
             with pytest.raises(ValueError):
-                model.sell_fee(price, shares)
+                model.sell_fee(price, shares, "600519.SH")
 
 
 class TestHypothesis:
@@ -114,7 +114,7 @@ class TestHypothesis:
     def test_fee_non_negative_and_sell_ge_buy(self, price, shares):
         model = FeeModel()
         buy = model.buy_fee(price, shares)
-        sell = model.sell_fee(price, shares)
+        sell = model.sell_fee(price, shares, "600519.SH")
         assert buy >= 0
         assert sell >= buy
 
@@ -137,7 +137,7 @@ class TestHypothesis:
         model = FeeModel()
         try:
             buy = model.buy_fee(price, shares)
-            sell = model.sell_fee(price, shares)
+            sell = model.sell_fee(price, shares, "600519.SH")
         except ValueError:
             return
         assert buy >= 0
@@ -221,3 +221,37 @@ class TestExemptSetConsistency:
             PRICE, SHARES, "510300.SH"
         )
         assert gap == pytest.approx(VALUE * FeeModel.STAMP_TAX_RATE)
+
+
+class TestFeeContract:
+    def test_slippage_charged_exactly_once(self):
+        # OCR finding 1: slippage lives in the four-part fee (issue spec), so
+        # the fill-price path must not charge it again.  The decomposition
+        # pins that the 0.1% appears exactly once in the returned total, and
+        # the class docstring pins that price is a raw reference price.
+        model = FeeModel()
+        for side in ("BUY", "SELL"):
+            total = model.compute(side, PRICE, SHARES, "600519.SH")
+            stamp = VALUE * FeeModel.STAMP_TAX_RATE if side == "SELL" else 0.0
+            without_slippage = (
+                max(VALUE * FeeModel.COMMISSION_RATE, FeeModel.COMMISSION_MIN)
+                + stamp
+                + VALUE * FeeModel.TRANSFER_FEE_RATE
+            )
+            assert total - without_slippage == pytest.approx(
+                VALUE * FeeModel.SLIPPAGE_RATE
+            )
+            # one 0.1% term, not zero and not two
+            assert total - without_slippage < 2 * VALUE * FeeModel.SLIPPAGE_RATE
+
+    def test_sell_fee_requires_ticker(self):
+        # OCR finding 2: an omitted ticker defaults to taxable and an exempt
+        # instrument would silently pay stamp tax.
+        with pytest.raises(TypeError):
+            FeeModel().sell_fee(PRICE, SHARES)
+
+    def test_sell_with_empty_ticker_refused(self):
+        with pytest.raises(ValueError):
+            FeeModel().compute("SELL", PRICE, SHARES, "")
+        # BUY has no stamp-tax asymmetry, so no ticker is fine
+        assert FeeModel().compute("BUY", PRICE, SHARES, "") == pytest.approx(126.0)

@@ -144,6 +144,18 @@ class TestSevenRules:
         assert result.passed is False
         assert result.blocked_by == ["st_forbidden:600519.SH"]
 
+    def test_rule6_st_sells_allowed_to_exit(self):
+        # OCR finding 3: rule 6 is a backstop against *adding* ST names.  A
+        # position that became ST after purchase must stay exitable —
+        # blocking the sell would strand it in the system.
+        account = _Account(cash=NAV, holdings={"600519.SH": 2000})
+        orders = [_order("600519.SH", "SELL", 1000, 10.0)]
+        result = pre_trade_risk_check(
+            orders, account, NAV, {"st_tickers": {"600519.SH"}}
+        )
+        assert result.passed is True
+        assert result.blocked_by == []
+
     def test_rule7_liquidity_warns(self):
         # 1_000 shares > 1% of 50_000 daily volume
         account = _Account(cash=NAV)
@@ -317,3 +329,31 @@ class TestPriceLimitHook:
         order = _order("600519.SH", "BUY", 100, 10.0)
         with pytest.raises(NotImplementedError):
             check_price_limit(order, prev_close=9.9, config={})
+
+
+class TestPriceBasis:
+    def test_conflicting_limit_price_rejected(self):
+        # OCR finding 5: held shares are valued at the batch's limit price for
+        # the ticker.  Two prices for one ticker would make rule 1's verdict
+        # flip on walk order — the input is refused instead of scored.
+        account = _Account(cash=NAV, holdings={"600519.SH": 1000})
+        orders = [
+            _order("600519.SH", "SELL", 1000, 5.0),
+            _order("600519.SH", "BUY", 1000, 20.0),
+        ]
+        with pytest.raises(ValueError):
+            pre_trade_risk_check(orders, account, NAV, {})
+
+    def test_walk_order_cannot_change_rule1_verdict(self):
+        # one price per ticker -> post-trade weight is a sum, order-free
+        account = _Account(cash=NAV, holdings={"600519.SH": 1000})
+        first = [
+            _order("600519.SH", "SELL", 500, 10.0),
+            _order("000001.SZ", "BUY", 2500, 10.0),
+        ]
+        second = list(reversed(first))
+        r1 = pre_trade_risk_check(first, account, NAV, {})
+        r2 = pre_trade_risk_check(second, account, NAV, {})
+        assert r1.passed == r2.passed
+        assert set(r1.blocked_by) == set(r2.blocked_by)
+        assert set(r1.warnings) == set(r2.warnings)
