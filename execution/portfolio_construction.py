@@ -7,11 +7,14 @@ bodies live in :mod:`core.types` (gap #1 ruling A); the solver stays in the
 execution domain.
 
 Pipeline order (pinned — restated in the PR description): constraint clip ->
-total-weight normalize -> turnover clip -> pre_opt snapshot -> floor_to_lot ->
-min_trade_value filter.  Clip first, round last: lot rounding floors against
-the budget, so it can only reduce a clipped weight and never push one back
-through a bound.  Round-then-clip would clip in weight space and leave
-non-lot quantities — violating the execution unit.
+total-weight normalize -> turnover clip -> upper-bound re-clip -> pre_opt
+snapshot -> floor_to_lot -> min_trade_value filter.  Clip first, round last:
+lot rounding floors against the budget, so it can only reduce a clipped
+weight and never push one back through an upper bound.  ``min_weight`` is
+advisory after rounding — flooring can deliver a hair under the floor,
+because the tradeable unit is the lot, not the weight.  Round-then-clip
+would clip in weight space and leave non-lot quantities — violating the
+execution unit.
 """
 
 from __future__ import annotations
@@ -92,10 +95,12 @@ class PortfolioOptimizer:
         """Clip *raw_weights* to *constraints*, round to lots, build the book.
 
         Order (pinned): box/industry clip -> total-weight normalize -> turnover
-        clip -> ``pre_opt_weights`` snapshot -> ``floor_to_lot`` ->
-        ``min_trade_value`` filter.  The returned ``positions`` hold only
-        positive holdings — absence of a ticker is the exit signal for the
-        order diff downstream.
+        clip -> upper-bound re-clip -> ``pre_opt_weights`` snapshot ->
+        ``floor_to_lot`` -> ``min_trade_value`` filter.  The returned
+        ``positions`` hold only positive holdings — absence of a ticker is the
+        exit signal for the order diff downstream.  Upper bounds
+        (``max_weight``, ``max_industry_weight``) hold on every book this
+        returns; ``min_weight`` is advisory post-rounding (see module doc).
 
         Raises ``ValueError`` for NaN/inf raw weights, missing or non-positive
         prices, negative position quantities, an incoherent current book
@@ -157,6 +162,23 @@ class PortfolioOptimizer:
         if constraints.max_turnover is not None:
             if self._clip_turnover(w, w_cur, constraints.max_turnover):
                 note("max_turnover")
+
+        # Step 3b — re-apply upper bounds.  The turnover clip is a convex
+        # combination of the clipped target and the current book; a drifted
+        # current book (price appreciation above max_weight or an industry
+        # cap) carries the result back through the bound.  Clamp again here,
+        # accepting a small turnover overshoot rather than delivering a book
+        # outside the constraint set.  min_weight is deliberately not
+        # re-raised: partial exits and in-flight builds may sit below the
+        # floor inside the turnover budget (advisory post-rounding).
+        if any(v > constraints.max_weight for v in w.values()):
+            for t in w:
+                if w[t] > constraints.max_weight:
+                    w[t] = constraints.max_weight
+            note("max_weight")
+        if constraints.max_industry_weight is not None and industry_map:
+            if self._clip_industry(w, industry_map, constraints.max_industry_weight):
+                note("max_industry_weight")
 
         # Step 4 — pre-rounding snapshot.
         pre_opt = dict(w)
@@ -245,8 +267,11 @@ class PortfolioOptimizer:
         """Interpolate the target toward the current book until turnover fits.
 
         ``turnover = sum(|Δw|)/2`` (design §34).  Scaled deltas are convex
-        combinations of the two books, so bounds on both books carry over.
-        Partial exits land in *w* when the budget cannot exit in one step.
+        combinations of the two books — bounds carry over only when the
+        current book still satisfies them.  A drifted book can carry the
+        result back through an upper bound; ``solve`` re-applies those clips
+        afterwards (step 3b), accepting a small turnover overshoot.  Partial
+        exits land in *w* when the budget cannot exit in one step.
         """
         tickers = set(w) | set(w_cur)
         delta = {t: w.get(t, 0.0) - w_cur.get(t, 0.0) for t in tickers}

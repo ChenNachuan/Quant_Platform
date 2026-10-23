@@ -289,6 +289,23 @@ class TestSolvePipeline:
         assert book.positions["A"].target_weight <= 0.1 + 1e-12
         assert "lot_size" in book.constraints_applied
 
+    def test_min_weight_is_advisory_after_lot_rounding(self):
+        # 0.05 * 1e6 / 33 = 1515.15... shares -> 1500 -> weight 0.0495.
+        # The lot is the tradeable unit, so min_weight cannot be guaranteed
+        # post-rounding; solve() must deliver without raising. Pinned so the
+        # "advisory" wording stays an executable contract.
+        book = solve(
+            {"A": 0.05},
+            {"A": 33.0},
+            constraints=PortfolioConstraints(
+                min_weight=0.05, max_weight=0.1, lot_size=100, min_trade_value=0.0
+            ),
+        )
+        pos = book.positions["A"]
+        assert pos.target_quantity == 1500
+        assert pos.target_weight == pytest.approx(1500 * 33.0 / 1_000_000.0)
+        assert pos.target_weight < 0.05
+
     def test_min_trade_value_filter_zeroes_small_positions(self):
         book = solve(
             {"A": 0.1, "B": 0.001},
@@ -361,6 +378,54 @@ class TestSolveClipHelpers:
         assert book.pre_opt_weights["A"] == pytest.approx(0.1)
         assert book.pre_opt_weights["B"] == pytest.approx(0.1)
         assert book.pre_opt_weights["C"] == pytest.approx(0.1)
+        assert "max_industry_weight" in book.constraints_applied
+
+    def test_drifted_book_cannot_exceed_max_weight_after_turnover(self):
+        # current A: 15_000 @ 10 on nav 1e6 -> w_cur A = 0.15 > max_weight=0.1.
+        # The turnover clip alone lands A at 0.1367 (convex combo with the
+        # drifted book); the upper-bound re-clip must clamp it back to 0.1.
+        account = make_account(1_000_000.0, cash=850_000.0)
+        current = {"A": make_position("A", 15_000)}
+        book = solve(
+            {"A": 0.1, "C": 0.1},
+            {"A": 10.0, "C": 10.0},
+            current=current,
+            account=account,
+            constraints=PortfolioConstraints(
+                max_weight=0.1, max_turnover=0.02, lot_size=100, min_trade_value=0.0
+            ),
+        )
+        assert book.pre_opt_weights["A"] <= 0.1 + 1e-12
+        assert book.positions["A"].target_weight <= 0.1 + 1e-12
+        assert "max_turnover" in book.constraints_applied
+        assert "max_weight" in book.constraints_applied
+
+    def test_drifted_book_cannot_exceed_industry_cap_after_turnover(self):
+        # current A: 25_000 @ 10 on nav 1e6 -> w_cur A = 0.25 > industry cap 0.2.
+        # The industry clip runs before the turnover clip and would be undone
+        # without the re-clip (bank book lands at 0.242 pre-rounding).
+        account = make_account(1_000_000.0, cash=750_000.0)
+        current = {"A": make_position("A", 25_000)}
+        book = solve(
+            {"A": 0.15, "B": 0.15},
+            {"A": 10.0, "B": 10.0},
+            current=current,
+            account=account,
+            industry_map={"A": "bank", "B": "bank"},
+            constraints=PortfolioConstraints(
+                max_weight=0.5,
+                max_industry_weight=0.2,
+                max_turnover=0.02,
+                lot_size=100,
+                min_trade_value=0.0,
+            ),
+        )
+        pre_total = sum(book.pre_opt_weights.get(t, 0.0) for t in ("A", "B"))
+        delivered_total = sum(
+            book.positions[t].target_weight for t in ("A", "B") if t in book.positions
+        )
+        assert pre_total <= 0.2 + 1e-12
+        assert delivered_total <= 0.2 + 1e-12
         assert "max_industry_weight" in book.constraints_applied
 
 
