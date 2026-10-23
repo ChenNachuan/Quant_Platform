@@ -86,8 +86,11 @@ def pre_trade_risk_check(
     ``daily_volumes`` mapping ticker -> daily volume in shares (rule 7;
     the data source is gap #10, so volumes are injected here, not fetched).
     """
-    if nav <= 0:
-        raise ValueError(f"nav must be positive, got {nav}")
+    # NaN-safe direction: `not (x > 0)`, never `x <= 0` — `nan <= 0` is False
+    # and a NaN nav would fail open (every rule dividing by nav compares
+    # False), same class as a scored NaN order.
+    if not nav > 0:
+        raise ValueError(f"nav must be strictly positive (NaN refused), got {nav!r}")
 
     max_single = config.get("max_single_weight", 0.25)
     max_total = config.get("max_total_weight", 0.95)

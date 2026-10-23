@@ -206,8 +206,23 @@ class TestBatchSemantics:
             pre_trade_risk_check(orders, account, NAV, {})
 
     def test_nav_must_be_positive(self):
+        for bad_nav in (0.0, -1.0, float("nan")):
+            with pytest.raises(ValueError):
+                pre_trade_risk_check([], _Account(cash=1.0), bad_nav, {})
+
+    def test_nan_nav_never_fails_open(self):
+        # Ruling: `nan <= 0` is False, so a NaN nav used to be scored and every
+        # rule dividing by nav compared False — a 30% BUY came back passed=True
+        # under nav=nan where it blocks under a real nav.  The guard is the
+        # NaN-safe `not (x > 0)`, and it must fire before any rule runs.
+        account = _Account(cash=NAV)
+        orders = [_order("600519.SH", "BUY", 3000, 10.0)]  # blocks on real nav
         with pytest.raises(ValueError):
-            pre_trade_risk_check([], _Account(cash=1.0), 0.0, {})
+            pre_trade_risk_check(orders, account, float("nan"), {})
+        # the same batch still blocks once nav is real — refusal, not scoring
+        result = pre_trade_risk_check(orders, account, NAV, {})
+        assert result.passed is False
+        assert result.blocked_by == ["single_weight:600519.SH"]
 
     def test_bad_side_raises(self):
         orders = [_order("600519.SH", "HOLD", 1000, 10.0)]
