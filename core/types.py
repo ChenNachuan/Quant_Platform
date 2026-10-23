@@ -6,7 +6,7 @@ actual definitions for cross-domain reuse.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum, IntEnum, IntFlag
 
 
@@ -169,6 +169,48 @@ class Account:
     frozen_cash: float = 0.0
     total_commission: float = 0.0
     total_pnl: float = 0.0
+
+
+@dataclass(frozen=True)
+class TargetPosition:
+    """One target holding after constraint clipping and lot rounding.
+
+    Field authority: ``execution/portfolio_construction.md`` (§17/§34); the
+    body lives here per gap #1 ruling A.  Three units coexist: weight is the
+    optimization space, quantity the execution unit (integer lots), notional
+    for risk and reporting.  ``target_weight`` is recomputed from the rounded
+    quantity — the pre-rounding weights are in ``TargetPortfolio``.
+    """
+
+    ticker: str
+    target_weight: float
+    target_quantity: int
+    target_notional: float
+    ref_price: float  # T-day close, weight<->shares conversion only
+    side: str  # "LONG" / "FLAT"
+
+
+@dataclass(frozen=True)
+class TargetPortfolio:
+    """Target book produced by ``PortfolioOptimizer.solve``.
+
+    Field authority: ``execution/portfolio_construction.md`` (§17/§34); body
+    here per gap #1 ruling A.  Positions hold the rounded book;
+    ``pre_opt_weights`` keeps the pre-rounding weights for deviation analysis.
+    """
+
+    strategy_id: str
+    trade_date: date  # signal day T
+    exec_date: date  # execution day T+1
+    create_time: datetime
+    positions: dict[str, TargetPosition]
+    total_weight: float
+    num_holdings: int
+    cash_weight: float
+    estimated_turnover: float
+    solver_status: str  # "optimal" / "suboptimal" / "infeasible"
+    constraints_applied: list[str]
+    pre_opt_weights: dict[str, float] | None
 
 
 @dataclass
