@@ -8,6 +8,7 @@ assertion and the shift(1)-direction / rebalance-timing checks.
 import inspect
 import json
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,11 @@ pytestmark = pytest.mark.golden
 
 FIXTURE_DIR = Path(__file__).parent
 REL_TOL = 1e-4  # 0.01 %
+
+# The implementation *module* — `inspect.getsource(portfolio_baseline)` returns
+# the function body only, so module-level imports would be invisible.
+IMPL_MODULE = sys.modules[portfolio_baseline.__module__]
+IMPL_SOURCE = inspect.getsource(IMPL_MODULE)
 
 # Red line 6 — futures ALSTM regression baseline, never mixed in
 FORBIDDEN_MODULES = (
@@ -81,18 +87,37 @@ class TestRedLine6NoMixing:
     """ac-3 / H2: equal-weight top-5 ETF momentum, never mixed with old baseline."""
 
     def test_no_forbidden_imports(self):
-        """portfolio_baseline must not import futures ALSTM regression modules."""
-        source = inspect.getsource(portfolio_baseline)
+        """portfolio_baseline's module source must not reference forbidden modules.
+
+        Checked against the module source, not the function body — a top-level
+        ``import baseline_spec`` sits in the import block, which
+        ``inspect.getsource(portfolio_baseline)`` never returns.
+        """
         for forbidden in FORBIDDEN_MODULES:
-            assert forbidden not in source, (
-                f"portfolio_baseline references forbidden module: {forbidden}"
+            assert forbidden not in IMPL_SOURCE, (
+                f"portfolio_baseline module references forbidden module: {forbidden}"
             )
 
     def test_no_forbidden_modules_loaded(self):
-        """No baseline_spec / alstm module loaded during this test."""
-        for mod_name in sys.modules:
+        """portfolio_baseline's own import graph must not touch forbidden modules.
+
+        Scoped to the implementation's import namespace. The process may
+        legitimately hold e.g. ``test_tl_intraday_reproduction`` as part of the
+        project suite; that says nothing about this implementation.
+        """
+        imported = {IMPL_MODULE.__name__}
+        for val in vars(IMPL_MODULE).values():
+            if isinstance(val, types.ModuleType):
+                imported.add(val.__name__)
+            elif callable(val) or isinstance(val, type):
+                owner = getattr(val, "__module__", None)
+                if owner and owner != "builtins":
+                    imported.add(owner)
+        for name in imported:
             for forbidden in FORBIDDEN_MODULES:
-                assert forbidden not in mod_name, f"forbidden module loaded: {mod_name}"
+                assert forbidden not in name, (
+                    f"portfolio_baseline imports forbidden module: {name}"
+                )
 
     def test_expected_is_portfolio_not_per_ticker(self, expected):
         """golden_expected_portfolio.json holds 3 scalars, not per-ticker dicts."""
@@ -104,14 +129,10 @@ class TestRedLine6NoMixing:
 
     def test_no_baseline_spec_file_referenced(self):
         """The comparison source is golden_expected_portfolio.json only."""
-        src = inspect.getsource(portfolio_baseline)
-        assert (
-            "golden_expected_portfolio" in inspect.getsource(sys.modules[__name__])
-            or True
-        )  # expected file is loaded via fixture, not hardcoded
+        assert "golden_expected_portfolio" in inspect.getsource(sys.modules[__name__])
         # Key check: no reference to old baseline paths in the implementation
-        assert "baseline_spec" not in src
-        assert "golden_expected.json" not in src
+        assert "baseline_spec" not in IMPL_SOURCE
+        assert "golden_expected.json" not in IMPL_SOURCE
 
 
 class TestNoLookahead:
@@ -123,9 +144,12 @@ class TestNoLookahead:
         assert np.allclose(w0, 0.2), f"initial weights {w0}"
 
     def test_shift1_direction(self, result, prices):
-        """Weights for day t are from day t-1's close, not day t's.
+        """Weights for day t derive from r[0..t-1] and the rebalance set alone.
 
-        Verifies: r_p[t] = sum(w[t] * r[t]) where w[t] was set before r[t].
+        Re-derives the whole weight path from first principles without calling
+        ``portfolio_baseline``. A path contaminated by r[t] — drift applied
+        before the day's weights are recorded — disagrees at day t, unlike a
+        plain ``r_p[t] == w[t] . r[t]`` check, which holds by construction.
         """
         sample = prices[prices["phase"] == "sample"].reset_index(drop=True)
         warmup_last = prices[prices["phase"] == "warmup"].iloc[-1]
@@ -134,11 +158,25 @@ class TestNoLookahead:
         prev = np.concatenate([base.reshape(1, -1), closes[:-1]], axis=0)
         r = closes / prev - 1.0
 
+        sample_dates = sample["date"].tolist()
+        rebalance_si = {sample_dates.index(d) for d in REBALANCE_DATES}
+
+        n_assets = len(UNIVERSE)
+        expected_w = np.full(n_assets, 1.0 / n_assets)  # NAV_0 close decision
         for t in range(SAMPLE_DAYS):
-            w_t = result["weights_used"][t]
-            r_p_expected = float(np.dot(w_t, r[t]))
-            assert abs(r_p_expected - result["portfolio_returns"][t]) < 1e-12, (
+            got_w = result["weights_used"][t]
+            assert np.allclose(got_w, expected_w), (
+                f"day {t}: weights {got_w} != past-only path {expected_w}"
+            )
+            r_p_t = float(np.dot(expected_w, r[t]))
+            assert abs(r_p_t - result["portfolio_returns"][t]) < 1e-12, (
                 f"day {t}: r_p mismatch (shift direction wrong)"
+            )
+            # Drift by day t's return → day t+1's weights. A rebalance decided
+            # at day t's close resets to 1/5 instead, still past-only for t+1.
+            drifted = expected_w * (1.0 + r[t]) / (1.0 + r_p_t)
+            expected_w = (
+                np.full(n_assets, 1.0 / n_assets) if t in rebalance_si else drifted
             )
 
     def test_weights_drift_between_rebalances(self, result, prices):
