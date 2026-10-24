@@ -60,6 +60,6 @@ def generate_orders(target_weights, account, nav):
 
 ## 实施时定稿项
 
-- `get_latest_price` / `get_prices` 的数据接口签名（从 bars 读当日 close？）（§66）
-- `check_split_needed` 的成交量数据来源（当日成交量从 bars 取）（§66）
+- ~~`get_latest_price` / `get_prices` 的数据接口签名（从 bars 读当日 close？）（§66）~~ **已定稿** → `execution/market_data.py`（QUANT-27 Review 确认）：`get_latest_price(bars, ticker, asof, field="close"|"open") -> float | None`；`get_prices(bars, tickers, asof, field="close") -> dict[str, float]`。语义：严格 trade-date 等值（停牌返回 `None` 不回退）、raw 未复权、NaN/非正返回 `None`、`field` 仅 `close`/`open`、重复 `(ticker, date)` 行 raise。
+- ~~`check_split_needed` 的成交量数据来源（当日成交量从 bars 取）（§66）~~ **已定稿** → `execution/market_data.py`：`get_daily_volume(bars, ticker, asof) -> float | None`，当日成交**股数**（`bars_daily.volume`），停牌/NaN/负值返回 `None`（零成交量返回 `0.0`）。
 - 港股/期货 lot_size 主数据从哪来（§17.3）
