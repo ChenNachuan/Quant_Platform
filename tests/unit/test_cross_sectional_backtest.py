@@ -357,6 +357,27 @@ class TestMainChainRealBroker:
         assert results[0]["fills"][0]["fill_price"] == 10.5
         assert results[1]["fills"][0]["fill_price"] == 11.5
 
+    def test_fill_clock_chronological_not_list_order(self):
+        """Fill clock picks min(dates > day), not the first list element after day."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("600519.SH", date(2026, 1, 6), open_=10.5, close=11.0),
+                bar("600519.SH", date(2026, 1, 7), open_=11.5, close=12.0),
+                bar("600519.SH", date(2026, 1, 8), open_=12.5, close=13.0),
+            ]
+        )
+        broker = make_sim_broker(bars)
+        strategy = FixedWeightsStrategy({"600519.SH": 0.3})
+        engine = CrossSectionalBacktest(broker)
+        # Unsorted: 01-08 appears before 01-06 in the list.
+        dates = [date(2026, 1, 5), date(2026, 1, 8), date(2026, 1, 6), date(2026, 1, 7)]
+
+        results = engine.run(strategy, bars, dates)
+
+        # Day 01-05 fills at min(> 01-05) = 01-06 open (10.5), not 01-08 (12.5).
+        assert results[0]["fills"][0]["fill_price"] == 10.5
+
     def test_nav_marked_to_market(self):
         """Finding 2: NAV reflects day's close, so sizing uses current value."""
         bars = make_bars(

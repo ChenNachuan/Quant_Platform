@@ -285,6 +285,15 @@ class TestFillBasis:
         assert results[0]["status"] == "REJECTED"
         assert "fill_price" not in results[0]
 
+    def test_decision_close_requires_decision_date(self):
+        """No fill_date fallback — decision_date is mandatory for decision_close."""
+        bars = make_bars([bar("600519.SH", TRADE_DATE, close=11.0)])
+        config = make_config(bars=bars, fill_basis=FILL_BASIS_DECISION_CLOSE)
+        broker = SimBroker(config)  # no decision_date, fill_date is set
+
+        with pytest.raises(ValueError, match="decision_date"):
+            broker.submit_orders([make_order()])
+
     def test_invalid_fill_basis_raises(self):
         with pytest.raises(ValueError, match="fill_basis"):
             SimBroker(make_config(fill_basis="twap"))
@@ -375,3 +384,26 @@ class TestFullFillPath:
         assert results[0]["custom_field"] == "preserved"
         assert results[0]["ticker"] == "600519.SH"
         assert results[0]["status"] == "FILLED"
+
+    def test_risk_blocked_has_reject_reason(self):
+        bars = make_bars([bar("600519.SH", FILL_DATE)])
+        config = make_config(
+            bars=bars,
+            risk={"max_single_weight": 0.0001, "min_trade_value": 100.0},
+        )
+        broker = SimBroker(config)
+
+        results = broker.submit_orders([make_order()])
+
+        assert results[0]["status"] == "REJECTED"
+        assert results[0]["reject_reason"] == "risk_blocked"
+
+    def test_no_price_has_reject_reason(self):
+        bars = make_bars([bar("600519.SH", FILL_DATE)])  # 000001.SZ suspended
+        config = make_config(bars=bars)
+        broker = SimBroker(config)
+
+        results = broker.submit_orders([make_order(ticker="000001.SZ")])
+
+        assert results[0]["status"] == "REJECTED"
+        assert results[0]["reject_reason"] == "no_price"

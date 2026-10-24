@@ -200,17 +200,17 @@ def _extract_positions(broker) -> dict[str, int]:
 
 
 def _advance_fill_clock(broker, day: date, dates: list[date]) -> None:
-    """Set broker ``fill_date`` to T+1 and ``decision_date`` to T (Finding 1).
+    """Set broker ``fill_date`` to T+1 and ``decision_date`` to T.
 
     ``fill_date`` is the date fills execute at (open for ``t1_open``);
     ``decision_date`` is the close used by ``decision_close``.  T+1 is the
-    next date in *dates* after *day*, falling back to calendar +1 day.
+    chronologically next date in *dates* after *day* (minimum d > day),
+    falling back to calendar +1 day when *day* is the last.
     """
-    fill_date: date | str = day + timedelta(days=1)
-    for d in dates:
-        if d > day:
-            fill_date = d
-            break
+    fill_date: date = day + timedelta(days=1)
+    candidates = [d for d in dates if d > day]
+    if candidates:
+        fill_date = min(candidates)
     if hasattr(broker, "fill_date"):
         broker.fill_date = fill_date
     if hasattr(broker, "decision_date"):

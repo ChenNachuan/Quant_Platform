@@ -149,14 +149,26 @@ class SimBroker(Broker):
 
         results: list[dict] = []
         for o in orders:
-            if check.is_blocked(o["ticker"]) or o.get("skip"):
-                results.append({**o, "status": "REJECTED"})
+            if check.is_blocked(o["ticker"]):
+                results.append({
+                    **o, "status": "REJECTED",
+                    "reject_reason": "risk_blocked",
+                })
+                continue
+            if o.get("skip"):
+                results.append({
+                    **o, "status": "REJECTED",
+                    "reject_reason": "skip_flag",
+                })
                 continue
 
             # (b) fill price lookup
             price = self._lookup_fill_price(o)
             if price is None:
-                results.append({**o, "status": "REJECTED"})
+                results.append({
+                    **o, "status": "REJECTED",
+                    "reject_reason": "no_price",
+                })
                 continue
 
             # (c) ledger settle
@@ -192,13 +204,13 @@ class SimBroker(Broker):
         yields ``None`` -> REJECTED (AC-2), never a silent fill.
         """
         if self._fill_basis == FILL_BASIS_DECISION_CLOSE:
-            asof = self._decision_date or self._fill_date
-            if asof is None:
+            if self._decision_date is None:
                 raise ValueError(
-                    "decision_date (or fill_date) is required for "
-                    "fill_basis='decision_close'"
+                    "decision_date is required for fill_basis='decision_close'"
                 )
-            return get_latest_price(self._bars, order["ticker"], asof, field="close")
+            return get_latest_price(
+                self._bars, order["ticker"], self._decision_date, field="close"
+            )
         # t1_open: T+1 open via market_data — raw, FeeModel bills slippage.
         if self._fill_date is None:
             raise ValueError(
