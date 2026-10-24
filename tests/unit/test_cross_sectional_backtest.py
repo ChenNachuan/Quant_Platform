@@ -443,6 +443,8 @@ class TestMainChainRealBroker:
         results = engine.run(strategy, bars, [date(2026, 1, 5)])
 
         fills = results[0]["fills"]
-        if fills and fills[0]["status"] == "REJECTED":
-            assert "reject_reason" in fills[0]
-            assert "settlement" in fills[0]["reject_reason"]
+        # Unconditional on purpose: a guard here would let a regression to
+        # FILLED skip every assertion and still report green.
+        assert len(fills) == 1
+        assert fills[0]["status"] == "REJECTED"
+        assert "settlement" in fills[0].get("reject_reason", "")
