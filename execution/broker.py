@@ -110,6 +110,7 @@ class SimBroker(Broker):
                 f"got {self._fill_basis!r}"
             )
         self._fill_date: date | str | None = config.get("fill_date")
+        self._decision_date: date | str | None = config.get("decision_date")
         self._risk_config: dict = config.get("risk", {})
 
     @property
@@ -119,6 +120,14 @@ class SimBroker(Broker):
     @fill_date.setter
     def fill_date(self, value: date | str | None) -> None:
         self._fill_date = value
+
+    @property
+    def decision_date(self) -> date | str | None:
+        return self._decision_date
+
+    @decision_date.setter
+    def decision_date(self, value: date | str | None) -> None:
+        self._decision_date = value
 
     @property
     def account(self) -> SimAccountAdapter:
@@ -155,7 +164,10 @@ class SimBroker(Broker):
                 self._settle(o, price)
             except (ValueError, TypeError) as exc:
                 logger.warning("settlement failed for %s: %s", o.get("ticker"), exc)
-                results.append({**o, "status": "REJECTED"})
+                results.append({
+                    **o, "status": "REJECTED",
+                    "reject_reason": f"settlement: {exc}",
+                })
                 continue
 
             results.append({**o, "status": "FILLED", "fill_price": price})
@@ -174,9 +186,19 @@ class SimBroker(Broker):
     # ── internals ────────────────────────────────────────────────────────────
 
     def _lookup_fill_price(self, order: dict) -> float | None:
-        """Fill price at *fill_basis*.  Raw, never pre-skewed (kb_snapshot 2)."""
+        """Fill price at *fill_basis*.  Raw, never pre-skewed (kb_snapshot 2).
+
+        Both bases go through ``get_latest_price`` so a suspended ticker
+        yields ``None`` -> REJECTED (AC-2), never a silent fill.
+        """
         if self._fill_basis == FILL_BASIS_DECISION_CLOSE:
-            return order["limit_price"]
+            asof = self._decision_date or self._fill_date
+            if asof is None:
+                raise ValueError(
+                    "decision_date (or fill_date) is required for "
+                    "fill_basis='decision_close'"
+                )
+            return get_latest_price(self._bars, order["ticker"], asof, field="close")
         # t1_open: T+1 open via market_data — raw, FeeModel bills slippage.
         if self._fill_date is None:
             raise ValueError(

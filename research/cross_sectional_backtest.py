@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -128,6 +128,10 @@ class CrossSectionalBacktest:
 
         results: list[dict] = []
         for day in rebalance_days:
+            # Finding 2: mark holdings to the day's close before sizing so
+            # generate_orders sees a current NAV (not a stale ledger balance).
+            _mark_to_market(self._broker, bars, day)
+
             account = _BrokerAccount(self._broker)
             positions = _extract_positions(self._broker)
 
@@ -137,6 +141,9 @@ class CrossSectionalBacktest:
             # Orders from T3 (import, never re-derive) (AC-5).
             target_df = _weights_frame(weights)
             orders = generate_orders(target_df, account, account.nav, bars, day)
+
+            # Finding 1: advance the fill clock to T+1 before each submission.
+            _advance_fill_clock(self._broker, day, dates)
 
             # Fill / accounting through broker — the only path (red line 4).
             fills = self._broker.submit_orders(orders)
@@ -182,19 +189,54 @@ class _BrokerAccount:
         return self._broker.get_nav()
 
 
-def _extract_positions(broker) -> dict:
-    """Positions dict from the broker when available (SimBroker), else ``{}``.
+def _extract_positions(broker) -> dict[str, int]:
+    """Current holdings from the broker's public surface (red line 4).
 
-    The Broker ABC does not expose positions; SimBroker's account does via
-    ``ledger.positions``.  A generic Broker gets ``{}``.
+    Derived from ``broker.get_holdings()`` — the same shape for SimBroker and
+    any generic Broker, so a strategy never sees a different book live vs
+    backtest.
+    """
+    return broker.get_holdings()
+
+
+def _advance_fill_clock(broker, day: date, dates: list[date]) -> None:
+    """Set broker ``fill_date`` to T+1 and ``decision_date`` to T (Finding 1).
+
+    ``fill_date`` is the date fills execute at (open for ``t1_open``);
+    ``decision_date`` is the close used by ``decision_close``.  T+1 is the
+    next date in *dates* after *day*, falling back to calendar +1 day.
+    """
+    fill_date: date | str = day + timedelta(days=1)
+    for d in dates:
+        if d > day:
+            fill_date = d
+            break
+    if hasattr(broker, "fill_date"):
+        broker.fill_date = fill_date
+    if hasattr(broker, "decision_date"):
+        broker.decision_date = day
+
+
+def _mark_to_market(broker, bars: pd.DataFrame, day: date) -> None:
+    """Mark held positions to the day's close before sizing (Finding 2).
+
+    Updates each ledger position's ``market_value`` via ``get_latest_price``
+    at the day's close; a ticker with no bar is left at its previous mark.
+    No-op for brokers without a ledger (their ``get_nav`` is their own).
     """
     account = getattr(broker, "account", None)
     if account is None:
-        return {}
+        return
     ledger = getattr(account, "ledger", None)
     if ledger is None:
-        return {}
-    return dict(ledger.positions)
+        return
+    for ticker, pos in list(ledger.positions.items()):
+        price = get_latest_price(bars, ticker, day, field="close")
+        if price is None:
+            continue
+        new_mv = price * pos.quantity
+        if abs(new_mv - pos.market_value) > 1e-9:
+            ledger.update_position(ticker, pos.quantity, pos.avg_cost, new_mv)
 
 
 def _weights_frame(weights: dict[str, float]) -> pd.DataFrame:

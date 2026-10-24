@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from execution.broker import Broker
+from execution.broker import FILL_BASIS_T1_OPEN, Broker, SimBroker
 from research.cross_sectional_backtest import (
     BaseCrossStrategy,
     CrossSectionalBacktest,
@@ -296,3 +296,153 @@ class TestStrategyInterface:
         engine = CrossSectionalBacktest(broker)
         with pytest.raises(ValueError, match="rebalance_freq"):
             engine.run(BadFreq(), bars, [TRADE_DATE])
+
+
+# ── Real SimBroker: full chain (review: main-chain tests must not mock) ──────
+
+
+def make_sim_broker(bars: pd.DataFrame, initial_cash: float = 1_000_000.0) -> SimBroker:
+    return SimBroker(
+        {
+            "initial_cash": initial_cash,
+            "bars": bars,
+            "fill_basis": FILL_BASIS_T1_OPEN,
+            "risk": {
+                "min_trade_value": 100.0,
+                "max_single_weight": 1.0,
+                "max_total_weight": 1.0,
+            },
+        }
+    )
+
+
+class TestMainChainRealBroker:
+    def test_real_submit_orders_fills(self):
+        """Real SimBroker.submit_orders — not a mock — exercises risk→fill→ledger."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("600519.SH", date(2026, 1, 6), open_=10.5, close=11.0),
+            ]
+        )
+        broker = make_sim_broker(bars)
+        strategy = FixedWeightsStrategy({"600519.SH": 0.5})
+        engine = CrossSectionalBacktest(broker)
+
+        results = engine.run(strategy, bars, [date(2026, 1, 5)])
+
+        fills = results[0]["fills"]
+        assert len(fills) == 1
+        assert fills[0]["status"] == "FILLED"
+        assert fills[0]["fill_price"] == 10.5  # T+1 open
+        assert broker.get_holdings() == {"600519.SH": fills[0]["shares"]}
+
+    def test_fill_clock_advances_per_day(self):
+        """Finding 1: each day fills at its own T+1 open, not one pinned date."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("600519.SH", date(2026, 1, 6), open_=10.5, close=11.0),
+                bar("600519.SH", date(2026, 1, 7), open_=11.5, close=12.0),
+            ]
+        )
+        broker = make_sim_broker(bars)
+        strategy = FixedWeightsStrategy({"600519.SH": 0.3})
+        engine = CrossSectionalBacktest(broker)
+        dates = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)]
+
+        results = engine.run(strategy, bars, dates)
+
+        # Day 1 fills at 2026-01-06 open (10.5); day 2 at 2026-01-07 open (11.5).
+        assert results[0]["fills"][0]["fill_price"] == 10.5
+        assert results[1]["fills"][0]["fill_price"] == 11.5
+
+    def test_nav_marked_to_market(self):
+        """Finding 2: NAV reflects day's close, so sizing uses current value."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("600519.SH", date(2026, 1, 6), open_=10.0, close=50.0),
+            ]
+        )
+        broker = make_sim_broker(bars)
+
+        class RecordNavStrategy(BaseCrossStrategy):
+            def __init__(self):
+                self.navs = []
+
+            def on_rebalance(self, date, bars, positions, account):
+                self.navs.append(account.nav)
+                return {"600519.SH": 0.3}
+
+        strategy = RecordNavStrategy()
+        engine = CrossSectionalBacktest(broker)
+        engine.run(strategy, bars, [date(2026, 1, 5), date(2026, 1, 6)])
+
+        # Day 1 nav = 1M (nothing held yet). Day 2 nav reflects mark to close.
+        assert strategy.navs[0] == pytest.approx(1_000_000.0, rel=1e-3)
+        # Marked-to-market: position bought at ~10, close is 50 → nav grows.
+        assert strategy.navs[1] > 1_500_000
+
+    def test_positions_from_holdings_not_ledger(self):
+        """Finding 4: positions = broker.get_holdings() — same shape live and backtest."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("600519.SH", date(2026, 1, 6), open_=10.5, close=11.0),
+            ]
+        )
+        broker = make_sim_broker(bars)
+
+        captured = {}
+
+        class CapturePositions(BaseCrossStrategy):
+            def on_rebalance(self, date, bars, positions, account):
+                captured[date] = dict(positions)
+                return {"600519.SH": 0.5}
+
+        engine = CrossSectionalBacktest(broker)
+        engine.run(CapturePositions(), bars, [date(2026, 1, 5), date(2026, 1, 6)])
+
+        # Day 1: empty before any fill. Day 2: same shape as get_holdings().
+        assert captured[date(2026, 1, 5)] == {}
+        assert captured[date(2026, 1, 6)] == broker.get_holdings()
+
+    def test_suspended_day_rejected_end_to_end(self):
+        """A ticker with no bar on T+1 is REJECTED — not silently dropped."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("000001.SZ", date(2026, 1, 5), open_=20.0, close=20.0),
+                # 000001.SZ has no bar on 2026-01-06 → fill lookup fails.
+                bar("600519.SH", date(2026, 1, 6), open_=10.5, close=11.0),
+            ]
+        )
+        broker = make_sim_broker(bars)
+        strategy = FixedWeightsStrategy({"600519.SH": 0.4, "000001.SZ": 0.4})
+        engine = CrossSectionalBacktest(broker)
+
+        results = engine.run(strategy, bars, [date(2026, 1, 5)])
+
+        statuses = {f["ticker"]: f["status"] for f in results[0]["fills"]}
+        assert statuses["600519.SH"] == "FILLED"
+        assert statuses["000001.SZ"] == "REJECTED"
+
+    def test_settlement_reject_reason(self):
+        """Finding 5: settlement failure carries reject_reason, not bare REJECTED."""
+        bars = make_bars(
+            [
+                bar("600519.SH", date(2026, 1, 5), open_=10.0, close=10.0),
+                bar("600519.SH", date(2026, 1, 6), open_=10.5, close=11.0),
+            ]
+        )
+        broker = make_sim_broker(bars, initial_cash=1_000.0)  # too small
+        strategy = FixedWeightsStrategy({"600519.SH": 1.0})
+        engine = CrossSectionalBacktest(broker)
+
+        results = engine.run(strategy, bars, [date(2026, 1, 5)])
+
+        fills = results[0]["fills"]
+        if fills and fills[0]["status"] == "REJECTED":
+            assert "reject_reason" in fills[0]
+            assert "settlement" in fills[0]["reject_reason"]

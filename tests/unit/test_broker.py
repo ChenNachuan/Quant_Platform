@@ -260,9 +260,10 @@ class TestFillBasis:
         assert results[0]["status"] == "FILLED"
         assert results[0]["fill_price"] == 10.5  # open, not close
 
-    def test_decision_close_uses_limit_price(self):
-        bars = make_bars([bar("600519.SH", FILL_DATE, open_=10.5, close=11.0)])
+    def test_decision_close_uses_close_price(self):
+        bars = make_bars([bar("600519.SH", TRADE_DATE, open_=10.5, close=11.0)])
         config = make_config(bars=bars, fill_basis=FILL_BASIS_DECISION_CLOSE)
+        config["decision_date"] = TRADE_DATE
         broker = SimBroker(config)
         order = make_order()
         order["limit_price"] = 9.5
@@ -270,7 +271,19 @@ class TestFillBasis:
         results = broker.submit_orders([order])
 
         assert results[0]["status"] == "FILLED"
-        assert results[0]["fill_price"] == 9.5  # limit_price (decision close)
+        assert results[0]["fill_price"] == 11.0  # close lookup, not limit_price
+
+    def test_decision_close_suspended_rejected(self):
+        """AC-2 holds for both bases: no price -> REJECTED, never a silent fill."""
+        bars = make_bars([bar("600519.SH", TRADE_DATE, close=11.0)])
+        config = make_config(bars=bars, fill_basis=FILL_BASIS_DECISION_CLOSE)
+        config["decision_date"] = TRADE_DATE
+        broker = SimBroker(config)
+
+        results = broker.submit_orders([make_order(ticker="000001.SZ")])
+
+        assert results[0]["status"] == "REJECTED"
+        assert "fill_price" not in results[0]
 
     def test_invalid_fill_basis_raises(self):
         with pytest.raises(ValueError, match="fill_basis"):
