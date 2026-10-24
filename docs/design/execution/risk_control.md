@@ -78,5 +78,6 @@ def pre_trade_risk_check(orders, account, nav, config):
 ## 实施时定稿项
 
 - 总仓位/单日换手两条规则的检查时机（逐单累加 vs 批级汇总）与换手率口径（§66.3 骨架未展开）
-- `get_daily_volume` 数据来源（与 order_generation 的成交量来源同源，§66）
+- ~~`get_daily_volume` 数据来源（与 order_generation 的成交量来源同源，§66）~~ **已定稿** → `execution/market_data.py`（QUANT-27 Review 确认）：`get_daily_volume(bars, ticker, asof) -> float | None`。语义：当日成交**股数**（`bars_daily.volume`），停牌/NaN/负值返回 `None`（零成交量返回 `0.0`），重复 `(ticker, date)` 行 raise。
+- S7-T4 适配层结论：`account.holdings` 是 ledger positions 的派生视图（ticker → quantity），`SimAccount` 是适配层非第二本账（QUANT-28 seam 3）。
 - 涨跌停拒单的归属（源内张力照录）：§69.5 差异落层表把「涨跌停/禁做空」落 pre_trade_risk_check、§18.3 六道关② 涨跌停封板拒、§24.6/§24.7 pre_check（`strict_limit` 配置：回测默认拒/实盘可提交）都含涨跌停拒单；但 §66.3 风控七规则表未列该条（七条 = 单标的仓位/总仓位/单日换手/单笔金额/禁做空/禁 ST/流动性）。实施时定稿：七规则外另置涨跌停检查，还是并入 pre_check 序列（§66.3/§69.5/§18.3/§24）
