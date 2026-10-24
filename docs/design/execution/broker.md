@@ -78,7 +78,7 @@ class SimBroker(Broker):
 
 ## 实施时定稿项
 
-- ~~get_latest_price/get_prices 数据接口签名~~ 与 order_generation 同源待定（§66）
+- ~~get_latest_price/get_prices 数据接口签名~~ **已定稿** → `execution/market_data.py`（QUANT-27 Review 确认），与 order_generation 同源。`get_latest_price(bars, ticker, asof, field="close"|"open") -> float | None`；`get_prices(bars, tickers, asof, field) -> dict[str, float]`。撮合取 `field="open"`（T+1 开盘，gap #5 裁决 B）；严格 trade-date 等值、raw 未复权、重复行 raise。
 - QmtBroker 的方法签名（V2 再定）（§66）
 - ~~BT/VN Adapter（§24）~~ 不再需要——§66.2/§68 不用 backtrader/vnpy
 - ~~vnpy 网关子包按实际账户选（CTP/IB）~~ 不再需要——§66.2 不用 backtrader/vnpy
