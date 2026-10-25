@@ -262,6 +262,8 @@
 | 4 | 扣费前后对比 | `uv run pytest tests/golden/test_step4_fees.py -q` | 费用与 FeeModel 手算一致 |
 | 5 | 2020–2024 五年完整基线 | `uv run pytest tests/golden/test_step5_baseline.py -q` | metrics 落盘，且落在预期区间 |
 
+> **进度与成交价基准（S8 补注）**：步骤 1–2 **已完成**（`tests/golden/portfolio_handcalc.md` + `golden_expected_portfolio.json` + `portfolio_baseline.py`）。手算采用的成交价基准是 **决策日收盘**（无费无滑点，见 `portfolio_handcalc.md` 策略表）；步骤 3–4 走 `t1_open`（缺口 #5 裁定 B），夹具为纯收盘价、bar 取 `open(D) := close(D-1)`，故 T+1 开盘价命中同一数字 —— 夹具建模选择，不是第三种基准。组合层日期/权重时钟/指标公式见 `design/core/testing.md` 五步表下的约定块。
+
 **预期区间**（`design/ARCHITECTURE.md` §6 / `core/testing.md`）：年化 **10–15%** / 夏普 **0.8–1.2** / MDD **15–25%**。
 
 **超范围排查表**（`core/testing.md`，命中任一条 → 该步骤判 FAIL，按表定位后再跑）：
