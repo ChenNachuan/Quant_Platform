@@ -88,6 +88,52 @@ returns never enter.
 
 Full definitions: QUANT-11 description §4.1 / §4.2 / §4.3.
 
+## Portfolio layer (S8)
+
+S2-T2 closed the per-ticker layer under Option A: `golden_expected.json` keeps
+exactly `total_return`/`sharpe`/`mdd` × 5 tickers and gains no `portfolio`
+key. The portfolio layer arrived in S8 as its own step with its own files, so
+the two expected files never mix.
+
+### Fixture source
+
+The portfolio layer reuses `golden_prices.parquet` unchanged — same 5 ETF × 77
+trading days, same warmup/sample split. What is new is the expected values:
+
+| File | Content |
+|---|---|
+| `golden_expected_portfolio.json` | 3 scalars (`total_return`, `sharpe`, `mdd`) at 6 dp |
+| `portfolio_baseline.py` | the pandas reference the SimBroker chain is compared against |
+| `portfolio_handcalc.md` | the independent hand-calc the expected file is transcribed from |
+
+### Rebalance schedule
+
+| Date | Role |
+|---|---|
+| `2024-12-31` | formation close — `NAV_0 = 1.0`, weights 1/5 each |
+| `2025-01-27` | month-end rebalance (last January trading day; Spring Festival) |
+| `2025-02-28` | month-end rebalance |
+| `2025-03-31` | month-end rebalance; the last sample day, so it moves no sample return |
+
+Four decision dates, never `_select_rebalance_dates("monthly")` — monthly keeps
+the *first* trading day of each month and would move every fill. Weights decide
+at a decision-date close and apply to returns strictly after it; between
+rebalances they drift with prices.
+
+### Hand-calc provenance
+
+`golden_expected_portfolio.json` is a 6 dp transcription of
+`portfolio_handcalc.md`, which derives every number from `golden_prices.parquet`
+and first principles. Per QUANT-11 Ruling 2B the expected numbers are authored
+**outside** the implementation — no portfolio implementation was consulted —
+so the comparison is not circular. A human-authored Excel, if supplied,
+supersedes the document as authority.
+
+Steps 1–2 fill at the **decision-date close** (no fees, no slippage). Steps 3–4
+fill at the **T+1 open** (gap #5 ruling B); because the fixture is closes-only
+and bars carry `open(D) := close(D-1)`, that open strikes the same number the
+hand-calc used. That is a fixture modelling choice, not a third fill basis.
+
 ## Zero-network
 
 All golden tests run under the autouse `_no_network` fixture in
