@@ -134,6 +134,70 @@ fill at the **T+1 open** (gap #5 ruling B); because the fixture is closes-only
 and bars carry `open(D) := close(D-1)`, that open strikes the same number the
 hand-calc used. That is a fixture modelling choice, not a third fill basis.
 
+## Five-year baseline (S8-T3, step 5)
+
+Step 5 runs the full 2020–2024 baseline as the V1 main-chain exit gate. It uses
+its own fixture — **not** the S2-T2 77-day `golden_prices.parquet` — with true
+opens and a five-year window.
+
+### Fixture
+
+| File | Content |
+|---|---|
+| `golden_prices_2020_2024.parquet` | 5 ETF × 1231 trading days (20 warmup + 1211 sample), open+close per ticker |
+| `fetch_five_year_etf.py` | ≤30-line akshare daily pull — the fixture's provenance |
+| `month_end_clock.py` | month-end rebalance clock (matches S8-T1 exactly) |
+| `test_step5_baseline.py` | fixture structure + month-end clock anchor assertions |
+
+### Fixture schema
+
+| Column | Type | Description |
+|---|---|---|
+| `date` | datetime | trading date |
+| `phase` | str `warmup` / `sample` | NAV measurement boundary |
+| `510300.SH.open` … `159915.SZ.open` | float | daily open (true opens, not `close(D-1)`) |
+| `510300.SH.close` … `159915.SZ.close` | float | daily close |
+
+Warmup: last 20 trading days before `2020-01-02` (fetch from `2019-11-01`
+guarantees them). Sample: `2020-01-02` … `2024-12-31`. `NAV_0 = 1.0` at close
+of the last warmup day.
+
+### Data basis (O1 — settled)
+
+| Item | Rule |
+|---|---|
+| Route | akshare daily direct — `ak.fund_etf_hist_em(symbol, period="daily", start_date="20191101", end_date="20241231", adjust="hfq")`, 5 calls |
+| Not | 5-minute aggregation (does not reach 2020; red line 6 wants ≤30-line akshare) |
+| Adjustment | 后复权 `adjust="hfq"` so returns include ETF distributions; qfq/hfq give identical returns |
+| Splice | **No splice** with the S2-T2 fixture — shared = universe, clock, formulas, T+1-open basis; never price levels |
+| Opens | **True opens** — `open(D) := close(D-1)` does not carry over from the 77-day fixture |
+| Network | Tests are zero-network; the fixture is the artifact, the fetch script is its provenance |
+
+### Month-end clock (O2 — settled, matches S8-T1 exactly)
+
+Decision dates = formation close (last warmup day) + **the last trading day of
+every calendar month** in the NAV window (max trading date per month). Never
+`_select_rebalance_dates("monthly")` — that keeps first trading days and moves
+every fill. Weights decide at a decision close and apply to returns strictly
+after it; between rebalances they drift; each month-end resets to 1/5.
+
+Hand anchors asserted in `test_step5_baseline.py`:
+
+| Date | Role |
+|---|---|
+| `2019-12-31` | formation close (last warmup day) |
+| `2020-01-23` | month-end (last January trading day; Spring Festival) |
+| `2020-02-28` | month-end (last February trading day) |
+| `2024-12-31` | window end |
+
+### Re-fetch command
+
+```bash
+uv run python tests/golden/fetch_five_year_etf.py
+```
+
+Expected output: `wrote 1231 rows (20 warmup + 1211 sample)`.
+
 ## Zero-network
 
 All golden tests run under the autouse `_no_network` fixture in
