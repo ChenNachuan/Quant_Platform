@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 import pandas as pd
 
 from _common import (
     DATA_ROOT,
+    frame_from_amazing_kline,
     init_tushare,
     ticker_convert,
     write_daily,
@@ -193,24 +195,59 @@ def _apply_limit_flags(merged: pd.DataFrame, limits: pd.DataFrame) -> pd.DataFra
     return merged
 
 
+def _frame_from_staging(staging: Path) -> pd.DataFrame:
+    """Read ``amazing_pull.py``'s raw staging and map it onto the schema."""
+
+    def load(name: str) -> pd.DataFrame:
+        path = staging / name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{path} is missing — run scripts/bootstrap/amazing_pull.py first"
+            )
+        return pd.read_parquet(path)
+
+    return frame_from_amazing_kline(
+        load("kline.parquet"), load("fund_nav.parquet"), load("fund_share.parquet")
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tickers", required=True, help="comma-separated ts_codes")
-    parser.add_argument("--start", required=True, help="YYYYMMDD or YYYY-MM-DD")
-    parser.add_argument("--end", required=True, help="YYYYMMDD or YYYY-MM-DD")
+    parser.add_argument("--start", help="YYYYMMDD or YYYY-MM-DD (tushare path)")
+    parser.add_argument("--end", help="YYYYMMDD or YYYY-MM-DD (tushare path)")
     parser.add_argument("--data-root", default=None, help=f"default: {DATA_ROOT}")
+    parser.add_argument(
+        "--from-amazing",
+        metavar="STAGING_DIR",
+        default=None,
+        help="land from amazing_pull.py staging instead of calling tushare",
+    )
     args = parser.parse_args()
     tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
-    start, end = yyyymmdd(args.start), yyyymmdd(args.end)
 
-    pro = init_tushare()
-    frames: list[pd.DataFrame] = []
-    for ts_code in tickers:
-        frame, evidence = build_frame(pro, ts_code, start, end)
-        print(f"  {ts_code}: {evidence}")
-        frames.append(frame)
+    if args.from_amazing is not None:
+        combined = _frame_from_staging(Path(args.from_amazing))
+        covered = set(combined["ticker"])
+        unknown = [t for t in tickers if t not in covered]
+        if unknown:
+            raise RuntimeError(
+                f"staging has no bars for {unknown}; it only holds "
+                f"{sorted(covered)} — re-run amazing_pull.py with the full list"
+            )
+    else:
+        if not args.start or not args.end:
+            parser.error("--start and --end are required unless --from-amazing is set")
+        start, end = yyyymmdd(args.start), yyyymmdd(args.end)
 
-    combined = pd.concat(frames, ignore_index=True)
+        pro = init_tushare()
+        frames: list[pd.DataFrame] = []
+        for ts_code in tickers:
+            frame, evidence = build_frame(pro, ts_code, start, end)
+            print(f"  {ts_code}: {evidence}")
+            frames.append(frame)
+        combined = pd.concat(frames, ignore_index=True)
+
     written = write_daily(combined, "bars_daily", args.data_root)
     print(f"wrote {len(combined)} rows across {len(written)} day files")
     for path in written[:5]:

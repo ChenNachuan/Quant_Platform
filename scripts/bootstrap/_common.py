@@ -169,6 +169,125 @@ def _to_int64(series: pd.Series, name: str, table_name: str) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
+# AmazingData staging -> schema frames
+# ---------------------------------------------------------------------------
+# ``amazing_pull.py`` drops the source's own frames under
+# ``data_platform/raw/amazingdata/``.  These helpers are the whole of the
+# source -> schema mapping, so the unit conversions live in exactly one place
+# per source.  Measured units (``task/probe_amazing_quant35.log``): AmazingData
+# ``volume`` is 股 and ``amount`` is 元, i.e. already the storage unit — unlike
+# tushare (手 / 千元) there is no scaling here.  ``FLOAT_SHARE`` is 万份.
+
+
+def frame_from_amazing_calendar(cal: pd.DataFrame) -> pd.DataFrame:
+    """Staging ``calendar.parquet`` -> the one-column calendar table."""
+    if "cal_date" not in cal.columns:
+        raise ValueError(
+            f"amazing calendar staging missing cal_date: {list(cal.columns)}"
+        )
+    return pd.DataFrame({"trade_date": _ymd_int_to_date(cal["cal_date"])})
+
+
+def frame_from_amazing_kline(
+    kline: pd.DataFrame,
+    nav: pd.DataFrame,
+    share: pd.DataFrame,
+) -> pd.DataFrame:
+    """Staging kline + fund_nav + fund_share -> bars_daily column names.
+
+    ``adjfactor`` comes from ``get_fund_nav``'s ``NAV_ADJ_FACTOR`` — the only
+    adjustment source this vendor exposes.  It is written **as measured**, not
+    renormalized: ``data_api._apply_adjustment`` divides by ``adj_latest`` /
+    ``adj_first``, so both ``qfq`` and ``hfq`` are invariant to its scale.
+
+    ``turnover`` follows AC-A2: ``amount / float_market_cap``, with the cap
+    being ``FLOAT_SHARE`` (万份 -> 份) priced at that day's close.  When the
+    share table has no row for a day the turnover is NaN, never 0.
+
+    ``get_dividend`` / ``get_right_issue`` return 0 rows for the golden ETFs
+    over 1990-2025, and kline carries no limit prices, so ``suspend`` and both
+    limit flags are written ``False`` — a **source limitation, not a market
+    fact**.  Do not reason about price limits from these columns.
+    """
+    for name, frame in (("kline", kline), ("fund_nav", nav), ("fund_share", share)):
+        if frame is None or frame.empty:
+            raise ValueError(f"amazing staging {name} is empty")
+
+    bars = pd.DataFrame(
+        {
+            "ticker": kline["code"].map(ticker_convert),
+            "trade_date": pd.to_datetime(kline["kline_time"]).dt.date,
+            "open": pd.to_numeric(kline["open"], errors="coerce").astype("float64"),
+            "high": pd.to_numeric(kline["high"], errors="coerce").astype("float64"),
+            "low": pd.to_numeric(kline["low"], errors="coerce").astype("float64"),
+            "close": pd.to_numeric(kline["close"], errors="coerce").astype("float64"),
+            "volume": pd.to_numeric(kline["volume"], errors="coerce"),
+            "amount": pd.to_numeric(kline["amount"], errors="coerce").astype("float64"),
+        }
+    )
+
+    factors = _amazing_series(nav, "MARKET_CODE", "PRICE_DATE", "NAV_ADJ_FACTOR")
+    bars["adjfactor"] = _lookup(bars, factors, "adjfactor")
+    if bars["adjfactor"].isna().any():
+        missing = bars.loc[bars["adjfactor"].isna(), "trade_date"].head(5).tolist()
+        raise ValueError(
+            f"NAV_ADJ_FACTOR missing for {int(bars['adjfactor'].isna().sum())} bar "
+            f"day(s), e.g. {missing}; adjfactor is non-nullable and is not fabricated"
+        )
+
+    float_shares = _amazing_series(share, "MARKET_CODE", "CHANGE_DATE", "FLOAT_SHARE")
+    cap = _lookup(bars, float_shares, "float_share") * 1e4 * bars["close"]
+    bars["turnover"] = bars["amount"] / cap
+
+    bars["suspend"] = False
+    bars["is_limit_up"] = False
+    bars["is_limit_down"] = False
+    bars["quality_flag"] = 0
+    return bars
+
+
+def _amazing_series(
+    frame: pd.DataFrame, code_col: str, date_col: str, value_col: str
+) -> pd.Series:
+    """Key a staging column by ``(ticker, trade_date)`` for lookup."""
+    if not {code_col, date_col, value_col}.issubset(frame.columns):
+        raise ValueError(
+            f"amazing staging missing {[code_col, date_col, value_col]}: "
+            f"{list(frame.columns)}"
+        )
+    keyed = pd.DataFrame(
+        {
+            "ticker": frame[code_col].map(ticker_convert),
+            "trade_date": _ymd_int_to_date(frame[date_col]),
+            "value": pd.to_numeric(frame[value_col], errors="coerce"),
+        }
+    )
+    dupes = keyed.duplicated(subset=["ticker", "trade_date"]).sum()
+    if dupes:
+        raise ValueError(
+            f"amazing staging has {dupes} duplicate (ticker, trade_date) rows"
+        )
+    return keyed.set_index(["ticker", "trade_date"])["value"]
+
+
+def _lookup(bars: pd.DataFrame, keyed: pd.Series, label: str) -> pd.Series:
+    index = pd.MultiIndex.from_arrays([bars["ticker"], bars["trade_date"]])
+    values = keyed.reindex(index)
+    values.index = bars.index
+    return values.astype("float64").rename(label)
+
+
+def _ymd_int_to_date(series: pd.Series) -> pd.Series:
+    """``20250228`` int / str -> ``datetime.date``."""
+    text = pd.to_numeric(series, errors="coerce")
+    if text.isna().any():
+        raise ValueError(
+            f"non-numeric YYYYMMDD in amazing staging: {series.head(3).tolist()}"
+        )
+    return pd.to_datetime(text.astype("int64").astype(str), format="%Y%m%d").dt.date
+
+
+# ---------------------------------------------------------------------------
 # write paths
 # ---------------------------------------------------------------------------
 def table_path(
