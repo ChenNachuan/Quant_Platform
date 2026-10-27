@@ -26,6 +26,7 @@ dependencies = [
     "polars>=1.0.0",
     "pandera>=0.34.1",
     "pyyaml>=6.0.0",
+    "tushare>=1.4.29",
 ]
 
 [tool.uv.sources]
