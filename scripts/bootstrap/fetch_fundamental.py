@@ -35,11 +35,14 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> pd.DataFrame:
             f"daily_basic — it is stock-only, like `daily`)"
         )
     out = raw.copy()
-    out["ticker"] = out["ts_code"].map(ticker_convert)
     out["trade_date"] = pd.to_datetime(
         out["trade_date"].astype(str), format="%Y%m%d"
     ).dt.date
+    # Rename first, then validate the renamed column.  Mapping ``ts_code`` into
+    # a new ``ticker`` before this rename would leave two ``ticker`` columns
+    # and ``align_schema`` refuses the duplicate.
     out = out.rename(columns=_RENAME)
+    out["ticker"] = out["ticker"].map(ticker_convert)
 
     out["total_market_cap"] = pd.to_numeric(out["total_mv"]) * _CAP_SCALE
     out["float_market_cap"] = pd.to_numeric(out["circ_mv"]) * _CAP_SCALE

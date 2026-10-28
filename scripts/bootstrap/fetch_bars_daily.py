@@ -36,11 +36,15 @@ from _common import (
     yyyymmdd,
 )
 
-#: Column renames from tushare frame -> BARS_DAILY_SCHEMA names.
+#: Column renames applied to the raw bar frame before the adj merge.
+#:
+#: ``adj_factor`` is deliberately absent: the merge that produces that column
+#: runs after this rename, and renaming a column that does not exist yet is a
+#: no-op — the frame kept ``adj_factor`` and ``align_schema`` then refused the
+#: missing required ``adjfactor``.  It is renamed after the merge instead.
 _RENAME = {
     "ts_code": "ticker",
     "vol": "volume",
-    "adj_factor": "adjfactor",
 }
 
 
@@ -121,7 +125,11 @@ def _turnover(bars: pd.DataFrame, basic: pd.DataFrame | None) -> pd.Series:
     """
     if basic is None or basic.empty or "circ_mv" not in basic.columns:
         return pd.Series(float("nan"), index=bars.index, dtype="float64")
-    cap = basic.set_index("trade_date")["circ_mv"]
+    # ``basic["trade_date"]`` is tushare's YYYYMMDD int; ``bars["trade_date"]``
+    # is already a datetime.date.  Keying the cap on the raw int makes every
+    # lookup miss and the whole turnover column silently NaN.
+    keyed = basic.assign(trade_date=_to_date(basic["trade_date"]))
+    cap = keyed.set_index("trade_date")["circ_mv"]
     market_cap = pd.to_numeric(bars["trade_date"].map(cap), errors="coerce")
     return bars["amount"] / (market_cap * 1e4)
 
@@ -137,9 +145,12 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> tuple[pd.DataFrame, 
     )
 
     out = bars.copy()
-    out["ticker"] = out["ts_code"].map(ticker_convert)
     out["trade_date"] = _to_date(out["trade_date"])
+    # Rename first, then validate the renamed column.  Mapping ``ts_code`` into
+    # a new ``ticker`` before this rename would leave two ``ticker`` columns
+    # and ``align_schema`` refuses the duplicate.
     out = out.rename(columns=_RENAME)
+    out["ticker"] = out["ticker"].map(ticker_convert)
     # Unit conversions into the storage schema's units (storage_schema.md §55.2
     # + test_storage_schema fixtures): volume is 股, amount is 元.
     out["volume"] = (pd.to_numeric(out["volume"]) * 100).round().astype("int64")
@@ -152,8 +163,10 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> tuple[pd.DataFrame, 
         on="trade_date",
         how="left",
     )
-    if merged["adj_factor"].isna().any():
-        raise RuntimeError(f"{ts_code}: adj_factor missing for some days; not writing")
+    # Renamed here, not in _RENAME — the merge above is what creates the column.
+    merged = merged.rename(columns={"adj_factor": "adjfactor"})
+    if merged["adjfactor"].isna().any():
+        raise RuntimeError(f"{ts_code}: adjfactor missing for some days; not writing")
 
     merged["turnover"] = _turnover(merged, basic)
     merged["suspend"] = False
