@@ -19,7 +19,7 @@ cd "$(dirname "$0")/../.."
 
 TICKERS="510300.SH,510500.SH,518880.SH,511010.SH,159915.SZ"
 START="2024-12-01"
-END="2025-03-01"
+END="2025-03-31"
 STAGING="data_platform/raw/amazingdata"
 SOURCE="${SOURCE:-amazingdata}"
 PYTHON="${PYTHON:-uv run python}"

@@ -17,7 +17,7 @@ Adapter 落地后这批脚本可整体替换，不是浪费。
 
 | | AmazingData（默认） | tushare（`SOURCE=tushare`） |
 | --- | --- | --- |
-| ETF 日线 | `MarketData.query_kline` ✅ 实测 290 行 | `fund_daily` ❌ 无权限 |
+| ETF 日线 | `MarketData.query_kline` ✅ 实测 395 行 | `fund_daily` ❌ 无权限 |
 | 复权因子 | `InfoData.get_fund_nav` 的 `NAV_ADJ_FACTOR` ✅ | `fund_adj` ❌ 无权限 |
 | 流通份额 | `InfoData.get_fund_share` 的 `FLOAT_SHARE` ✅ | `daily_basic` 只覆盖股票 ❌ |
 | 交易日历 | `BaseData.get_calendar` ✅（全市场统一） | `trade_cal` ✅，配额 1 次/小时 |
@@ -49,7 +49,7 @@ SOURCE=tushare bash scripts/bootstrap/run_golden_sample.sh
 docker compose run --rm --no-deps amazingdata \
   python3 /opt/project/scripts/bootstrap/amazing_pull.py \
   --tickers 510300.SH,510500.SH,518880.SH,511010.SH,159915.SZ \
-  --start 2024-12-01 --end 2025-03-01 \
+  --start 2024-12-01 --end 2025-03-31 \
   --staging /opt/project/data_platform/raw/amazingdata
 uv run python scripts/bootstrap/fetch_calendar.py --exchange SSE --from-amazing data_platform/raw/amazingdata
 uv run python scripts/bootstrap/fetch_bars_daily.py --tickers 510300.SH,… --from-amazing data_platform/raw/amazingdata
@@ -100,7 +100,7 @@ data_platform/asset/bars_daily/2024-12-12.parquet
 data_platform/asset/bars_daily/2024-12-13.parquet
 
 $ find data_platform -name '*.parquet' | wc -l
-63      # 58 个 bars_daily + 1 个 calendar + 4 个 raw staging
+84      # 79 个 bars_daily + 1 个 calendar + 4 个 raw staging
 
 $ find data_platform/raw -name '*.parquet' | sort
 data_platform/raw/amazingdata/calendar.parquet
@@ -109,8 +109,13 @@ data_platform/raw/amazingdata/fund_share.parquet
 data_platform/raw/amazingdata/kline.parquet
 ```
 
-行数：`bars_daily` **290 行**（5 只 × 58 个交易日，每日一文件 5 行），`calendar`
-**58 行**，合计 348。`SCHEMA["bars_daily"]` / `SCHEMA["calendar"]` 全量 validate 通过。
+行数：`bars_daily` **395 行**（5 只 × 79 个交易日，每日一文件 5 行），`calendar`
+**79 行**，合计 474。`SCHEMA["bars_daily"]` / `SCHEMA["calendar"]` 全量 validate 通过。
+
+窗口取 `2024-12-01 .. 2025-03-31`，不是到 2025-03-01：黄金样本链条消费的是
+`2024-12-04 .. 2025-03-31`（77 个交易日，见 `tests/golden/README.md`），截止到
+2025-03-01 会少 2025-03-03..03-31 共 21 个采样日。`tests/golden/test_golden.py`
+的 `TestLandedBarsCoverFixture` 现在把落盘窗口和 fixture 绑在一起，窗口短了会红。
 
 ## turnover 口径（AC-A2）
 
@@ -144,14 +149,14 @@ AmazingData 的单位是实测的，不是查表来的：`510300.SH` 2024-12-02 
 
 **ETF 的 `float_market_cap` 在 AmazingData 路径下取得到**：`InfoData.get_fund_share`
 的 `FLOAT_SHARE`（万份）× 1e4 × 当日 `close`。所以黄金样本 5 只 ETF 的 `turnover` 是
-实算值，不是 NaN。实测分布（290 行）：
+实算值，不是 NaN。实测分布（395 行）：
 
 ```
-min     0.008164
-25%     0.018327
-50%     0.034355
-75%     0.062990
-max     0.924333
+min     0.007143
+25%     0.016956
+50%     0.033093
+75%     0.060665
+max     1.011280
 ```
 
 tushare 路径下 `daily_basic` 只覆盖股票，ETF 的 `turnover` 仍是 NaN —— 保留这个回退
@@ -220,7 +225,7 @@ backward hfq = raw × adj / adj_first
 **两种复权都把 `adjfactor` 的常数尺度约掉了**，所以 `NAV_ADJ_FACTOR` 是 0.447898
 还是 1.0 不影响任何一条复权价。相对价格与收益率因此是对的。
 
-实测 `NAV_ADJ_FACTOR`（58 个交易日，5 只 ETF）：
+实测 `NAV_ADJ_FACTOR`（79 个交易日，5 只 ETF）：
 
 | ticker | 取值个数 | min | max | 含义 |
 | --- | --- | --- | --- | --- |

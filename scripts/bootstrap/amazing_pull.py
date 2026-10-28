@@ -4,7 +4,7 @@ Runs **inside** the amazingdata container — the SDK is only installed there::
 
     docker compose run --rm --no-deps amazingdata \\
         python3 /opt/project/scripts/bootstrap/amazing_pull.py \\
-        --tickers 510300.SH,... --start 2024-12-01 --end 2025-03-01 \\
+        --tickers 510300.SH,... --start 2024-12-01 --end 2025-03-31 \\
         --staging /opt/project/data_platform/raw/amazingdata
 
 Writes the source's own frames (source column names, source units) with plain
