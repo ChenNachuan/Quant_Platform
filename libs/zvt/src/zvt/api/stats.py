@@ -194,7 +194,7 @@ def get_top_performance_entities(
         filters=entity_filters,
     )
     if not filter_entities:
-        logger.warning(f"no entities selected")
+        logger.warning("no entities selected")
         return None, None
 
     if not kdata_filters:
@@ -458,10 +458,10 @@ def get_top_entities(
     :param show_name: show entity name
     :return:
     """
-    if type(method) == str:
+    if isinstance(method, str):
         method = WindowMethod(method)
 
-    if type(return_type) == str:
+    if isinstance(return_type, str):
         return_type = TopType(return_type)
 
     if show_name:

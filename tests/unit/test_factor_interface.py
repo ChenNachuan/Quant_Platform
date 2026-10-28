@@ -275,7 +275,10 @@ class TestFactorDefaults:
         assert MinimalFactor.description == ""
         assert MinimalFactor.category == "custom"
         assert MinimalFactor.frequency == "daily"
-        assert MinimalFactor.asset_types == ["equity"]
+        # The default is immutable: a class-level mutable default is shared
+        # by every subclass, so one `append` would rewrite the asset-family
+        # selector for every factor at once.
+        assert MinimalFactor.asset_types == ("equity",)
         assert MinimalFactor.version == "1.0"
 
     def test_subclass_overrides(self):
@@ -399,8 +402,14 @@ class TestFactorMeta:
         assert meta["description"] == ""
         assert meta["category"] == "custom"
         assert meta["frequency"] == "daily"
-        assert meta["asset_types"] == ["equity"]
+        assert meta["asset_types"] == ("equity",)
         assert meta["version"] == "1.0"
+
+    def test_default_asset_types_cannot_be_mutated(self):
+        """Regression: a shared mutable default is a data-routing hazard."""
+        assert isinstance(Factor.asset_types, tuple)
+        with pytest.raises(AttributeError):
+            Factor.asset_types.append("futures")
 
     def test_exactly_six_fields(self):
         meta = factor_meta(Momentum20D)

@@ -13,6 +13,7 @@ See :data:`TABLE_MAP`.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
@@ -104,6 +105,8 @@ class DataAPI:
     In-memory connection (no ``.duckdb`` file).  One instance per process;
     DuckDB connections are not process-safe.  Threads within one process may
     share an instance — DuckDB is thread-safe and uses all available CPUs.
+    Connection *lifecycle* is not free-threaded though: ``reconnect`` replaces
+    ``_conn``, so it and ``close`` serialize on ``_conn_lock``.
     """
 
     def __init__(
@@ -114,6 +117,9 @@ class DataAPI:
     ) -> None:
         self._root = Path(data_root)
         self._statement_timeout = statement_timeout
+        # RLock, not Lock: the retry path in `_run` holds the lock and then
+        # calls `reconnect()`, which takes it again.
+        self._conn_lock = threading.RLock()
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect()
         self._apply_timeout()
         self._views_registered = False
@@ -140,40 +146,81 @@ class DataAPI:
         if not self._root.exists():
             logger.debug("data_root %s does not exist; no views registered", self._root)
             return
+        # Under the same lock as every other connection user: running a
+        # statement invalidates an unconsumed cursor, so a concurrent
+        # `register_views` could interleave with an in-flight fetch.
+        with self._conn_lock:
+            self._register_views_locked()
+
+    def _register_views_locked(self) -> None:
         for entry in sorted(self._root.iterdir()):
             if not entry.is_dir():
                 continue
             glob = entry / "*.parquet"
-            if not glob.parent.exists():
+            # DuckDB binds `read_parquet` at CREATE VIEW time and raises
+            # `IO Error: No files found` on a zero match. One legitimately
+            # empty table directory — e.g. `asset/fundamental/` created before
+            # its first write lands — would otherwise abort registration, and
+            # since `__enter__` calls this, every `load_bars()` on that root
+            # would fail even though the other tables hold data.
+            if not any(entry.glob("*.parquet")):
+                logger.debug("no parquet files under %s; no view registered", entry)
                 continue
+            # Every other value in this module goes through _sql_literal /
+            # _validate_identifier. A quote in `data_root` or a directory named
+            # `bars-daily` / `my data` would otherwise be a syntax error, and
+            # because `__enter__` calls this, one odd directory under the root
+            # breaks every `load_bars()` on it.
             self._conn.execute(
-                f"CREATE OR REPLACE VIEW {entry.name} AS "
-                f"SELECT * FROM read_parquet('{glob}', "
+                f"CREATE OR REPLACE VIEW {_validate_identifier(entry.name)} AS "
+                f"SELECT * FROM read_parquet({_sql_literal(str(glob))}, "
                 f"union_by_name=true, hive_partitioning=false)"
             )
         self._views_registered = True
 
     # -- query ---------------------------------------------------------------
+    def _run(self, sql: str, fetch, profile: bool = False):
+        """Execute *sql* under the connection lock, retrying once on reconnect.
+
+        One path for both entry points. The lock is held across the execute so
+        another thread's `reconnect()` cannot close the connection mid-query,
+        and it is re-entrant because the retry below calls `reconnect()`.
+
+        *fetch* materializes the cursor **inside** the lock. Running any other
+        statement on the connection — including the profiling pragma in the
+        cleanup below — invalidates an unconsumed cursor, so the result has to
+        be pulled out before that happens.
+
+        Returns ``(result, elapsed_seconds)``.
+        """
+        with self._conn_lock:
+            try:
+                if profile:
+                    self._conn.execute("PRAGMA enable_profiling")
+                t0 = time.perf_counter()
+                result = fetch(self._conn.execute(sql))
+                return result, time.perf_counter() - t0
+            except duckdb.ConnectionException:
+                # Jupyter long-session reconnect: one retry after reconnect.
+                logger.warning("DuckDB connection lost; reconnecting once")
+                self.reconnect()
+                if profile:
+                    self._conn.execute("PRAGMA enable_profiling")
+                t0 = time.perf_counter()
+                result = fetch(self._conn.execute(sql))
+                return result, time.perf_counter() - t0
+            finally:
+                if profile:
+                    try:
+                        self._conn.execute("PRAGMA disable_profiling")
+                    except Exception:
+                        # The connection may be the dead one we just replaced;
+                        # never let cleanup mask the original error.
+                        logger.debug("disable_profiling failed", exc_info=True)
+
     def query(self, sql: str, profile: bool = False) -> pd.DataFrame:
         """Execute *sql* and return a DataFrame.  Logs a ``[COST]`` line."""
-        try:
-            if profile:
-                self._conn.execute("PRAGMA enable_profiling")
-            t0 = time.perf_counter()
-            result = self._conn.execute(sql).fetchdf()
-            elapsed = time.perf_counter() - t0
-        except duckdb.ConnectionException:
-            # Jupyter long-session reconnect: one retry after reconnect.
-            logger.warning("DuckDB connection lost; reconnecting once")
-            self.reconnect()
-            if profile:
-                self._conn.execute("PRAGMA enable_profiling")
-            t0 = time.perf_counter()
-            result = self._conn.execute(sql).fetchdf()
-            elapsed = time.perf_counter() - t0
-        finally:
-            if profile:
-                self._conn.execute("PRAGMA disable_profiling")
+        result, elapsed = self._run(sql, lambda c: c.fetchdf(), profile)
         level = logging.INFO
         if elapsed > 30:
             level = logging.CRITICAL
@@ -187,10 +234,8 @@ class DataAPI:
         return result
 
     def query_arrow(self, sql: str) -> pa.Table:
-        """Execute *sql* and return a PyArrow table."""
-        t0 = time.perf_counter()
-        result = self._conn.execute(sql).to_arrow_table()
-        elapsed = time.perf_counter() - t0
+        """Execute *sql* and return a PyArrow table. Same retry as `query`."""
+        result, elapsed = self._run(sql, lambda c: c.to_arrow_table())
         logger.info("[COST] time=%.3fs rows=%d sql=%s", elapsed, result.num_rows, sql[:200])
         return result
 
@@ -199,18 +244,23 @@ class DataAPI:
         """Recreate the in-memory connection and re-register views.
 
         For Jupyter kernels where the old connection has gone stale.
+        Serialized: threads share one instance (see the class docstring), and
+        closing the connection under a thread that is mid-`execute` produces
+        sporadic failures that no one can reproduce on demand.
         """
-        try:
-            self._conn.close()
-        except Exception:
-            pass
-        self._conn = duckdb.connect()
-        self._apply_timeout()
-        if self._views_registered:
-            self.register_views()
+        with self._conn_lock:
+            try:
+                self._conn.close()
+            except Exception:
+                logger.debug("error closing stale DuckDB connection", exc_info=True)
+            self._conn = duckdb.connect()
+            self._apply_timeout()
+            if self._views_registered:
+                self.register_views()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._conn_lock:
+            self._conn.close()
 
     def __enter__(self) -> DataAPI:
         self.register_views()
@@ -238,10 +288,25 @@ def _validate_identifier(name: str) -> str:
     return name
 
 
-def _symbol_filter(symbol: str | list[str] | None) -> str:
+def _symbol_list(symbol: str | list[str] | None) -> list[str]:
+    """Normalize a ticker filter. ``None`` means "no filter"; [] raises.
+
+    An **empty** list is not the same as ``None``: it means "nothing was
+    selected", and silently widening it to "everything" turns an empty
+    watchlist into a full-universe pull — a silent wrong result (and, on
+    minute data, an OOM).
+    """
     if symbol is None:
-        return ""
+        return []
     symbols = [symbol] if isinstance(symbol, str) else list(symbol)
+    if not symbols:
+        raise ValueError("symbol list is empty; pass None to load all")
+    return [str(s) for s in symbols]
+
+
+def _symbol_filter(symbol: str | list[str] | None) -> str:
+    """SQL predicate for a ticker filter; empty string when unfiltered."""
+    symbols = _symbol_list(symbol)
     if not symbols:
         return ""
     joined = ", ".join(_sql_literal(s) for s in symbols)
@@ -254,7 +319,6 @@ def _build_daily_sql(
     end: str,
     symbol: str | list[str] | None,
     fields: list[str] | None,
-    freq: str = "daily",
 ) -> str:
     """Build the SELECT for a non-aggregated table (daily or raw minute)."""
     has_adj = table in ("bars_daily", "continuous")
@@ -268,6 +332,13 @@ def _build_daily_sql(
         if col == "adjfactor":
             if has_adj:
                 select_parts.append("adjfactor")
+            elif fields is not None:
+                # Explicitly requested and the table has none. Silently
+                # dropping it collapses `fields=["adjfactor"]` to a bare
+                # `SELECT date, ticker` — "no such column" disguised as success.
+                raise ValueError(
+                    f"field 'adjfactor' is not available in table {table!r}"
+                )
             continue
         select_parts.append(_validate_identifier(col))
     if fields is None and has_adj:
@@ -278,15 +349,13 @@ def _build_daily_sql(
     where = (
         f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
     )
-    if ticker_col == "ticker":
-        where += _symbol_filter(symbol)
-    else:
-        # continuous: dominant_contract as ticker; symbol filter applies there
-        if symbol is not None:
-            symbols = [symbol] if isinstance(symbol, str) else list(symbol)
-            if symbols:
-                joined = ", ".join(_sql_literal(s) for s in symbols)
-                where += f" AND dominant_contract IN ({joined})"
+    # One rule for both table shapes. The continuous branch used to
+    # reimplement this inline and widened an empty list to "no filter", the
+    # very bug `_symbol_filter` exists to prevent.
+    symbols = _symbol_list(symbol)
+    if symbols:
+        joined = ", ".join(_sql_literal(s) for s in symbols)
+        where += f" AND {ticker_col} IN ({joined})"
 
     cols_sql = ", ".join(select_parts)
     return (
@@ -417,6 +486,16 @@ def load_bars(
     has_adj = table in ("bars_daily", "continuous")
     is_agg = freq in _AGG_INTERVAL
 
+    # Validate the literal here, before any query. Leaving it to
+    # `_apply_adjustment` means an empty window (holiday-only range, an
+    # unpopulated view, a filtered-out symbol list) returns an empty frame for
+    # `adjust="qfq"` instead of raising — "no data" instead of "bad argument",
+    # the silent-failure shape `_symbol_list` already refuses.
+    if adjust not in ("none", "forward", "backward"):
+        raise ValueError(
+            f"unknown adjust {adjust!r}; expected 'none', 'forward', or 'backward'"
+        )
+
     if adjust != "none" and not has_adj:
         raise ValueError(
             f"adjust={adjust!r} requires adjfactor but table {table!r} has none"
@@ -434,7 +513,7 @@ def load_bars(
         if is_agg:
             sql = _build_aggregated_sql(table, start, end, symbol, effective_fields, freq)
         else:
-            sql = _build_daily_sql(table, start, end, symbol, effective_fields, freq)
+            sql = _build_daily_sql(table, start, end, symbol, effective_fields)
         df = api.query(sql)
 
         if adjust != "none" and not df.empty:
@@ -475,7 +554,7 @@ def load_bars_chunked(
     """
     if chunk_by != "month":
         raise ValueError(f"unsupported chunk_by {chunk_by!r}; only 'month' is implemented")
-    for chunk_start, chunk_end in _date_chunks(start, end, chunk_by):
+    for chunk_start, chunk_end in _date_chunks(start, end):
         df = load_bars(
             symbol, chunk_start, chunk_end,
             freq=freq, fields=fields, adjust=adjust,
@@ -485,8 +564,12 @@ def load_bars_chunked(
             yield df
 
 
-def _date_chunks(start: str, end: str, chunk_by: str) -> list[tuple[str, str]]:
-    """Split [start, end] into calendar-month (chunk_by='month') chunks."""
+def _date_chunks(start: str, end: str) -> list[tuple[str, str]]:
+    """Split [start, end] into calendar-month chunks.
+
+    Chunking mode is the caller's concern (:func:`load_bars_chunked` validates
+    ``chunk_by``); only month chunks exist.
+    """
     from datetime import date, timedelta
 
     s = date.fromisoformat(start)

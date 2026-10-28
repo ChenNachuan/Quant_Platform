@@ -133,7 +133,7 @@ class DataReader(Drawable):
         self.logger.info("load_data start")
         start_time = time.time()
         params = dict(
-            entity_size=len(self.entity_ids) if self.entity_ids != None else None,
+            entity_size=len(self.entity_ids) if self.entity_ids is not None else None,
             provider=self.provider,
             columns=self.columns,
             start_timestamp=self.start_timestamp,

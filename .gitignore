@@ -3,6 +3,12 @@
 # =============================================
 .zvt/
 data_lake/
+# write_parquet_atomic 的锁文件是常驻 inode（storage_ops.FileLock 故意不 unlink），
+# 不是残留；*.parquet 已忽略，但 *.parquet.lock 会被 `git add .` 扫进来。
+*.parquet.lock
+# 运行时审计产物（risk_audit.jsonl 等）。不加这行 `git add .` 会把
+# 测试运行时追加的审计行提交进库。
+data/execution/
 artifacts/
 期货level2五档数据/
 *.db
@@ -12,6 +18,10 @@ artifacts/
 *.hdf5
 *.feather
 *.pkl
+# The golden-sample fixture is a deliverable (S2), not runtime data. Without
+# this exemption `*.parquet` silently drops it from `git add .`, and a fresh
+# clone fails at `pd.read_parquet` with FileNotFoundError — a silent omission.
+!tests/golden/*.parquet
 
 # =============================================
 # 隐私配置与密钥

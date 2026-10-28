@@ -32,12 +32,12 @@ def to_pd_timestamp(the_time, tz=None) -> pd.Timestamp | None:
     if the_time is None:
         return None
     # treat int as milliseconds, e.g. return from js
-    if type(the_time) == int:
+    if type(the_time) is int:
         return pd.Timestamp.fromtimestamp(the_time / 1000)
 
     # treat float as seconds, e.g. return from
     # timestamp_seconds = time.time()
-    if type(the_time) == float:
+    if type(the_time) is float:
         return pd.Timestamp.fromtimestamp(the_time)
 
     return pd.Timestamp(the_time, tz=tz)
@@ -85,7 +85,7 @@ def tomorrow_date(tz=None):
 def to_date_time_str(date_time, fmt=TIME_FORMAT_DAY, tz=None):
     try:
         return arrow.get(to_pd_timestamp(date_time, tz=tz)).format(fmt)
-    except Exception as e:
+    except Exception:
         return date_time
 
 

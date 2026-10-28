@@ -49,8 +49,13 @@ src_abs="$(cd "${SRC}" && pwd -P)"
 dest_abs="$(cd "${DEST}" && pwd -P)"
 
 [[ "${src_abs}" != "${dest_abs}" ]] || die "source and destination are the same directory: ${SRC}"
-case "${dest_abs}/" in "${src_abs}/"*) die "destination is inside source: ${DEST}" ;; esac
-case "${src_abs}/" in "${dest_abs}/"*) die "source is inside destination: ${SRC}" ;; esac
+# `${path%/}/` so a root path maps to `/`, not `//`: with `/` the bare
+# `${path}/` prefix becomes `//` and the glob can never match, silently
+# disabling the guard for the single most destructive argument.
+src_prefix="${src_abs%/}/"
+dest_prefix="${dest_abs%/}/"
+case "${dest_prefix}" in "${src_prefix}"*) die "destination is inside source: ${DEST}" ;; esac
+case "${src_prefix}" in "${dest_prefix}"*) die "source is inside destination: ${SRC}" ;; esac
 
 # --- one list, three consumers --------------------------------------------
 # Filesystem metadata a freshly formatted external disk always carries.  Used
@@ -73,6 +78,10 @@ FS_METADATA=(
 find_skip=()    # -o -name <n> -o -name <m> ...  (joins an existing OR chain)
 find_keep=()    # ! -name <n> ! -name <m> ...    (implicit AND)
 rsync_excludes=(--exclude='*.tmp' --exclude='*.lock')
+# `*.tmp` / `*.lock` are excluded by the counters and by rsync, so the DEST
+# pre-check has to drop them too or a single stray `foo.tmp` is counted as
+# content and refuses a legitimate backup.
+find_keep+=(! -name '*.tmp' ! -name '*.lock')
 for _n in "${FS_METADATA[@]}"; do
     find_skip+=(-o -name "${_n}")
     find_keep+=(! -name "${_n}")
@@ -107,7 +116,14 @@ src_count_before="$(count_files "${src_abs}")"
 # --delete.  Filesystem metadata is not content: a freshly formatted external
 # disk always carries it, and the documented deployment is exactly "rsync to a
 # mounted external disk".
-if [[ "$(find "${dest_abs}" -mindepth 1 -maxdepth 1 "${find_keep[@]}" -print | wc -l | tr -d ' ')" -gt 0 ]]; then
+# Fail closed, like `device_of` below: `find | wc -l` inside `[[ ]]` never
+# trips `set -euo pipefail`, so a readdir/permission/IO failure yields 0, the
+# condition is false and the guard is silently skipped — and `rsync --delete`
+# then runs against a destination we could not enumerate. That is the exact
+# case this guard exists to prevent.
+dest_listing="$(find "${dest_abs}" -mindepth 1 -maxdepth 1 "${find_keep[@]}" -print 2>/dev/null)" \
+    || die "cannot enumerate destination: ${DEST}"
+if [[ -n "${dest_listing}" ]]; then
     [[ -d "${dest_abs}/asset" || -d "${dest_abs}/raw" || -d "${dest_abs}/factors" ]] \
         || die "destination has content that does not look like a previous backup: ${DEST}"
 fi
@@ -153,7 +169,19 @@ echo "backup.sh: rsync ${src_abs}/ -> ${dest_abs}/"
 rsync_status=0
 rsync -a --delete "${rsync_excludes[@]}" "${src_abs}/" "${dest_abs}/" || rsync_status=$?
 case "${rsync_status}" in
-    0|23|24) ;;
+    0) ;;
+    # 24 = source vanished (live-tree churn).  23 = partial transfer, which is
+    # ALSO what genuine per-file failures return. Both are tolerated so a
+    # non-root `-a` copy is not failed by chown/chgrp and live churn is not
+    # fatal — but 23 has to be visible, or a file that failed to update leaves
+    # its previous bytes on DEST under the same name and the count check below
+    # reports a stale backup as good.
+    24)
+        echo "backup.sh: note — rsync exit 24 (source vanished during sync, live-tree churn)"
+        ;;
+    23)
+        echo "backup.sh: warning — rsync exit 23 (partial transfer); some files may not have updated" >&2
+        ;;
     *)
         echo "backup.sh: FAIL — rsync exited ${rsync_status}" >&2
         exit "${rsync_status}"
@@ -165,20 +193,44 @@ esac
 # SRC is a live Parquet tree, so both sides are sampled AFTER the sync and the
 # check is two-sided rather than an equality:
 #   dest_count >= src_count_before   nothing that existed at start was lost
-#   dest_count <= src_count          nothing appeared on DEST that SRC lacks
+#                                    (hard floor — must NOT shrink with SRC)
+#   dest_count <= src_high           nothing appeared on DEST that SRC lacks
+#                                    (warn only — live-tree churn is real)
 # A file landing mid-sync therefore cannot turn a successful backup into a
-# FAIL, while a genuinely partial sync still fails the lower bound.
+# FAIL: it shows up in the post-sync source sample and is copied on the next
+# run. What does FAIL is losing something that was there when we started.
 src_count="$(count_files "${src_abs}")"
 dest_count="$(count_files "${dest_abs}")"
 
 echo "backup.sh: source files=${src_count} dest files=${dest_count} (pre-sync ${src_count_before})"
-if [[ "${dest_count}" -lt "${src_count_before}" ]]; then
-    echo "backup.sh: FAIL — destination lost files (source-before=${src_count_before} dest=${dest_count})" >&2
+# Lower bound is the PRE-SYNC count and must not collapse. Taking
+# `min(before, after)` made the floor fall with the source: an unmounted tree
+# or an over-eager cleanup drops `src_count` toward 0, `rsync --delete` has
+# already mirrored the shrunken tree, and the guard then reports OK over the
+# wreckage of the previous backup. `src_count_before` is sampled after any
+# already-finished `cleanup_expired` run (they are scheduled separately), so
+# a shrink *during* this script is not routine retention — it is the case
+# this guard exists to stop.
+src_low="${src_count_before}"
+if [[ "${dest_count}" -lt "${src_low}" ]]; then
+    echo "backup.sh: FAIL — destination lost files (pre-sync=${src_count_before} source-now=${src_count} dest=${dest_count})" >&2
+    echo "backup.sh:        the tree shrank mid-run or the transfer was partial; if cleanup_expired really ran concurrently, re-run after it finishes, otherwise investigate an unmount or a bad delete" >&2
     exit 1
 fi
-if [[ "${dest_count}" -gt "${src_count}" ]]; then
-    echo "backup.sh: FAIL — destination has files source does not (source=${src_count} dest=${dest_count})" >&2
-    exit 1
+# Upper bound uses the LARGER of the two source samples. If cleanup_expired
+# deletes files after rsync finishes but before the post-sync source count,
+# DEST legitimately still holds them and dest > src_count would misreport a
+# correct backup as a failure.
+src_high="${src_count_before}"
+if [[ "${src_count}" -gt "${src_high}" ]]; then
+    src_high="${src_count}"
+fi
+# Warn rather than fail: `--delete` already prevents DEST from holding stale
+# content, and a file that lands after the pre-sync sample, is copied, and is
+# removed before the post-sync sample is counted on DEST but in neither source
+# sample — a live-tree race must not turn a good backup into a FAIL.
+if [[ "${dest_count}" -gt "${src_high}" ]]; then
+    echo "backup.sh: warning — destination has files source does not (source-high=${src_high} dest=${dest_count}); likely live-tree churn" >&2
 fi
 
 echo "backup.sh: OK — counts match"

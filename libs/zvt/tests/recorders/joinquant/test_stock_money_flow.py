@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from zvt.domain import StockMoneyFlow, Stock
+from zvt.domain import StockMoneyFlow
 
 
 def test_stock_money_flow():

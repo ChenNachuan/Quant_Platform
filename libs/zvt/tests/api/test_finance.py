@@ -2,9 +2,9 @@ from ..context import init_test_context
 
 init_test_context()
 
-from zvt.domain import FinanceFactor, BalanceSheet, IncomeStatement, CashFlowStatement
-from zvt.contract.api import get_db_session
-from zvt.utils.time_utils import to_date_time_str
+from zvt.domain import FinanceFactor, BalanceSheet, IncomeStatement, CashFlowStatement  # noqa: E402
+from zvt.contract.api import get_db_session  # noqa: E402
+from zvt.utils.time_utils import to_date_time_str  # noqa: E402
 
 session = get_db_session(provider="eastmoney", db_name="finance")  # type: sqlalchemy.orm.Session
 

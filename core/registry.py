@@ -14,6 +14,12 @@ alphaType registration is a separate JSON double-table (S11) and is
 deliberately absent.
 """
 
+#: Class-level metadata, read with ``getattr``.  A missing attribute becomes
+#: ``None``; a callable becomes ``None`` too — the Factor contract declares
+#: ``depends_on`` as a **method**, and handing a function object back as
+#: metadata is both wrong and not JSON-serializable.  This module may not
+#: import ``research`` to call it (red line 3), so a method-valued field is
+#: reported as not-extractable rather than mis-extracted.
 META_FIELDS = [
     "name",
     "version",
@@ -106,15 +112,28 @@ def register_factor(cls):
     return FactorRegistry.register(cls)
 
 
+def _meta_value(klass: type, field: str):
+    """One metadata field, or ``None`` when it is not class data.
+
+    ``getattr`` alone returns a *method* for a field like ``depends_on`` —
+    the Factor contract declares ``def depends_on(self) -> list[str]`` — and a
+    function object in a metadata row is both wrong and not
+    JSON-serializable. A missing attribute and a method both mean "not
+    extractable here"; neither is a failure.
+    """
+    value = getattr(klass, field, None)
+    return None if callable(value) else value
+
+
 def list_factor_meta() -> list[dict]:
     """Summarise every registered factor's metadata.
 
-    Walks :class:`FactorRegistry` and pulls each field in :data:`META_FIELDS`
-    with ``getattr``; a missing attribute becomes ``None`` and does not
-    raise.  Factors number under 100, so traversal is enough.
+    Walks :class:`FactorRegistry` and pulls each field in :data:`META_FIELDS`;
+    a missing attribute or a method becomes ``None`` and does not raise.
+    Factors number under 100, so traversal is enough.
     """
     result = []
     for name in FactorRegistry.list_all():
         klass = FactorRegistry.get_class(name)
-        result.append({f: getattr(klass, f, None) for f in META_FIELDS})
+        result.append({f: _meta_value(klass, f) for f in META_FIELDS})
     return result

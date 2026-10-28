@@ -11,8 +11,7 @@ TODO:  1. 修改数据源使用 Tushare 和 AKShare 两者加载后比对无误�
 """
 
 import pandas as pd
-from typing import List, Optional, Union
-from datetime import datetime
+from typing import List, Optional
 import sys
 import logging
 from pathlib import Path
@@ -25,18 +24,17 @@ project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from infra.storage import StorageManager, ConfigLoader
+from infra.storage import StorageManager, ConfigLoader  # noqa: E402
 
 # 必须在导入 ZVT 之前加载配置，以确保 ZVT_HOME 环境变量被正确设置
 ConfigLoader.load()
 
 # 导入 ZVT 模块
-from zvt.domain import Stock1dKdata, Stock, Stock1dHfqKdata
-from zvt.contract.api import get_data
+from zvt.domain import Stock1dKdata, Stock  # noqa: E402
 # 使用相对引用，更简洁
-from engine.zvt_bridge.recorders.akshare.stock_1d_kdata_recorder import register_akshare_recorders
-from engine.zvt_bridge.recorders.akshare.stock_adj_factor_recorder import register_akshare_factor_recorder
-from engine.zvt_bridge.domain.stock_adj_factor import StockAdjFactor
+from engine.zvt_bridge.recorders.akshare.stock_1d_kdata_recorder import register_akshare_recorders  # noqa: E402
+from engine.zvt_bridge.recorders.akshare.stock_adj_factor_recorder import register_akshare_factor_recorder  # noqa: E402
+from engine.zvt_bridge.domain.stock_adj_factor import StockAdjFactor  # noqa: E402
 
 
 class ZvtDataSyncer:
@@ -103,7 +101,7 @@ class ZvtDataSyncer:
         # 2. 获取复权因子
         df_factors = None
         try:
-            logger.info(f"正在抓取复权因子 (AKShare)...")
+            logger.info("正在抓取复权因子 (AKShare)...")
             StockAdjFactor.record_data(
                 codes=codes,
                 provider='akshare',

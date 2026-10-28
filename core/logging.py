@@ -57,8 +57,13 @@ def setup_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.setLevel(level)
 
-    # Replace handlers to avoid duplicates on repeated calls.
-    root.handlers.clear()
+    # Replace handlers to avoid duplicates on repeated calls.  Close each one
+    # first: `clear()` drops the reference but the FileHandler's descriptor is
+    # only released on GC, so repeated calls leak FDs and discard a host
+    # application's handler without a flush.
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        handler.close()
 
     console = logging.StreamHandler()
     console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))

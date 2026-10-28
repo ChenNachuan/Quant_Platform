@@ -91,6 +91,20 @@ def test_pandas_matches_hand_calc() -> None:
 | 4 | 扣费前后对比 | 费用与 FeeModel 手算一致 |
 | 5 | 2020–2024 五年完整基线 | 落盘 metrics 做回归基准 |
 
+**组合层约定（步骤 3–5 共用一套口径，S8 补注）** — 五步都跑在同一夹具
+`tests/golden/golden_prices.parquet`（5 ETF × 77 个交易日）上，组合层新增
+`golden_expected_portfolio.json` 与 `tests/golden/portfolio_handcalc.md`：
+
+| 约定 | 取值 |
+|---|---|
+| 日期 | warmup `2024-12-04`~`2024-12-31`（20 日，只做动量回看，**不进 NAV**）；sample `2025-01-02`~`2025-03-31`（57 日，计量窗口） |
+| NAV 起点 | `NAV_0 = 1.0` 于 close(`2024-12-31`)，running peak 计入 `NAV_0` |
+| 调仓时钟 | 四个决策日：`2024-12-31`（建仓）+ `2025-01-27` / `2025-02-28` / `2025-03-31`（自然月末）；权重在决策日收盘定，作用于其**后**的收益；调仓间权重随价格漂移。**不是** `_select_rebalance_dates("monthly")` |
+| 权重 | 等权 1/5 each；top-5-of-5 选股是空操作（QUANT-11 裁定 1A），排名只断言存在、不改池 |
+| 成交价基准 | 步骤 1–2：决策日收盘（无费无滑点）；步骤 3–4：`t1_open`（缺口 #5 裁定 B）。夹具只有收盘价，bar 取 `open(D) := close(D-1)`，故 T+1 开盘价命中手算的决策日收盘价 —— 夹具建模选择，**不是第三种基准** |
+| 指标公式 | `total_return = NAV_T/NAV_0 - 1`（窗口复利，**非**年化）；`sharpe = mean(r_p)/std(r_p, ddof=1) × √252`（`rf = 0`）；`mdd = min(NAV_t/peak_t - 1)` |
+| 期望值 | 6 位小数（4 位会吃掉 1e-4 的 TOLERANCE 预算）；手算出处见 `portfolio_handcalc.md`（QUANT-11 裁定 2B：期望值由实现之外的人编写，人给的 Excel 优先） |
+
 预期区间：年化 10–15% / 夏普 0.8–1.2 / MDD 15–25%。超范围排查表：
 
 | 症状 | 排查方向 |

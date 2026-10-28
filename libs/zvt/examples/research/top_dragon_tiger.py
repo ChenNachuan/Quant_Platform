@@ -18,7 +18,7 @@ def top_dragon_and_tiger(data_provider="em", start_timestamp="2021-01-01", end_t
     for start_date, end_date, df in get_top_performance_by_month(
         start_timestamp=start_timestamp, end_timestamp=end_timestamp, list_days=250, data_provider=data_provider
     ):
-        pre_month_start = pre_month_start_date(start_date)
+        pre_month_start_date(start_date)
         for entity_id in df.index[:30]:
             players = get_players(
                 entity_id=entity_id,

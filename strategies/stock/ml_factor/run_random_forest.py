@@ -4,24 +4,24 @@ Random Forest Strategy Runner.
 运行 Random Forest ML 因子策略的完整流程。
 """
 import sys
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings('ignore')
+
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
+import seaborn as sns  # noqa: E402
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-import warnings
-warnings.filterwarnings('ignore')
-
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-from strategies.stock.ml_factor.config import StrategyConfig
-from strategies.stock.ml_factor.data_preprocessor import DataPreprocessor, BenchmarkDataLoader
-from strategies.stock.ml_factor.model_trainer import create_trainer
-from strategies.stock.ml_factor.backtest import BacktestEngine
-from strategies.stock.ml_factor.evaluator import (
+from strategies.stock.ml_factor.config import StrategyConfig  # noqa: E402
+from strategies.stock.ml_factor.data_preprocessor import DataPreprocessor  # noqa: E402
+from strategies.stock.ml_factor.model_trainer import create_trainer  # noqa: E402
+from strategies.stock.ml_factor.backtest import BacktestEngine  # noqa: E402
+from strategies.stock.ml_factor.evaluator import (  # noqa: E402
     ICEvaluator, BarraEvaluator, FamaMacBethEvaluator,
     FactorModelEvaluator, GRSEvaluator
 )
@@ -58,23 +58,23 @@ def main():
     backtest_engine = BacktestEngine(config.backtest)
     results = backtest_engine.run(all_predictions)
     performance_df = results['performance_df']
-    summary_stats = results['summary_stats']
+    results['summary_stats']
 
     # 保存回测结果
     performance_df.to_parquet(output_dir / 'rf_performance.parquet')
 
     # 6. Barra 检验
     barra_evaluator = BarraEvaluator(config.barra, config.data)
-    monthly_gammas = barra_evaluator.run_barra_regression(all_predictions, industry_col='industry3')
+    barra_evaluator.run_barra_regression(all_predictions, industry_col='industry3')
 
     # 7. Fama-MacBeth 检验
-    fmb_results = FamaMacBethEvaluator.run_regression(all_predictions, df)
+    FamaMacBethEvaluator.run_regression(all_predictions, df)
 
     # 8. 因子模型检验
     factor_evaluator = FactorModelEvaluator(config.data)
-    ch3_results = factor_evaluator.run_ch3_test(performance_df)
-    ch4_results = factor_evaluator.run_ch4_test(performance_df)
-    carhart_results = factor_evaluator.run_carhart_test(performance_df)
+    factor_evaluator.run_ch3_test(performance_df)
+    factor_evaluator.run_ch4_test(performance_df)
+    factor_evaluator.run_carhart_test(performance_df)
 
     # 9. GRS 检验
     factors_df = pd.read_excel(config.data.ch3_factors_path)

@@ -130,7 +130,7 @@ def get_recent_active_stocks(adjust_type=AdjustType.qfq, provider="em", recent_d
 
     df = kdata_schema.query_data(
         provider=provider,
-        filters=[kdata_schema.timestamp >= start_date, kdata_schema.is_limit_up == True],
+        filters=[kdata_schema.timestamp >= start_date, kdata_schema.is_limit_up],
         index="entity_id",
     )
     entity_ids = list(set(df["entity_id"].tolist()))
@@ -228,7 +228,7 @@ def get_player_performance(start_timestamp, end_timestamp=None, days=5, players=
             break
         close = kdata["close"]
         change_pct = (close[days] - close[0]) / close[0]
-        records.append({"entity_id": entity_id, "timestamp": timestamp, f"change_pct": change_pct})
+        records.append({"entity_id": entity_id, "timestamp": timestamp, "change_pct": change_pct})
     return pd.DataFrame.from_records(records)
 
 

@@ -68,7 +68,7 @@
 | `uv run ruff check .` | 退出码 0 |
 | `python -c "from core import types, config, logging, registry, asset_rules"` | 可导入、无副作用 |
 | `grep -rnE "(^\|[[:space:]])(import\|from)[[:space:]]+(data\|research\|execution\|ops)\b" core/` | **无输出**（红线 3）。`^` 单锚会漏掉缩进 import，必须允许行首空白；更严可换 AST 导入检查 |
-| 一致性断言 | 测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`（与 `design/execution/fee_model.md:22-23` 同源），断言 `ASSET_RULES["etf"]["stamp_tax"] is False`。与 `FeeModel._is_etf` 的**双向对拍留待 S7-T2**（FeeModel 届时才落地）。前缀表两份文档不一致，见 §7 缺口 #17——本阶段按 `fee_model.md` 的 5 元组写测试 |
+| 一致性断言 | 断言 `STAMP_TAX_EXEMPT_PREFIXES == frozenset({"50","51","56","58","15","16"})` 且 `ASSET_RULES["etf"]["stamp_tax"] is False`；测试另钉 `is_stamp_tax_exempt_prefix("501050") is True`（沪市 LOF，前缀 `50`）。与 `FeeModel._is_etf` 的**双向对拍留待 S7-T2**（FeeModel 届时才落地）。前缀表两份文档的不一致见 §7 缺口 #17。**（QUANT-18 订正：原写「测试内固定 `ETF_PREFIXES = ("51","56","58","15","16")`」与实际测试不符——测试钉的是派生集 6 项，含沪市 LOF `50`。）** |
 | `.gitignore` | 含 `config/.env`（红线 8） |
 
 ---
@@ -261,6 +261,8 @@
 | 3 | SimBroker 全链路 vs pandas | `uv run pytest tests/golden/test_step3_simbroker.py -q` | < 0.01% |
 | 4 | 扣费前后对比 | `uv run pytest tests/golden/test_step4_fees.py -q` | 费用与 FeeModel 手算一致 |
 | 5 | 2020–2024 五年完整基线 | `uv run pytest tests/golden/test_step5_baseline.py -q` | metrics 落盘，且落在预期区间 |
+
+> **进度与成交价基准（S8 补注）**：步骤 1–2 **已完成**（`tests/golden/portfolio_handcalc.md` + `golden_expected_portfolio.json` + `portfolio_baseline.py`）。手算采用的成交价基准是 **决策日收盘**（无费无滑点，见 `portfolio_handcalc.md` 策略表）；步骤 3–4 走 `t1_open`（缺口 #5 裁定 B），夹具为纯收盘价、bar 取 `open(D) := close(D-1)`，故 T+1 开盘价命中同一数字 —— 夹具建模选择，不是第三种基准。组合层日期/权重时钟/指标公式见 `design/core/testing.md` 五步表下的约定块。
 
 **预期区间**（`design/ARCHITECTURE.md` §6 / `core/testing.md`）：年化 **10–15%** / 夏普 **0.8–1.2** / MDD **15–25%**。
 
@@ -564,14 +566,14 @@
 | 7 | **`quality_filter` 参数语义与 `CLEAN=0` 自相矛盾。** 注释写「传 `QualityFlag.CLEAN` 只取干净」，但 `CLEAN=0` 时位运算恒不过滤。文档自己标注「应是『传要排除的问题位』，注释与代码不一致」。 | `design/data/dqc_severity.md`「实施时定稿项」 | S9 |
 | 8 | **DQC 规则条数口径 40 vs 44。** 来源标题写 40 条（阈值拆分 24+14+2），四维表实为 10+14+11+9=44 行。文档照录未裁决。阈值三类来源统计也与逐条表口径不一致（约 24/14/2 vs 32/12）。 | `design/data/dqc_rules.md`「条数口径注记」与「阈值三类来源」 | S9 |
 | 9 | **L13 ticker 正则与交易所覆盖不全。** L13 `^[036]\d{5}\.(SH\|SZ)$` 不含北交所 `8xxxxx`；期货 regex 含 INE，但日历只列 6 交易所（sse/szse/cffex/shfe/dce/czce）无 INE 文件。V1 股票+ETF 尚可，V3 期货会撞。 | `design/data/dqc_rules.md` L13「实施时定稿项」；`design/data/storage_schema.md` L13 regex 与日历 6 文件；`design/data/calendar_adjustment.md` INE 未出现 | S3、S9、S10 **已裁**：收敛进 `core/asset_rules.py` —— `ASSET_PREFIXES` + `EXCHANGE_MAP`（9 键含 **INE**、**GFEX**）+ `CALENDAR_EXCHANGES`，两个校验器正则用 `\Z` 尾锚。文档旧的 6 交易所清单作废。（出处：QUANT-4 / QUANT-12 §3.2） |
-| 10 | **`get_latest_price` / `get_prices` / `get_daily_volume` 数据接口签名未定。** 三个执行域模块共用的取数入口没有权威契约，两份文档同时列为「与 order_generation 同源待定」。 | `design/execution/order_generation.md`「实施时定稿项」；`design/execution/broker.md`「实施时定稿项」 | S7 |
+| 10 | **`get_latest_price` / `get_prices` / `get_daily_volume` 数据接口签名未定。** 三个执行域模块共用的取数入口没有权威契约，两份文档同时列为「与 order_generation 同源待定」。 | `design/execution/order_generation.md`「实施时定稿项」；`design/execution/broker.md`「实施时定稿项」 | S7 **已裁**：已定稿。契约 = `execution/market_data.py` 三个导出函数（QUANT-27 落地、Review 确认）。签名：`get_latest_price(bars, ticker, asof, field="close"\|"open") -> float \| None`；`get_prices(bars, tickers, asof, field="close") -> dict[str, float]`；`get_daily_volume(bars, ticker, asof) -> float \| None`。语义：严格 trade-date 等值（停牌返回 `None` 不回退）、raw 未复权、volume 股数、重复 `(ticker, date)` 行 raise。（出处：QUANT-27 / `execution/market_data.py`） |
 | 11 | **`NUMERIC_FIELDS[asset_type]` 多处引用、无处定义。** 跨源对比字段清单与修正比对字段清单都需要它，三份文档均标注「多处提及未统一定义」。 | `design/data/ingestion.md`；`design/data/data_revision.md`；`design/data/calendar_adjustment.md` | S10 |
 | 12 | **`asset_type` 跨域命名不一致。** `data_api.load_bars(..., asset_type="equity")` 与 `TABLE_MAP` 键用 `equity`；`ASSET_RULES` 键用 `stock`/`etf`；`storage_schema` 表名用 `bars_daily`。总纲 §5「跨域契约一览」未给统一枚举名。 | `design/data/data_api.md`；`design/core/asset_rules.md`；`design/data/storage_schema.md`；`design/ARCHITECTURE.md` §5 | S1、S3、S7 **已裁**：`AssetType` = 6 成员 `stock/etf/fund/bond/futures/option`。`load_bars(..., asset_type=)` 是**表族**选择器 `equity`/`futures`/`continuous`，**不是** `AssetType`；桥接走 `core.types.EQUITY_TYPES`。`continuous` 是表形态不是资产类型。（出处：QUANT-12 §3.3 / 2026-10-14 人裁） |
 | 13 | **monitoring 系统指标「数据条数偏差 ±30% HIGH」无对应告警条件。** §67.3 系统表与 §67.5 的 8 条告警条件表之间有缺口，文档自行照录未缝合。 | `design/ops/monitoring.md`「实施时定稿项」 | S12 |
 | 14 | **ensemble 权重口径两处同源未定。** `factor_combiner`「ensemble 的权重如何进 FactorCombiner」与 `ml_signal`「ensemble 权重公式（validation ICIR 归一化细节）」是同一个问题的两个入口，均未定稿。 | `design/research/factor_combiner.md`；`design/research/ml_signal.md` | S11 |
 | 15 | **`baseline_spec.py` 在仓库中不存在。** 总纲 §6 与 `core/testing.md` 都要求「保留作期货 ALSTM 策略自身回归基准」，但 `316261b` 树中 `find . -name baseline_spec.py` 无结果（`strategies/futures/alstm/` 下只有 `config.py / data.py / train.py / reporting.py / README.md`）。保留对象缺失，V3 回归基准无从谈起。 | `design/ARCHITECTURE.md` §6；`design/core/testing.md`；仓库实况 | S13、V3 |
 | 16 | **`pyproject.toml` 依赖与选型定稿表不一致。** 描述仍写 "based on ZVT, VectorBT, and Qlib"，依赖含 `zvt` / `vectorbt` / `pyqlib` / `prefect==3.6.22`；§4 定稿为 pandas 自研 + SimBroker/QmtBroker、调度 = APScheduler、三套桥接归档。属迁移收口项，本计划只登记不改。 | `pyproject.toml`；`design/ARCHITECTURE.md` §4 | S13 / M3 |
-| 17 | **ETF 免印花税前缀表两份设计文档不一致。** `fee_model.md` 写 5 元组 `("51","56","58","15","16")`；`asset_rules.md` 写「前缀（51/15/16 免印花税）」，少了 56/58。两者都自称「同源一致」，但彼此对不上；执行者照哪个写测试必须先来问。 | `design/core/asset_rules.md` 差异落层表注（前缀 51/15/16）vs `design/execution/fee_model.md` `_is_etf`（51/56/58/15/16） | S1、S7 **已裁** A：ETF 免印花税前缀 = **5 元组** `("51","56","58","15","16")`，与 `fee_model.md` 一致；`asset_rules.md` 的 `51/15/16` 说法作废。单源 = `core/asset_rules.py` 的 `STAMP_TAX_EXEMPT_PREFIXES`。（出处：QUANT-4 / 缺口 #17 裁决 A） |
+| 17 | **ETF 免印花税前缀表两份设计文档不一致。** `fee_model.md` 写 5 元组 `("51","56","58","15","16")`；`asset_rules.md` 写「前缀（51/15/16 免印花税）」，少了 56/58。两者都自称「同源一致」，但彼此对不上；执行者照哪个写测试必须先来问。 | `design/core/asset_rules.md` 差异落层表注（前缀 51/15/16）vs `design/execution/fee_model.md` `_is_etf`（51/56/58/15/16） | S1、S7 **已裁** A：免印花税前缀 = **派生集 6 项** `frozenset({"50","51","56","58","15","16"})`，成员由 `core/asset_rules.py::ASSET_PREFIXES` + `ASSET_RULES[*]["stamp_tax"]` 推出，含沪市 LOF `50`；其中 `16` 与 `50` 是 **FUND** 不是 ETF，「ETF 免印花税前缀」的说法本身不准确。单源 = `core/asset_rules.py` 的 `STAMP_TAX_EXEMPT_PREFIXES`。**（QUANT-18 订正：原写「5 元组 `("51","56","58","15","16")`」漏了沪市 LOF `50`，且把 FUND 算进 ETF；`asset_rules.md` 的 `51/15/16` 说法仍然作废。）**（出处：QUANT-4 / 缺口 #17 裁决 A，QUANT-18 订正） |
 
 ---
 
@@ -611,4 +613,4 @@
 2. `uv run ruff check .` 退出码 0。
 3. `python -c "from core import types, asset_rules"` 可导入、无副作用、无 IO。
 4. `grep -rnE "(^|[[:space:]])(import|from)[[:space:]]+(data|research|execution|ops)\b" core/` **无输出**（红线 3）。必须能命中函数体内的缩进 `from data.x import y`——实测 `^` 单锚会漏掉它，故用 `(^|[[:space:]])`。
-5. 免印花税场内基金前缀表 `STAMP_TAX_EXEMPT_LISTED_FUND_PREFIXES = ("51","56","58","15","16")` 在 `core/asset_rules.py` 单源定义并导出（含深市 LOF `16`；`design/core/asset_rules.md` 旧写的 `51/15/16` 已按缺口 #17 裁决订正），断言 `ASSET_RULES["etf"]["stamp_tax"] is False` 且前缀表逐项一致；与 `FeeModel` 的双向对拍留待 S7-T2。
+5. 免印花税前缀表以单源 `core/asset_rules.py::STAMP_TAX_EXEMPT_PREFIXES` 为准，断言 `STAMP_TAX_EXEMPT_PREFIXES == frozenset({"50","51","56","58","15","16"})` 且 `ASSET_RULES["etf"]["stamp_tax"] is False`。该集合是**派生**的——由 `ASSET_PREFIXES` + `ASSET_RULES[*]["stamp_tax"]` 推出，文档不得再手写清单当权威。含沪市 LOF `50` 与深市 LOF `16`，两者是 **FUND** 不是 ETF。与 `FeeModel` 的双向对拍留待 S7-T2。（QUANT-18 订正：删去一个代码中并不存在的常量名及其 5 元组写法，原写法漏了沪市 LOF `50`。）

@@ -4,7 +4,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from zvt import init_log
-from zvt.domain import *
+from zvt.domain import Block, BlockMoneyFlow
 from zvt.utils.recorder_utils import run_data_recorder
 
 logger = logging.getLogger(__name__)

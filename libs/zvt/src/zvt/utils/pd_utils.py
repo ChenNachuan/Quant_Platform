@@ -5,9 +5,9 @@ import pandas as pd
 
 
 def drop_continue_duplicate(s: Union[pd.Series, pd.DataFrame], col=None):
-    if type(s) == pd.Series:
+    if isinstance(s, pd.Series):
         return s[s.shift() != s]
-    if type(s) == pd.DataFrame:
+    if isinstance(s, pd.DataFrame):
         ss = s[col]
         selected = ss[ss.shift() != ss]
         return s.loc[selected.index, :]
@@ -53,9 +53,9 @@ def index_df(df, index="timestamp", inplace=True, drop=False, time_field="timest
     else:
         df = df.set_index(index, drop=drop, inplace=inplace)
 
-    if type(index) == str:
+    if isinstance(index, str):
         df = df.sort_index()
-    elif type(index) == list:
+    elif isinstance(index, list):
         df.index.names = index
         level = list(range(len(index)))
         df = df.sort_index(level=level)
@@ -63,7 +63,7 @@ def index_df(df, index="timestamp", inplace=True, drop=False, time_field="timest
 
 
 def normal_index_df(df, category_field="entity_id", time_filed="timestamp", drop=True, default_entity="entity"):
-    if type(df) == pd.Series:
+    if isinstance(df, pd.Series):
         df = df.to_frame(name="value")
 
     index = [category_field, time_filed]

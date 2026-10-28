@@ -1,0 +1,14 @@
+# Ruff configuration for Quant_Platform
+# See QUANT-29 for cleanup history
+
+target-version = "py310"
+
+# Exclude ephemeral harness scripts (not source code)
+extend-exclude = [
+    "task/",
+]
+
+[lint.per-file-ignores]
+# E402: Jupyter notebooks have cell-based structure — imports in later cells
+# are idiomatic and cannot be moved to the top of the "file".
+"**/*.ipynb" = ["E402"]

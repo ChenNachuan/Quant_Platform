@@ -50,7 +50,7 @@ def report_core_company():
                 except Exception as e:
                     email_action.send_message(
                         zvt_config["email_username"],
-                        f"report_core_company error",
+                        "report_core_company error",
                         "report_core_company error:{}".format(e),
                     )
 
@@ -69,7 +69,7 @@ def report_core_company():
             error_count = error_count + 1
             if error_count == 10:
                 email_action.send_message(
-                    zvt_config["email_username"], f"report_core_company error", "report_core_company error:{}".format(e)
+                    zvt_config["email_username"], "report_core_company error", "report_core_company error:{}".format(e)
                 )
 
 
