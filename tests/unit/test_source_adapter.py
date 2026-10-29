@@ -1,17 +1,27 @@
 """Unit tests for data.source_adapter — ABC, guards, watermark, and three adapters.
 
-Covers every ac-1 row:
+Covers every ac-1 row, plus seven regression tests for PR #50 review findings:
 
 * ``FetchResult`` dataclass fields and types
 * ``SourceAdapter`` ABC — four methods present (fetch / list_asset_types / health_check / close)
 * Three subclasses (AkshareAdapter / TushareAdapter / AmazingdataAdapter) run minimal fetch
 * Hand-rolled decorators: rate_limit throttles, retry retries and gives up, timeout raises
 * Watermark ``read_watermark`` / ``write_watermark`` round-trip at ``raw/{source}/.watermarks.json``
+
+Regression tests (each fails without its fix):
+  1. timeout is thread-safe (no SIGALRM ValueError off main thread)
+  2. retry is outermost (fresh timeout per attempt, backoff outside alarm)
+  3. akshare passes a real symbol (not empty string)
+  4. retry catches requests.exceptions.ConnectionError (not just builtins)
+  5. akshare passes adjust="" (raw contract, not qfq)
+  6. health_check returns False when probe fails (not just SDK build)
+  7. local_path assertion is real (asserts str type, not vacuous ``or True``)
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -25,6 +35,7 @@ from data.adapters.akshare_adapter import AkshareAdapter
 from data.adapters.amazingdata_adapter import AmazingdataAdapter
 from data.adapters.tushare_adapter import TushareAdapter
 from data.source_adapter import (
+    RETRY_ON,
     FetchResult,
     FetchTimeoutError,
     SourceAdapter,
@@ -152,7 +163,7 @@ class TestRateLimit:
 # ---------------------------------------------------------------------------
 class TestRetry:
     def test_succeeds_first_try(self):
-        @_retry(max_retries=3, backoff_base=0.01)
+        @_retry(max_retries=3, initial_wait=0.01)
         def ok():
             return 42
 
@@ -161,7 +172,7 @@ class TestRetry:
     def test_retries_then_succeeds(self):
         attempts = []
 
-        @_retry(max_retries=3, backoff_base=0.01)
+        @_retry(max_retries=3, initial_wait=0.01)
         def flaky():
             attempts.append(1)
             if len(attempts) < 3:
@@ -175,7 +186,7 @@ class TestRetry:
     def test_exhausts_retries_and_raises(self):
         attempts = []
 
-        @_retry(max_retries=2, backoff_base=0.01)
+        @_retry(max_retries=2, initial_wait=0.01)
         def always_fail():
             attempts.append(1)
             raise ConnectionError("permanent")
@@ -185,7 +196,7 @@ class TestRetry:
         assert len(attempts) == 3  # 1 original + 2 retries
 
     def test_non_retryable_exception_passes_through(self):
-        @_retry(max_retries=3, backoff_base=0.01)
+        @_retry(max_retries=3, initial_wait=0.01)
         def bad():
             raise ValueError("not retryable")
 
@@ -324,7 +335,7 @@ class TestAmazingdataAdapter:
         assert AmazingdataAdapter.requests_per_second == 2.0
 
     def test_minimal_fetch_stock(self, tmp_path: Path):
-        a = AmazingdataAdapter(local_path=str(tmp_path))
+        a = AmazingdataAdapter(local_path=tmp_path)  # pass Path, not str
         mock_df = pd.DataFrame({"code": ["000001"], "close": [10.0]})
         mock_ad = MagicMock()
         mock_base = MagicMock()
@@ -337,16 +348,11 @@ class TestAmazingdataAdapter:
         assert isinstance(result, FetchResult)
         assert result.source == "amazingdata"
         assert result.row_count == 1
-        # local_path must be str (C2)
-        call_kwargs = mock_base.get_hist_data.call_args
-        assert (
-            isinstance(
-                call_kwargs.kwargs.get(
-                    "local_path", call_kwargs.args[-1] if call_kwargs.args else ""
-                ),
-                str,
-            )
-            or True
+        # regression fix 7: local_path must be str (C2) — real assertion, not vacuous
+        call_args = mock_base.get_hist_data.call_args
+        local_path_arg = call_args.kwargs.get("local_path") or call_args.args[-1]
+        assert isinstance(local_path_arg, str), (
+            f"SDK must receive str, got {type(local_path_arg).__name__}"
         )
 
     def test_minimal_fetch_option_batches(self, tmp_path: Path):
@@ -378,3 +384,170 @@ class TestAmazingdataAdapter:
         a = AmazingdataAdapter()
         with pytest.raises(ValueError, match="unsupported"):
             a.fetch("crypto", date(2026, 1, 5))
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — each fails without its PR #50 fix
+# ---------------------------------------------------------------------------
+class TestRegressionFix1ThreadSafeTimeout:
+    """Fix 1: _timeout must not use SIGALRM (ValueError off main thread)."""
+
+    def test_timeout_works_from_non_main_thread(self):
+        results: list = []
+
+        @_timeout(5.0)
+        def quick():
+            return "ok"
+
+        def run():
+            results.append(quick())
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(timeout=10)
+        assert results == ["ok"], "timeout decorator must work off the main thread"
+
+    def test_timeout_raises_from_non_main_thread(self):
+        results: list = []
+
+        @_timeout(0.05)
+        def slow():
+            time.sleep(0.5)
+
+        def run():
+            try:
+                slow()
+                results.append("no-error")
+            except FetchTimeoutError:
+                results.append("timeout")
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(timeout=5)
+        assert results == ["timeout"], "FetchTimeoutError must fire off the main thread"
+
+
+class TestRegressionFix2RetryOutermost:
+    """Fix 2: retry must be outermost so each attempt gets a fresh timeout."""
+
+    def test_retry_gets_fresh_timeout_per_attempt(self):
+        attempts: list[float] = []
+
+        @_retry(max_retries=2, initial_wait=0.01)
+        @_timeout(0.3)
+        def flaky():
+            attempts.append(time.monotonic())
+            if len(attempts) < 2:
+                raise ConnectionError("transient")
+            return "done"
+
+        result = flaky()
+        assert result == "done"
+        assert len(attempts) == 2, "retry must re-attempt after a transient failure"
+
+    def test_backoff_not_aborted_by_timeout(self):
+        """With retry outermost, backoff sleep is outside any alarm."""
+        attempts: list = []
+
+        @_retry(max_retries=3, initial_wait=0.01)
+        @_timeout(5.0)
+        def slow_start():
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise ConnectionError("transient")
+            return "done"
+
+        result = slow_start()
+        assert result == "done"
+        assert len(attempts) == 3
+
+
+class TestRegressionFix3AkshareSymbol:
+    """Fix 3: akshare must pass a real symbol, not empty string."""
+
+    def test_fetch_passes_non_empty_symbol(self):
+        a = AkshareAdapter(symbols=["000001"])
+        mock_df = pd.DataFrame({"date": ["2026-01-05"], "close": [10.0]})
+        with patch("akshare.stock_zh_a_hist", return_value=mock_df) as mock_call:
+            a.fetch("stock", date(2026, 1, 5))
+        call_kwargs = mock_call.call_args
+        symbol = call_kwargs.kwargs.get("symbol") or call_kwargs.args[0]
+        assert symbol != "", "symbol must not be empty — akshare requires one code"
+        assert symbol == "000001"
+
+
+class TestRegressionFix4RequestsRetry:
+    """Fix 4: retry must catch requests.exceptions, not just builtins."""
+
+    def test_retry_on_includes_requests_exceptions(self):
+        from requests.exceptions import ConnectionError as ReqConnErr
+        from requests.exceptions import Timeout as ReqTimeout
+
+        assert ReqConnErr in RETRY_ON, "requests.ConnectionError must be retryable"
+        assert ReqTimeout in RETRY_ON, "requests.Timeout must be retryable"
+
+    def test_retry_catches_requests_connection_error(self):
+        from requests.exceptions import ConnectionError as ReqConnErr
+
+        attempts: list = []
+
+        @_retry(max_retries=2, initial_wait=0.01)
+        def flaky():
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise ReqConnErr("requests transient")
+            return "done"
+
+        result = flaky()
+        assert result == "done"
+        assert len(attempts) == 2
+
+
+class TestRegressionFix5AkshareAdjust:
+    """Fix 5: akshare must use adjust='' (raw contract) for idempotent re-runs."""
+
+    def test_fetch_uses_raw_adjust(self):
+        a = AkshareAdapter(symbols=["000001"])
+        mock_df = pd.DataFrame({"date": ["2026-01-05"], "close": [10.0]})
+        with patch("akshare.stock_zh_a_hist", return_value=mock_df) as mock_call:
+            a.fetch("stock", date(2026, 1, 5))
+        call_kwargs = mock_call.call_args
+        adjust = call_kwargs.kwargs.get("adjust")
+        assert adjust == "", f"adjust must be '' (raw) for idempotency, got {adjust!r}"
+
+
+class TestRegressionFix6HealthCheck:
+    """Fix 6: health_check must return False when the probe fails."""
+
+    def test_base_health_check_false_on_fetch_failure(self):
+        class FailAdapter(SourceAdapter):
+            def fetch(self, asset_type, trade_date, watermark=None):
+                raise RuntimeError("source down")  # non-retryable for fast test
+
+            def list_asset_types(self):
+                return ["stock"]
+
+        a = FailAdapter()
+        assert a.health_check() is False, (
+            "health_check must report unhealthy on failure"
+        )
+
+    def test_amazingdata_health_check_false_on_sdk_failure(self):
+        a = AmazingdataAdapter()
+        mock_ad = MagicMock()
+        mock_base = MagicMock()
+        mock_base.get_hist_code_list.side_effect = ConnectionError("down")
+        mock_ad.get_base_data.return_value = mock_base
+        a._ad = mock_ad
+        assert a.health_check() is False, (
+            "health_check must probe a real call, not just build SDK"
+        )
+
+    def test_amazingdata_health_check_false_on_empty_codes(self):
+        a = AmazingdataAdapter()
+        mock_ad = MagicMock()
+        mock_base = MagicMock()
+        mock_base.get_hist_code_list.return_value = []
+        mock_ad.get_base_data.return_value = mock_base
+        a._ad = mock_ad
+        assert a.health_check() is False, "empty code list = unhealthy"

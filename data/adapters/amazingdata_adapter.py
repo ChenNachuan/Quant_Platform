@@ -106,9 +106,12 @@ class AmazingdataAdapter(SourceAdapter):
         return pd.DataFrame()
 
     def health_check(self) -> bool:
+        """Probe one real SDK call — building the client alone is not a health signal."""
         try:
             ad = self._ensure_client()
-            return ad is not None
+            base_data = ad.get_base_data()
+            codes = base_data.get_hist_code_list(local_path=self._local_path)
+            return codes is not None and len(codes) > 0
         except Exception:
             return False
 

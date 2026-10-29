@@ -17,9 +17,9 @@ Field authority: ``docs/design/data/source_adapter.md``.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
-import signal
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -30,10 +30,23 @@ from typing import Any, Callable
 
 import pandas as pd
 
+# requests exceptions are NOT subclasses of the builtin ConnectionError /
+# TimeoutError — akshare/tushare transients live in the requests family (fix 4).
 try:
-    from requests.exceptions import HTTPError
+    from requests.exceptions import (
+        ConnectionError as RequestsConnectionError,
+        HTTPError,
+        Timeout as RequestsTimeout,
+    )
+
+    _REQUESTS_EXCEPTIONS: tuple[type[BaseException], ...] = (
+        RequestsConnectionError,
+        RequestsTimeout,
+    )
 except ImportError:  # pragma: no cover
     from urllib.error import HTTPError  # type: ignore[assignment]
+
+    _REQUESTS_EXCEPTIONS = ()
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +69,12 @@ __all__ = [
 FETCH_TIMEOUT: float = 120.0
 RETRY_MAX_RETRIES: int = 3
 RETRY_BACKOFF_BASE: float = 2.0
-RETRY_ON: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, HTTPError)
+RETRY_ON: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    TimeoutError,
+    HTTPError,
+    *_REQUESTS_EXCEPTIONS,
+)
 
 WATERMARK_FILENAME = ".watermarks.json"
 
@@ -111,9 +129,14 @@ def _rate_limit(requests_per_second: float) -> Callable:
 def _retry(
     max_retries: int = RETRY_MAX_RETRIES,
     backoff_base: float = RETRY_BACKOFF_BASE,
+    initial_wait: float = 1.0,
     retry_on: tuple[type[BaseException], ...] = RETRY_ON,
 ) -> Callable:
-    """Retry on *retry_on* exceptions with exponential backoff."""
+    """Retry on *retry_on* exceptions with exponential backoff.
+
+    Wait per attempt: ``initial_wait * backoff_base**attempt``.
+    With defaults (1.0, 2.0) this is 1s / 2s / 4s.
+    """
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -124,7 +147,7 @@ def _retry(
                 except retry_on as exc:
                     if attempt == max_retries:
                         raise
-                    wait = backoff_base**attempt
+                    wait = initial_wait * backoff_base**attempt
                     logger.warning(
                         "retry %d/%d for %s after %s: %s — waiting %.1fs",
                         attempt + 1,
@@ -143,23 +166,28 @@ def _retry(
 
 
 def _timeout(seconds: float) -> Callable:
-    """Enforce a wall-clock timeout via ``SIGALRM`` (Unix)."""
+    """Enforce a wall-clock timeout (thread-safe, no SIGALRM).
+
+    Uses a single-worker executor so the call runs in a helper thread and
+    the caller gets :class:`FetchTimeoutError` when *seconds* elapse.
+    The helper thread is abandoned on timeout (``shutdown(wait=False)``) —
+    a network call will eventually time out on its own.
+    """
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            def _handler(signum: int, frame: Any) -> None:
-                raise FetchTimeoutError(
-                    f"{func.__qualname__} timed out after {seconds}s"
-                )
-
-            old_handler = signal.signal(signal.SIGALRM, _handler)
-            signal.setitimer(signal.ITIMER_REAL, seconds)
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                return func(*args, **kwargs)
+                future = pool.submit(func, *args, **kwargs)
+                try:
+                    return future.result(timeout=seconds)
+                except concurrent.futures.TimeoutError:
+                    raise FetchTimeoutError(
+                        f"{func.__qualname__} timed out after {seconds}s"
+                    ) from None
             finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
-                signal.signal(signal.SIGALRM, old_handler)
+                pool.shutdown(wait=False)
 
         return wrapper
 
@@ -167,10 +195,16 @@ def _timeout(seconds: float) -> Callable:
 
 
 def _apply_fetch_guards(fetch_fn: Callable, requests_per_second: float) -> Callable:
-    """Layer rate-limit → timeout → retry around *fetch_fn* (outermost first)."""
-    guarded = _retry()(fetch_fn)
-    guarded = _timeout(FETCH_TIMEOUT)(guarded)
-    guarded = _rate_limit(requests_per_second)(guarded)
+    """Layer retry → timeout → rate-limit around *fetch_fn*.
+
+    Order matches ``source_adapter.md`` (@retry outermost): each retry
+    attempt gets a fresh timeout and a fresh rate-limit gate, so a long
+    backoff cannot eat into the timeout budget and a timeout cannot abort
+    the retry loop.
+    """
+    guarded = _rate_limit(requests_per_second)(fetch_fn)  # innermost
+    guarded = _timeout(FETCH_TIMEOUT)(guarded)  # middle
+    guarded = _retry()(guarded)  # outermost
     return guarded
 
 
@@ -249,14 +283,33 @@ class SourceAdapter(ABC):
     def list_asset_types(self) -> list[str]:
         """Return the asset types this adapter can fetch."""
 
+    def _latest_trade_date(self) -> date:
+        """Best-known trade date: asset calendar if reachable, else wall clock."""
+        cal_path = Path("data_platform/asset/calendar/sse.parquet")
+        if cal_path.exists():
+            try:
+                import duckdb
+
+                row = duckdb.sql(
+                    f"SELECT MAX(date) FROM read_parquet('{cal_path}')"
+                ).fetchone()
+                if row and row[0] is not None:
+                    val = row[0]
+                    return (
+                        val if isinstance(val, date) else date.fromisoformat(str(val))
+                    )
+            except Exception:
+                logger.debug("asset calendar unreadable — falling back to wall clock")
+        return date.today()
+
     def health_check(self) -> bool:
-        """Default: try a one-day fetch of the first asset type."""
+        """Probe one real fetch to verify the source is reachable."""
         asset_types = self.list_asset_types()
         if not asset_types:
             return False
         try:
-            today = date.today()
-            result = self.fetch(asset_types[0], today)
+            trade_date = self._latest_trade_date()
+            result = self.fetch(asset_types[0], trade_date)
             return result is not None
         except Exception:
             return False
