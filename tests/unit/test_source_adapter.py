@@ -576,6 +576,26 @@ class TestRegressionFix5AkshareAdjust:
         assert adjust == "", f"adjust must be '' (raw) for idempotency, got {adjust!r}"
 
 
+class TestRegressionSdkTimeout:
+    """Review r2 optional 2: SDK call must pass timeout (default None pins thread)."""
+
+    def test_fetch_passes_timeout_to_akshare(self):
+        from data.source_adapter import FETCH_TIMEOUT
+
+        a = AkshareAdapter(symbols=["000001"])
+        mock_df = pd.DataFrame({"date": ["2026-01-05"], "close": [10.0]})
+        with patch("akshare.stock_zh_a_hist", return_value=mock_df) as mock_call:
+            a.fetch("stock", date(2026, 1, 5))
+        call_kwargs = mock_call.call_args
+        timeout = call_kwargs.kwargs.get("timeout")
+        assert timeout is not None, (
+            "SDK timeout must be set (None = hangs on half-open)"
+        )
+        assert timeout == FETCH_TIMEOUT, (
+            f"SDK timeout must be FETCH_TIMEOUT ({FETCH_TIMEOUT}), got {timeout!r}"
+        )
+
+
 class TestRegressionFix6HealthCheck:
     """Fix 6: health_check probes one real call at the asset-calendar trade date.
 
@@ -658,3 +678,52 @@ class TestRegressionFix6HealthCheck:
         mock_ad.get_base_data.return_value = mock_base
         a._ad = mock_ad
         assert a.health_check() is False, "empty code list = unhealthy"
+
+    def test_latest_trade_date_clamps_future_rows(self, tmp_path, monkeypatch):
+        """Calendar has ~30 future trading days; MAX alone would return a
+        date that has not happened yet.  Must clamp to the last date <= today."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        monkeypatch.chdir(tmp_path)
+        cal_dir = tmp_path / "data_platform" / "asset" / "calendar"
+        cal_dir.mkdir(parents=True)
+
+        # Past date + future dates (as the real calendar does)
+        past = date(2026, 10, 28)
+        future = date(2026, 11, 9)  # ~30 days ahead
+        table = pa.table(
+            {
+                "trade_date": pa.array(
+                    [past, date(2026, 10, 29), future], type=pa.date32()
+                )
+            }
+        )
+        pq.write_table(table, cal_dir / "sse.parquet")
+
+        result = self._probe_adapter([])._latest_trade_date()
+        assert result == date(2026, 10, 29), (
+            f"must clamp to latest date <= today, not MAX (future {future}); "
+            f"got {result}"
+        )
+        assert result <= date.today(), "must never return a future date"
+
+    def test_latest_trade_date_all_future_falls_back_to_wall_clock(
+        self, tmp_path, monkeypatch
+    ):
+        """If all calendar rows are future (e.g. fresh calendar, no history yet),
+        the clamp yields nothing → fall back to today."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        monkeypatch.chdir(tmp_path)
+        cal_dir = tmp_path / "data_platform" / "asset" / "calendar"
+        cal_dir.mkdir(parents=True)
+        future = date(2026, 11, 9)
+        table = pa.table({"trade_date": pa.array([future], type=pa.date32())})
+        pq.write_table(table, cal_dir / "sse.parquet")
+
+        result = self._probe_adapter([])._latest_trade_date()
+        assert result == date.today(), (
+            f"all-future calendar must fall back to wall clock, got {result}"
+        )

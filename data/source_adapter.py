@@ -284,20 +284,28 @@ class SourceAdapter(ABC):
         """Return the asset types this adapter can fetch."""
 
     def _latest_trade_date(self) -> date:
-        """Best-known trade date: asset calendar if reachable, else wall clock."""
+        """Best-known *past* trade date: asset calendar if reachable, else wall clock.
+
+        The calendar is populated with ~30 future trading days (trade_cal
+        contract, calendar_adjustment.md), so MAX alone returns a date that
+        has not happened yet.  Clamped to today so ``health_check`` never
+        probes a session that does not exist.
+        """
         cal_path = Path("data_platform/asset/calendar/sse.parquet")
         if cal_path.exists():
             try:
                 import duckdb
 
                 row = duckdb.sql(
-                    f"SELECT MAX(trade_date) FROM read_parquet('{cal_path}')"
+                    f"SELECT MAX(trade_date) FROM read_parquet('{cal_path}') "
+                    f"WHERE trade_date <= CURRENT_DATE"
                 ).fetchone()
                 if row and row[0] is not None:
                     val = row[0]
-                    return (
+                    parsed = (
                         val if isinstance(val, date) else date.fromisoformat(str(val))
                     )
+                    return min(parsed, date.today())
             except Exception:
                 logger.debug("asset calendar unreadable — falling back to wall clock")
         return date.today()

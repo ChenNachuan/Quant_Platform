@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from data.source_adapter import FetchResult, SourceAdapter
+from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ class AkshareAdapter(SourceAdapter):
                     start_date=date_str,
                     end_date=date_str,
                     adjust="",  # raw contract: source-original values (fix 5)
+                    timeout=FETCH_TIMEOUT,  # SDK default is None (pins thread on hang)
                 )
                 if df is not None and len(df) > 0:
                     frames.append(df)
