@@ -10,11 +10,14 @@ Covers every ac-1 row, plus seven regression tests for PR #50 review findings:
 
 Regression tests (each fails without its fix):
   1. timeout is thread-safe (no SIGALRM ValueError off main thread)
-  2. retry is outermost (fresh timeout per attempt, backoff outside alarm)
+  2. ``_apply_fetch_guards`` layers retry outermost (fresh timeout per
+     attempt, backoff outside the timeout budget) — tested through
+     ``_apply_fetch_guards`` itself, not hand-composed decorators
   3. akshare passes a real symbol (not empty string)
   4. retry catches requests.exceptions.ConnectionError (not just builtins)
   5. akshare passes adjust="" (raw contract, not qfq)
-  6. health_check returns False when probe fails (not just SDK build)
+  6. health_check probes one real call at the asset-calendar trade date
+     (calendar schema: single ``trade_date`` column, storage_schema.md)
   7. local_path assertion is real (asserts str type, not vacuous ``or True``)
 """
 
@@ -24,6 +27,7 @@ import json
 import threading
 import time
 from datetime import date
+from functools import wraps
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -39,6 +43,7 @@ from data.source_adapter import (
     FetchResult,
     FetchTimeoutError,
     SourceAdapter,
+    _apply_fetch_guards,
     _rate_limit,
     _retry,
     _timeout,
@@ -122,6 +127,19 @@ class TestSourceAdapterABC:
 
         d = Dummy()
         assert d.health_check() is False
+
+    def test_health_check_false_on_probe_failure(self):
+        """Invariant (predates the PR #50 fixes): a raising probe = unhealthy."""
+
+        class FailAdapter(SourceAdapter):
+            def fetch(self, asset_type, trade_date, watermark=None):
+                raise RuntimeError("source down")  # non-retryable for fast test
+
+            def list_asset_types(self):
+                return ["stock"]
+
+        a = FailAdapter()
+        assert a.health_check() is False
 
 
 # ---------------------------------------------------------------------------
@@ -428,38 +446,80 @@ class TestRegressionFix1ThreadSafeTimeout:
 
 
 class TestRegressionFix2RetryOutermost:
-    """Fix 2: retry must be outermost so each attempt gets a fresh timeout."""
+    """Fix 2: ``_apply_fetch_guards`` must layer retry outermost.
 
-    def test_retry_gets_fresh_timeout_per_attempt(self):
-        attempts: list[float] = []
+    Every test calls ``_apply_fetch_guards`` itself.  The pre-fix ordering
+    ``rate_limit(timeout(retry(fn)))`` fails them: one timeout budget spans
+    all attempts plus backoff, so a backoff wait eats the budget and a
+    timeout aborts the retry loop.
+    """
 
-        @_retry(max_retries=2, initial_wait=0.01)
-        @_timeout(0.3)
+    def test_composes_retry_outermost(self, monkeypatch):
+        order: list[str] = []
+
+        def recorder(name: str):
+            def factory(*_args, **_kwargs):
+                def decorator(func):
+                    @wraps(func)
+                    def wrapper(*args, **kwargs):
+                        order.append(name)
+                        return func(*args, **kwargs)
+
+                    return wrapper
+
+                return decorator
+
+            return factory
+
+        monkeypatch.setattr("data.source_adapter._retry", recorder("retry"))
+        monkeypatch.setattr("data.source_adapter._timeout", recorder("timeout"))
+        monkeypatch.setattr("data.source_adapter._rate_limit", recorder("rate_limit"))
+
+        def fetch_fn():
+            order.append("fetch")
+            return "ok"
+
+        guarded = _apply_fetch_guards(fetch_fn, requests_per_second=100.0)
+        assert guarded() == "ok"
+        assert order == ["retry", "timeout", "rate_limit", "fetch"], (
+            "wrapping order must be retry -> timeout -> rate_limit -> fetch "
+            "(retry outermost, per source_adapter.md)"
+        )
+
+    def test_backoff_waits_outside_timeout_budget(self, monkeypatch):
+        """The 1s retry backoff must sleep outside the 0.5s per-attempt budget."""
+        monkeypatch.setattr("data.source_adapter.FETCH_TIMEOUT", 0.5)
+        attempts: list[int] = []
+
         def flaky():
-            attempts.append(time.monotonic())
+            attempts.append(1)
             if len(attempts) < 2:
                 raise ConnectionError("transient")
             return "done"
 
-        result = flaky()
-        assert result == "done"
-        assert len(attempts) == 2, "retry must re-attempt after a transient failure"
+        guarded = _apply_fetch_guards(flaky, requests_per_second=1000.0)
+        assert guarded() == "done", (
+            "backoff (1s) inside a 0.5s timeout budget = pre-fix ordering"
+        )
+        assert len(attempts) == 2
 
-    def test_backoff_not_aborted_by_timeout(self):
-        """With retry outermost, backoff sleep is outside any alarm."""
-        attempts: list = []
+    def test_each_attempt_gets_a_fresh_timeout(self, monkeypatch):
+        """Two 0.25s attempts + 1s backoff pass per-attempt, fail on one budget."""
+        monkeypatch.setattr("data.source_adapter.FETCH_TIMEOUT", 0.6)
+        attempts: list[int] = []
 
-        @_retry(max_retries=3, initial_wait=0.01)
-        @_timeout(5.0)
-        def slow_start():
+        def slow_once():
             attempts.append(1)
-            if len(attempts) < 3:
+            if len(attempts) < 2:
+                time.sleep(0.25)
                 raise ConnectionError("transient")
             return "done"
 
-        result = slow_start()
-        assert result == "done"
-        assert len(attempts) == 3
+        guarded = _apply_fetch_guards(slow_once, requests_per_second=1000.0)
+        assert guarded() == "done", (
+            "each attempt must get its own timeout window (retry outermost)"
+        )
+        assert len(attempts) == 2
 
 
 class TestRegressionFix3AkshareSymbol:
@@ -517,19 +577,66 @@ class TestRegressionFix5AkshareAdjust:
 
 
 class TestRegressionFix6HealthCheck:
-    """Fix 6: health_check must return False when the probe fails."""
+    """Fix 6: health_check probes one real call at the asset-calendar trade date.
 
-    def test_base_health_check_false_on_fetch_failure(self):
-        class FailAdapter(SourceAdapter):
+    The calendar is ``data_platform/asset/calendar/sse.parquet`` — single
+    column ``trade_date`` (storage_schema.md).  Every test here fails
+    without its fix: the pre-fix base probed ``date.today()``, and the
+    pre-fix amazingdata check only built the SDK.
+    """
+
+    @staticmethod
+    def _write_calendar(root: Path) -> date:
+        """Write the real calendar layout (one ``trade_date`` DATE column)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        cal_dir = root / "data_platform" / "asset" / "calendar"
+        cal_dir.mkdir(parents=True)
+        max_date = date(2026, 10, 20)
+        table = pa.table(
+            {
+                "trade_date": pa.array(
+                    [date(2026, 10, 16), date(2026, 10, 20)], type=pa.date32()
+                )
+            }
+        )
+        pq.write_table(table, cal_dir / "sse.parquet")
+        return max_date
+
+    @staticmethod
+    def _probe_adapter(probed: list):
+        class Probe(SourceAdapter):
             def fetch(self, asset_type, trade_date, watermark=None):
-                raise RuntimeError("source down")  # non-retryable for fast test
+                probed.append(trade_date)
+                return FetchResult(
+                    pd.DataFrame(), "probe", asset_type, trade_date, 0, None
+                )
 
             def list_asset_types(self):
                 return ["stock"]
 
-        a = FailAdapter()
-        assert a.health_check() is False, (
-            "health_check must report unhealthy on failure"
+        return Probe()
+
+    def test_latest_trade_date_reads_asset_calendar(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(
+            tmp_path
+        )  # _latest_trade_date resolves the calendar cwd-relative
+        max_date = self._write_calendar(tmp_path)
+        assert self._probe_adapter([])._latest_trade_date() == max_date
+
+    def test_latest_trade_date_falls_back_to_wall_clock(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # no calendar file here
+        assert self._probe_adapter([])._latest_trade_date() == date.today()
+
+    def test_base_health_check_probes_calendar_trade_date(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        max_date = self._write_calendar(tmp_path)
+        probed: list = []
+        assert self._probe_adapter(probed).health_check() is True
+        assert probed == [max_date], (
+            "health_check must probe the calendar's max trade_date, "
+            f"not date.today(); probed {probed!r}"
         )
 
     def test_amazingdata_health_check_false_on_sdk_failure(self):

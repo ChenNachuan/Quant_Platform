@@ -291,7 +291,7 @@ class SourceAdapter(ABC):
                 import duckdb
 
                 row = duckdb.sql(
-                    f"SELECT MAX(date) FROM read_parquet('{cal_path}')"
+                    f"SELECT MAX(trade_date) FROM read_parquet('{cal_path}')"
                 ).fetchone()
                 if row and row[0] is not None:
                     val = row[0]
