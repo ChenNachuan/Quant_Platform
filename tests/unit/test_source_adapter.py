@@ -682,6 +682,8 @@ class TestRegressionFix6HealthCheck:
     def test_latest_trade_date_clamps_future_rows(self, tmp_path, monkeypatch):
         """Calendar has ~30 future trading days; MAX alone would return a
         date that has not happened yet.  Must clamp to the last date <= today."""
+        from datetime import timedelta
+
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -689,37 +691,35 @@ class TestRegressionFix6HealthCheck:
         cal_dir = tmp_path / "data_platform" / "asset" / "calendar"
         cal_dir.mkdir(parents=True)
 
-        # Past date + future dates (as the real calendar does)
-        past = date(2026, 10, 28)
-        future = date(2026, 11, 9)  # ~30 days ahead
+        today = date.today()
+        past = today - timedelta(days=1)
+        future = today + timedelta(days=30)  # trade_cal look-ahead
         table = pa.table(
-            {
-                "trade_date": pa.array(
-                    [past, date(2026, 10, 29), future], type=pa.date32()
-                )
-            }
+            {"trade_date": pa.array([past, today, future], type=pa.date32())}
         )
         pq.write_table(table, cal_dir / "sse.parquet")
 
         result = self._probe_adapter([])._latest_trade_date()
-        assert result == date(2026, 10, 29), (
-            f"must clamp to latest date <= today, not MAX (future {future}); "
+        assert result == today, (
+            f"must clamp to latest date <= today ({today}), not MAX ({future}); "
             f"got {result}"
         )
-        assert result <= date.today(), "must never return a future date"
+        assert result <= today, "must never return a future date"
 
     def test_latest_trade_date_all_future_falls_back_to_wall_clock(
         self, tmp_path, monkeypatch
     ):
         """If all calendar rows are future (e.g. fresh calendar, no history yet),
         the clamp yields nothing → fall back to today."""
+        from datetime import timedelta
+
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         monkeypatch.chdir(tmp_path)
         cal_dir = tmp_path / "data_platform" / "asset" / "calendar"
         cal_dir.mkdir(parents=True)
-        future = date(2026, 11, 9)
+        future = date.today() + timedelta(days=30)
         table = pa.table({"trade_date": pa.array([future], type=pa.date32())})
         pq.write_table(table, cal_dir / "sse.parquet")
 
