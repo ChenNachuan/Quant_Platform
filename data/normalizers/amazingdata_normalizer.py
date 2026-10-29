@@ -61,11 +61,12 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     if asset_type not in ("stock", "option"):
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
-    # Fix 4: coalesce adjfactor + NAV_ADJ_FACTOR before renaming to avoid
-    # duplicate columns (both map to "adjfactor" in _COLUMN_MAP).
+    # Fix 4 + optional finding #53: coalesce adjfactor + NAV_ADJ_FACTOR before
+    # renaming to avoid duplicate columns. NAV_ADJ_FACTOR is the authoritative
+    # adjustment source (PR body §21.3), so it wins when both carry values.
     df = raw_df.copy()
     if "adjfactor" in df.columns and "NAV_ADJ_FACTOR" in df.columns:
-        df["adjfactor"] = df["adjfactor"].fillna(df["NAV_ADJ_FACTOR"])
+        df["adjfactor"] = df["NAV_ADJ_FACTOR"].fillna(df["adjfactor"])
         df = df.drop(columns=["NAV_ADJ_FACTOR"])
     elif "NAV_ADJ_FACTOR" in df.columns:
         df = df.rename(columns={"NAV_ADJ_FACTOR": "adjfactor"})

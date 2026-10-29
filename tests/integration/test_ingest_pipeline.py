@@ -1,15 +1,17 @@
-"""Integration tests for the ingest pipeline normalizers (ac-3).
+"""Integration tests for the ingest pipeline (ac-2/ac-3/ac-4/ac-5).
 
 Three edge classes × three sources = nine tests, plus explicit §21.3
 regression coverage (ingestion.md: ``DLS_Basedata_US`` writes
-``adjfactor=1`` when ``suspend==1``).  Each test feeds a source-native
-raw DataFrame through its normalizer and asserts the unified-schema output
-preserves the edge semantics.
+``adjfactor=1`` when ``suspend==1``).  Iteration 3 adds raw landing,
+watermark idempotent re-run, quarantine three paths, and cleanup safety.
 
 Run: ``uv run pytest tests/integration/test_ingest_pipeline.py -q``
 """
 
 from __future__ import annotations
+
+import json
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -331,3 +333,330 @@ class TestReviewRegressions:
             pd.api.types.is_integer_dtype(out["volume"])
             or str(out["volume"].dtype) == "Int64"
         )
+
+
+# ---------------------------------------------------------------------------
+# ac-2: raw landing + watermark idempotent re-run + cleanup safety
+# ---------------------------------------------------------------------------
+
+
+class TestRawLanding:
+    """S3: raw zstd landing at ``raw/{source}/{asset_type}/{date}.parquet``."""
+
+    def test_raw_path_layout(self, tmp_path):
+        from data.raw import raw_path
+
+        p = raw_path("akshare", "stock", date(2025, 3, 14), data_root=tmp_path)
+        assert p == tmp_path / "raw" / "akshare" / "stock" / "2025-03-14.parquet"
+
+    def test_save_raw_roundtrip(self, tmp_path):
+        from data.raw import load_raw, save_raw
+
+        df = pd.DataFrame({"close": [10.5, 11.0], "ticker": ["000001.SZ", "600000.SH"]})
+        path = save_raw(df, "akshare", "stock", date(2025, 3, 14), data_root=tmp_path)
+        assert path.exists()
+        loaded = load_raw("akshare", "stock", date(2025, 3, 14), data_root=tmp_path)
+        assert loaded is not None
+        assert list(loaded.columns) == ["close", "ticker"]
+        assert len(loaded) == 2
+
+    def test_save_raw_zstd(self, tmp_path):
+        import pyarrow.parquet as pq
+
+        from data.raw import save_raw
+
+        df = pd.DataFrame({"x": [1, 2]})
+        path = save_raw(df, "akshare", "stock", date(2025, 1, 1), data_root=tmp_path)
+        meta = pq.read_metadata(str(path))
+        assert meta.row_group(0).column(0).compression == "ZSTD"
+
+    def test_load_raw_missing_returns_none(self, tmp_path):
+        from data.raw import load_raw
+
+        assert (
+            load_raw("akshare", "stock", date(2025, 1, 1), data_root=tmp_path) is None
+        )
+
+
+class TestWatermarkIdempotentRerun:
+    """ac-2: watermark persistence + idempotent re-run.
+
+    After a successful fetch + save_raw + write_watermark, re-running the
+    same fetch must not duplicate rows — the watermark prevents re-fetching
+    already-processed dates.
+    """
+
+    def test_watermark_roundtrip(self, tmp_path):
+        from data.source_adapter import read_watermark, write_watermark
+
+        write_watermark("akshare", "stock", "2025-03-14", tmp_path)
+        assert read_watermark("akshare", "stock", tmp_path) == "2025-03-14"
+
+    def test_watermark_overwrite(self, tmp_path):
+        from data.source_adapter import read_watermark, write_watermark
+
+        write_watermark("akshare", "stock", "2025-03-14", tmp_path)
+        write_watermark("akshare", "stock", "2025-03-15", tmp_path)
+        assert read_watermark("akshare", "stock", tmp_path) == "2025-03-15"
+
+    def test_watermark_multi_asset_type(self, tmp_path):
+        from data.source_adapter import read_watermark, write_watermark
+
+        write_watermark("akshare", "stock", "2025-03-14", tmp_path)
+        write_watermark("akshare", "option", "2025-03-14", tmp_path)
+        assert read_watermark("akshare", "stock", tmp_path) == "2025-03-14"
+        assert read_watermark("akshare", "option", tmp_path) == "2025-03-14"
+
+    def test_watermark_multi_source(self, tmp_path):
+        from data.source_adapter import read_watermark, write_watermark
+
+        write_watermark("akshare", "stock", "2025-03-14", tmp_path)
+        write_watermark("tushare", "stock", "2025-03-14", tmp_path)
+        assert read_watermark("akshare", "stock", tmp_path) == "2025-03-14"
+        assert read_watermark("tushare", "stock", tmp_path) == "2025-03-14"
+
+    def test_watermark_preserved_by_cleanup_raw(self, tmp_path):
+        """ac-2 explicit: cleanup_raw must NOT delete .watermarks.json."""
+        from data.raw import cleanup_raw
+        from data.source_adapter import WATERMARK_FILENAME, write_watermark
+
+        # Watermark lives at raw/{source}/.watermarks.json
+        write_watermark("akshare", "stock", "2020-01-01", tmp_path)
+        wm_path = tmp_path / "raw" / "akshare" / WATERMARK_FILENAME
+        assert wm_path.exists()
+
+        # Create an expired raw file
+        raw_dir = tmp_path / "raw" / "akshare" / "stock"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / "2020-01-01.parquet").write_bytes(b"fake")
+
+        # lifecycle.yaml needed by cleanup_expired
+        (tmp_path / "lifecycle.yaml").write_text(
+            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+        )
+
+        cleanup_raw(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        assert wm_path.exists(), ".watermarks.json must survive cleanup_raw"
+
+    def test_watermark_survives_actual_delete(self, tmp_path):
+        """ac-2: even when cleanup actually deletes, .watermarks.json survives."""
+        from data.raw import cleanup_raw
+        from data.source_adapter import WATERMARK_FILENAME, write_watermark
+
+        write_watermark("akshare", "stock", "2025-06-01", tmp_path)
+        wm_path = tmp_path / "raw" / "akshare" / WATERMARK_FILENAME
+
+        raw_dir = tmp_path / "raw" / "akshare" / "stock"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        old_file = raw_dir / "2020-01-01.parquet"
+        old_file.write_bytes(b"fake")
+        new_file = raw_dir / "2025-06-01.parquet"
+        new_file.write_bytes(b"fake")
+
+        (tmp_path / "lifecycle.yaml").write_text(
+            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+        )
+
+        cleanup_raw(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        assert not old_file.exists(), "expired raw file should be deleted"
+        assert new_file.exists(), "recent raw file should survive"
+        assert wm_path.exists(), ".watermarks.json must never be deleted"
+
+
+# ---------------------------------------------------------------------------
+# ac-4: quarantine three paths (save/load/recheck/cleanup)
+# ---------------------------------------------------------------------------
+
+
+class TestQuarantineSavePath:
+    """ac-4: quarantine/{asset_type}/{date}.parquet + .rejection.json."""
+
+    def test_quarantine_path_layout(self, tmp_path):
+        from data.quarantine import quarantine_path, rejection_path
+
+        q = quarantine_path("stock", date(2025, 3, 14), data_root=tmp_path)
+        r = rejection_path("stock", date(2025, 3, 14), data_root=tmp_path)
+        assert q == tmp_path / "quarantine" / "stock" / "2025-03-14.parquet"
+        assert r == tmp_path / "quarantine" / "stock" / "2025-03-14.rejection.json"
+
+    def test_save_quarantine_writes_both_files(self, tmp_path):
+        from data.quarantine import save_quarantine
+
+        df = pd.DataFrame({"ticker": ["000001.SZ"], "close": [10.5]})
+        meta = {
+            "data_date": "2025-03-14",
+            "asset_type": "stock",
+            "reject_time": "2025-03-14T16:00:00",
+            "batch_status": "rejected",
+            "total_rows": 100,
+            "rows_would_drop": 5,
+            "drop_rate": 0.05,
+            "hard_rules_triggered": ["price_outlier"],
+        }
+        q_path, r_path = save_quarantine(df, "stock", date(2025, 3, 14), meta, tmp_path)
+        assert q_path.exists()
+        assert r_path.exists()
+        assert q_path.suffix == ".parquet"
+        assert r_path.suffix == ".json"
+
+    def test_rejection_json_required_keys(self, tmp_path):
+        """ac-4: .rejection.json must carry all 8 required fields."""
+        from data.quarantine import save_quarantine
+
+        df = pd.DataFrame({"x": [1]})
+        meta = {
+            "data_date": "2025-03-14",
+            "asset_type": "stock",
+            "reject_time": "2025-03-14T16:00:00",
+            "batch_status": "rejected",
+            "total_rows": 100,
+            "rows_would_drop": 5,
+            "drop_rate": 0.05,
+            "hard_rules_triggered": ["price_outlier"],
+        }
+        _, r_path = save_quarantine(df, "stock", date(2025, 3, 14), meta, tmp_path)
+        loaded = json.loads(r_path.read_text(encoding="utf-8"))
+        required = {
+            "data_date",
+            "asset_type",
+            "reject_time",
+            "batch_status",
+            "total_rows",
+            "rows_would_drop",
+            "drop_rate",
+            "hard_rules_triggered",
+        }
+        assert required.issubset(loaded.keys()), (
+            f"missing keys: {required - loaded.keys()}"
+        )
+
+    def test_load_quarantine_roundtrip(self, tmp_path):
+        from data.quarantine import load_quarantine, save_quarantine
+
+        df = pd.DataFrame({"ticker": ["000001.SZ"], "close": [10.5]})
+        meta = {"data_date": "2025-03-14", "batch_status": "rejected"}
+        save_quarantine(df, "stock", date(2025, 3, 14), meta, tmp_path)
+        result = load_quarantine("stock", date(2025, 3, 14), tmp_path)
+        assert result is not None
+        loaded_df, loaded_meta = result
+        assert len(loaded_df) == 1
+        assert loaded_meta["batch_status"] == "rejected"
+
+    def test_load_quarantine_missing_returns_none(self, tmp_path):
+        from data.quarantine import load_quarantine
+
+        assert load_quarantine("stock", date(2025, 1, 1), tmp_path) is None
+
+    def test_recheck_calls_validator(self, tmp_path):
+        from data.quarantine import recheck, save_quarantine
+
+        df = pd.DataFrame({"x": [1, 2]})
+        save_quarantine(df, "stock", date(2025, 3, 14), {}, tmp_path)
+
+        calls = []
+
+        def fake_validator(frame):
+            calls.append(len(frame))
+            return {"passed": True, "reasons": []}
+
+        verdict = recheck(df, fake_validator, "stock", date(2025, 3, 14), tmp_path)
+        assert verdict == {"passed": True, "reasons": []}
+        assert calls == [2]
+
+    def test_cleanup_quarantine_preserves_recent(self, tmp_path):
+        from data.quarantine import cleanup_quarantine
+
+        q_dir = tmp_path / "quarantine" / "stock"
+        q_dir.mkdir(parents=True)
+        old_file = q_dir / "2020-01-01.parquet"
+        old_file.write_bytes(b"fake")
+        new_file = q_dir / "2025-06-01.parquet"
+        new_file.write_bytes(b"fake")
+
+        lifecycle = tmp_path / "lifecycle.yaml"
+        lifecycle.write_text(
+            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+        )
+
+        cleanup_quarantine(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        assert not old_file.exists(), "expired quarantine file should be deleted"
+        assert new_file.exists(), "recent quarantine file should survive"
+
+
+# ---------------------------------------------------------------------------
+# Optional review finding regressions (PR #51)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalFindingRegressions:
+    """Regression tests for PR #51 optional findings #52 and #53."""
+
+    def test_tushare_dual_suspend_coalesce(self):
+        """Finding #52: frame with both suspend_d and suspend must not crash."""
+        raw = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20250314"],
+                "vol": [100],
+                "amount": [500],
+                "suspend_d": ["S"],
+                "suspend": [False],
+            }
+        )
+        out = normalize_tushare("stock", raw)
+        assert out["suspend"].iloc[0] is True or out["suspend"].iloc[0] == True  # noqa: E712
+
+    def test_tushare_dual_suspend_suspend_wins_when_d_nan(self):
+        """Finding #52: suspend fallback used when suspend_d is NaN."""
+        raw = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20250314"],
+                "vol": [100],
+                "amount": [500],
+                "suspend_d": [None],
+                "suspend": [True],
+            }
+        )
+        out = normalize_tushare("stock", raw)
+        assert bool(out["suspend"].iloc[0]) is True
+
+    def test_amazingdata_adjfactor_nav_wins(self):
+        """Finding #53: NAV_ADJ_FACTOR wins when both carry non-NaN values."""
+        raw = pd.DataFrame(
+            {
+                "code": ["000001.SZ"],
+                "kline_time": ["2025-03-14"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+                "amount": [10200.0],
+                "adjfactor": [1.0],  # kline says 1.0
+                "NAV_ADJ_FACTOR": [0.90],  # NAV says 0.90
+            }
+        )
+        out = normalize_amazingdata("stock", raw)
+        assert out["adjfactor"].iloc[0] == pytest.approx(0.90), (
+            "NAV_ADJ_FACTOR must win when both carry values"
+        )
+
+    def test_amazingdata_adjfactor_nav_nan_falls_back(self):
+        """Finding #53: kline adjfactor used when NAV_ADJ_FACTOR is NaN."""
+        raw = pd.DataFrame(
+            {
+                "code": ["000001.SZ"],
+                "kline_time": ["2025-03-14"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+                "amount": [10200.0],
+                "adjfactor": [0.85],  # kline has value
+                "NAV_ADJ_FACTOR": [None],  # NAV missing
+            }
+        )
+        out = normalize_amazingdata("stock", raw)
+        assert out["adjfactor"].iloc[0] == pytest.approx(0.85)
