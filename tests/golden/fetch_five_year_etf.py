@@ -33,6 +33,7 @@ nav = nav.rename(columns={"MARKET_CODE": "code"})[
 merged = kline.merge(nav, on=["code", "trade_date"], how="left")
 if merged["NAV_ADJ_FACTOR"].isna().any():
     raise ValueError("NAV_ADJ_FACTOR missing for some bar days")
+merged = merged.sort_values(["code", "trade_date"])
 merged["adj_first"] = merged.groupby("code")["NAV_ADJ_FACTOR"].transform("first")
 
 for col in ["open", "close"]:
