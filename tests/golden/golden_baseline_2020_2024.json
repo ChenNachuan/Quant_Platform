@@ -1,0 +1,28 @@
+{
+  "total_return": 0.30367555245624755,
+  "sharpe": 0.47219695543493,
+  "mdd": -0.21418860008972862,
+  "annualized_cagr": 0.05673456221988915,
+  "annualized_mean252": 0.06446430507567645,
+  "fee_free_twin": {
+    "total_return": 0.30636449914839803,
+    "sharpe": 0.47529464995955817,
+    "mdd": -0.21350052799474561
+  },
+  "basis": {
+    "fill_basis": "t1_open",
+    "initial_cash": 10000000000.0,
+    "max_total_weight": 1.0,
+    "universe": [
+      "510300.SH",
+      "510500.SH",
+      "518880.SH",
+      "511010.SH",
+      "159915.SZ"
+    ],
+    "sample_days": 1211,
+    "decision_date_count": 61,
+    "trading_days_per_year": 252,
+    "sleeve": 0.95
+  }
+}
