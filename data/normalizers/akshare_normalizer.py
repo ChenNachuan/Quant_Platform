@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from core.asset_rules import PREFIX_EXCHANGE
 from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
@@ -34,6 +35,22 @@ _COLUMN_MAP: dict[str, str] = {
 _NUMERIC_COLS = ("open", "high", "low", "close", "volume", "amount", "turnover")
 
 
+def _qualify_ticker(code: str) -> str:
+    """Append exchange suffix to a bare 6-digit AKShare code.
+
+    AKShare returns bare codes (``000001``); the unified schema requires
+    ``{6-digit}.{SH|SZ|BJ}`` (``BARS_DAILY_SCHEMA.ticker`` / ``validate_equity_ticker``).
+    The suffix is derived from the code's two-digit prefix via ``PREFIX_EXCHANGE``.
+    """
+    if "." in code:
+        return code  # already qualified
+    prefix = code[:2]
+    exchange = PREFIX_EXCHANGE.get(prefix)
+    if exchange is None:
+        raise ValueError(f"cannot qualify ticker {code!r}: unknown prefix {prefix!r}")
+    return f"{code}.{exchange}"
+
+
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """Format conversion only: column name mapping, type fixes.
 
@@ -49,12 +66,20 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
 
     df = raw_df.rename(columns=_COLUMN_MAP).copy()
 
+    # Fix 1: qualify bare AKShare codes to {6-digit}.{SH|SZ|BJ}
+    if "ticker" in df.columns:
+        df["ticker"] = df["ticker"].astype(str).map(_qualify_ticker)
+
     # Type conversion: dates and numerics
     if "trade_date" in df.columns:
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
     for col in _NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Fix 5: NaN-preserving int cast for volume (BARS_DAILY_SCHEMA: Column(int))
+    if "volume" in df.columns:
+        df["volume"] = (df["volume"]).round().astype("Int64")
 
     # Edge: suspension — AKShare omits suspended rows entirely.
     df["suspend"] = False

@@ -35,6 +35,7 @@ _COLUMN_MAP: dict[str, str] = {
     "vol": "volume",
     "amount": "amount",
     "adj_factor": "adjfactor",
+    "suspend_d": "suspend",
     "suspend": "suspend",
 }
 
@@ -74,14 +75,21 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Unit conversion: Tushare vol is lots (手), amount is thousands (千元).
+    # Fix 2: NaN-preserving Int64 cast — int64 raises IntCastingNaNError on NaN.
     if "volume" in df.columns:
-        df["volume"] = (df["volume"] * 100).round().astype("int64")
+        df["volume"] = (df["volume"] * 100).round().astype("Int64")
     if "amount" in df.columns:
         df["amount"] = df["amount"] * 1000.0
 
-    # Edge: suspension — suspend_d merged by adapter; default False if absent.
+    # Edge: suspension — suspend_d merged by adapter.
+    # Fix 3: suspend_d carries 'S' (suspended) / ' ' (active) strings.
     if "suspend" not in df.columns:
         df["suspend"] = False
+    elif df["suspend"].dtype == object or df["suspend"].dtype.name == "string":
+        # Semantic coercion: 'S'→True, ' '→False (suspend_d API contract)
+        df["suspend"] = (
+            df["suspend"].map({"S": True, " ": False}).fillna(False).astype(bool)
+        )
     else:
         df["suspend"] = df["suspend"].fillna(False).astype(bool)
 

@@ -61,7 +61,16 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     if asset_type not in ("stock", "option"):
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
-    df = raw_df.rename(columns=_COLUMN_MAP).copy()
+    # Fix 4: coalesce adjfactor + NAV_ADJ_FACTOR before renaming to avoid
+    # duplicate columns (both map to "adjfactor" in _COLUMN_MAP).
+    df = raw_df.copy()
+    if "adjfactor" in df.columns and "NAV_ADJ_FACTOR" in df.columns:
+        df["adjfactor"] = df["adjfactor"].fillna(df["NAV_ADJ_FACTOR"])
+        df = df.drop(columns=["NAV_ADJ_FACTOR"])
+    elif "NAV_ADJ_FACTOR" in df.columns:
+        df = df.rename(columns={"NAV_ADJ_FACTOR": "adjfactor"})
+
+    df = df.rename(columns=_COLUMN_MAP).copy()
 
     # Type conversion: dates and numerics
     if "trade_date" in df.columns:

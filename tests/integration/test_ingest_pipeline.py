@@ -236,3 +236,78 @@ class TestUnitConversion:
         out = normalize_tushare("stock", _TUSHARE_RAW.copy())
         assert out.loc[0, "amount"] == pytest.approx(1020000.0)  # 1020 × 1000
         assert out.loc[1, "amount"] == pytest.approx(1296000.0)
+
+
+# ---------------------------------------------------------------------------
+# Review regression tests (PR #51 findings 1-5)
+# ---------------------------------------------------------------------------
+class TestReviewRegressions:
+    """Each test fails without its fix (probes P1-P4 + optional P5)."""
+
+    # Fix 1 (probe P1): AKShare bare codes must gain exchange suffix.
+    def test_akshare_ticker_qualification(self):
+        out = normalize_akshare("stock", _AKSHARE_RAW.copy())
+        assert out["ticker"].iloc[0] == "000001.SZ"  # prefix 00 → SZ
+        assert (out["ticker"] == "000001.SZ").all()
+
+    def test_akshare_ticker_qualification_sh(self):
+        raw = _AKSHARE_RAW.copy()
+        raw["股票代码"] = ["600000", "600000", "600000"]
+        out = normalize_akshare("stock", raw)
+        assert (out["ticker"] == "600000.SH").all()  # prefix 60 → SH
+
+    def test_akshare_ticker_unknown_prefix(self):
+        raw = _AKSHARE_RAW.copy()
+        raw["股票代码"] = ["999999", "999999", "999999"]
+        with pytest.raises(ValueError, match="unknown prefix"):
+            normalize_akshare("stock", raw)
+
+    # Fix 2 (probe P2): Tushare volume NaN must not raise IntCastingNaNError.
+    def test_tushare_volume_nan_preserved(self):
+        raw = _TUSHARE_RAW.copy()
+        raw.loc[1, "vol"] = np.nan  # missing volume
+        out = normalize_tushare("stock", raw)  # must not raise
+        assert pd.isna(out.loc[1, "volume"])
+        assert out.loc[0, "volume"] == 100000  # non-NaN preserved
+
+    # Fix 3 (probe P4): Tushare suspend_d 'S'/' ' strings coerced to bool.
+    def test_tushare_suspend_d_string_coercion(self):
+        raw = _TUSHARE_RAW.copy()
+        raw["suspend_d"] = ["S", " ", "S"]  # real suspend_d API output
+        out = normalize_tushare("stock", raw)
+        assert out["suspend"].tolist() == [True, False, True]
+
+    def test_tushare_suspend_d_no_silently_dropped(self):
+        """suspend_d column must survive mapping (was silently dropped)."""
+        raw = _TUSHARE_RAW.copy()
+        raw["suspend_d"] = [" ", "S", " "]
+        out = normalize_tushare("stock", raw)
+        assert out["suspend"].tolist() == [False, True, False]
+
+    # Fix 4 (probe P3): AmazingData adjfactor + NAV_ADJ_FACTOR coalesced.
+    def test_amazingdata_adjfactor_coalesce(self):
+        raw = _AMAZING_RAW.copy()
+        raw["NAV_ADJ_FACTOR"] = [1.0, 0.90, 1.05]  # second source
+        # adjfactor has NaN where NAV_ADJ_FACTOR has value
+        raw.loc[1, "adjfactor"] = np.nan
+        out = normalize_amazingdata("stock", raw)  # must not raise TypeError
+        assert out.loc[1, "adjfactor"] == pytest.approx(0.90)  # coalesced
+        assert out.loc[0, "adjfactor"] == 1.0  # primary preserved
+        # No duplicate columns
+        assert out.columns.tolist().count("adjfactor") == 1
+
+    def test_amazingdata_nav_only(self):
+        """NAV_ADJ_FACTOR alone must map to adjfactor."""
+        raw = _AMAZING_RAW.copy()
+        raw = raw.drop(columns=["adjfactor"])
+        raw["NAV_ADJ_FACTOR"] = [1.0, 1.05, 1.05]
+        out = normalize_amazingdata("stock", raw)
+        assert out["adjfactor"].tolist() == [1.0, 1.05, 1.05]
+
+    # Fix 5 (optional P5): AKShare volume must be integer-typed.
+    def test_akshare_volume_int_dtype(self):
+        out = normalize_akshare("stock", _AKSHARE_RAW.copy())
+        assert (
+            pd.api.types.is_integer_dtype(out["volume"])
+            or str(out["volume"].dtype) == "Int64"
+        )
