@@ -271,35 +271,12 @@ def chain_fees_off(bars, dates, decision_dates) -> dict:
 
 
 @pytest.fixture(scope="module")
-def baseline_json(chain_fees_on, chain_fees_off, dates, decision_dates) -> dict:
-    """Generate golden_baseline_2020_2024.json and return its content."""
-    headline = chain_fees_on["metrics"]
-    twin = chain_fees_off["metrics"]
-    doc = {
-        "total_return": headline["total_return"],
-        "sharpe": headline["sharpe"],
-        "mdd": headline["mdd"],
-        "annualized_cagr": headline["annualized_cagr"],
-        "annualized_mean252": headline["annualized_mean252"],
-        "fee_free_twin": {
-            "total_return": twin["total_return"],
-            "sharpe": twin["sharpe"],
-            "mdd": twin["mdd"],
-        },
-        "basis": {
-            "fill_basis": FILL_BASIS_T1_OPEN,
-            "initial_cash": INITIAL_CASH,
-            "max_total_weight": RISK_CONFIG["max_total_weight"],
-            "universe": UNIVERSE,
-            "sample_days": int((chain_fees_on["nav"].shape[0] - 1)),
-            "decision_date_count": len(decision_dates),
-            "trading_days_per_year": TRADING_DAYS,
-            "sleeve": SLEEVE,
-        },
-    }
-    out_path = FIXTURE_DIR / "golden_baseline_2020_2024.json"
-    out_path.write_text(json.dumps(doc, indent=2) + "\n")
-    return doc
+def baseline_json() -> dict:
+    """Read the committed golden_baseline_2020_2024.json (no silent rewrite)."""
+    path = FIXTURE_DIR / "golden_baseline_2020_2024.json"
+    if not path.exists():
+        pytest.skip(f"baseline not committed: {path}")
+    return json.loads(path.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -474,11 +451,27 @@ class TestBaselineRun:
 class TestBaselineMetrics:
     """ac-2: metrics inside expected ranges (ARCHITECTURE.md §6)."""
 
+    @pytest.mark.xfail(
+        reason=(
+            "AC-3 range waived (陈纳川 2026-10-29 option 2): annualized 5.67% "
+            "below band 10-15%; ranges unchanged per 'never adjust the ranges'. "
+            "Regression gate is golden_baseline_2020_2024.json, not the band."
+        ),
+        strict=False,
+    )
     def test_annualized_in_range(self, baseline_json):
         val = baseline_json["annualized_cagr"]
         lo, hi = RANGE_ANNUALIZED
         assert lo <= val <= hi, f"annualized_cagr {val:.4f} outside [{lo}, {hi}]"
 
+    @pytest.mark.xfail(
+        reason=(
+            "AC-3 range waived (陈纳川 2026-10-29 option 2): sharpe 0.47 "
+            "below band 0.8-1.2; ranges unchanged per 'never adjust the ranges'. "
+            "Regression gate is golden_baseline_2020_2024.json, not the band."
+        ),
+        strict=False,
+    )
     def test_sharpe_in_range(self, baseline_json):
         val = baseline_json["sharpe"]
         lo, hi = RANGE_SHARPE
@@ -513,6 +506,63 @@ class TestBaselineMetrics:
         t = chain_fees_off["metrics"]["total_return"]
         assert h != t, (
             "fee-on and fee-free total_return are identical — FeeModel not charging?"
+        )
+
+
+# ---------------------------------------------------------------------------
+# regression gate (陈纳川 2026-10-29 option 2): fees-ON vs committed baseline
+# ---------------------------------------------------------------------------
+
+REGRESSION_REL_TOL = 1e-4  # 0.01% — same golden tolerance as step 3
+
+
+class TestRegressionGate:
+    """Per-run regression: fees-ON metrics must match the committed baseline.
+
+    The gate is ``golden_baseline_2020_2024.json`` (5.67% / 0.47 / -21.42%),
+    not the ARCHITECTURE §6 bands.  A run that drifts from the committed
+    values fails here; the baseline is never silently rewritten.
+    """
+
+    def test_total_return_matches_committed(self, chain_fees_on, baseline_json):
+        got = chain_fees_on["metrics"]["total_return"]
+        exp = baseline_json["total_return"]
+        rel = abs(got - exp) / max(abs(exp), 1e-15)
+        assert rel < REGRESSION_REL_TOL, (
+            f"total_return drifted: got {got}, committed {exp}, rel_err={rel:.2e}"
+        )
+
+    def test_sharpe_matches_committed(self, chain_fees_on, baseline_json):
+        got = chain_fees_on["metrics"]["sharpe"]
+        exp = baseline_json["sharpe"]
+        rel = abs(got - exp) / max(abs(exp), 1e-15)
+        assert rel < REGRESSION_REL_TOL, (
+            f"sharpe drifted: got {got}, committed {exp}, rel_err={rel:.2e}"
+        )
+
+    def test_mdd_matches_committed(self, chain_fees_on, baseline_json):
+        got = chain_fees_on["metrics"]["mdd"]
+        exp = baseline_json["mdd"]
+        rel = abs(got - exp) / max(abs(exp), 1e-15)
+        assert rel < REGRESSION_REL_TOL, (
+            f"mdd drifted: got {got}, committed {exp}, rel_err={rel:.2e}"
+        )
+
+    def test_annualized_matches_committed(self, chain_fees_on, baseline_json):
+        got = chain_fees_on["metrics"]["annualized_cagr"]
+        exp = baseline_json["annualized_cagr"]
+        rel = abs(got - exp) / max(abs(exp), 1e-15)
+        assert rel < REGRESSION_REL_TOL, (
+            f"annualized_cagr drifted: got {got}, committed {exp}, rel_err={rel:.2e}"
+        )
+
+    def test_baseline_file_not_rewritten(self, baseline_json):
+        """The committed baseline is read, not overwritten by a test run."""
+        path = FIXTURE_DIR / "golden_baseline_2020_2024.json"
+        assert path.exists()
+        reread = json.loads(path.read_text())
+        assert reread == baseline_json, (
+            "golden_baseline_2020_2024.json was modified during the test run"
         )
 
 
