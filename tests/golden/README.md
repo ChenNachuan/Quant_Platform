@@ -145,7 +145,7 @@ opens and a five-year window.
 | File | Content |
 |---|---|
 | `golden_prices_2020_2024.parquet` | 5 ETF × 1231 trading days (20 warmup + 1211 sample), open+close per ticker |
-| `fetch_five_year_etf.py` | ≤30-line akshare daily pull — the fixture's provenance |
+| `fetch_five_year_etf.py` | fixture builder from AmazingData staging — the fixture's provenance |
 | `month_end_clock.py` | month-end rebalance clock (matches S8-T1 exactly) |
 | `test_step5_baseline.py` | fixture structure + month-end clock anchor assertions |
 
@@ -162,16 +162,17 @@ Warmup: last 20 trading days before `2020-01-02` (fetch from `2019-11-01`
 guarantees them). Sample: `2020-01-02` … `2024-12-31`. `NAV_0 = 1.0` at close
 of the last warmup day.
 
-### Data basis (O1 — settled)
+### Data basis (O1 — revised by human ruling 2026-10-29)
 
 | Item | Rule |
 |---|---|
-| Route | akshare daily direct — `ak.fund_etf_hist_em(symbol, period="daily", start_date="20191101", end_date="20241231", adjust="hfq")`, 5 calls |
-| Not | 5-minute aggregation (does not reach 2020; red line 6 wants ≤30-line akshare) |
-| Adjustment | 后复权 `adjust="hfq"` so returns include ETF distributions; qfq/hfq give identical returns |
+| Red line 6 | **Reproducible via bootstrap scripts** (was ≤30-line akshare) |
+| Source | **AmazingData** (human-authorized, supersedes akshare fund_etf_hist_em) |
+| Adjustment | hfq = raw × NAV_ADJ_FACTOR / adj_first (arg_min by date); NAV_ADJ_FACTOR written as-is, no renormalization |
+| Pipeline | `scripts/bootstrap/amazing_pull.py` (container) → `fetch_five_year_etf.py` (host) |
 | Splice | **No splice** with the S2-T2 fixture — shared = universe, clock, formulas, T+1-open basis; never price levels |
 | Opens | **True opens** — `open(D) := close(D-1)` does not carry over from the 77-day fixture |
-| Network | Tests are zero-network; the fixture is the artifact, the fetch script is its provenance |
+| Network | Tests are zero-network; the fixture is the artifact, the bootstrap scripts are its provenance |
 
 ### Month-end clock (O2 — settled, matches S8-T1 exactly)
 
@@ -190,9 +191,17 @@ Hand anchors asserted in `test_step5_baseline.py`:
 | `2020-02-28` | month-end (last February trading day) |
 | `2024-12-31` | window end |
 
-### Re-fetch command
+### Re-fetch commands
 
 ```bash
+# Step 1: AmazingData staging (runs inside container)
+docker compose run --rm --no-deps amazingdata \
+    python3 /opt/project/scripts/bootstrap/amazing_pull.py \
+    --tickers 510300.SH,510500.SH,518880.SH,511010.SH,159915.SZ \
+    --start 20191101 --end 20241231 \
+    --staging /opt/project/data_platform/raw/amazingdata
+
+# Step 2: build fixture from staging (runs on host)
 uv run python tests/golden/fetch_five_year_etf.py
 ```
 
