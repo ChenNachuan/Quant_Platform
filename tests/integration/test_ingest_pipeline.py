@@ -182,6 +182,18 @@ class TestCorporateActionEdge:
         assert out.loc[0, "adjfactor"] == 1.0
         assert out.loc[2, "adjfactor"] == 1.05
 
+    def test_amazingdata_nav_column_maps(self):
+        """NAV_ADJ_FACTOR alone maps to adjfactor (module CA contract).
+
+        Mapping contract, not a review-fix regression: this input takes the
+        rename path and behaves the same with or without the Fix 4 coalesce.
+        """
+        raw = _AMAZING_RAW.copy()
+        raw = raw.drop(columns=["adjfactor"])
+        raw["NAV_ADJ_FACTOR"] = [1.0, 1.05, 1.05]
+        out = normalize_amazingdata("stock", raw)
+        assert out["adjfactor"].tolist() == [1.0, 1.05, 1.05]
+
 
 # ---------------------------------------------------------------------------
 # Dispatch and column contract
@@ -297,12 +309,20 @@ class TestReviewRegressions:
         assert out.columns.tolist().count("adjfactor") == 1
 
     def test_amazingdata_nav_only(self):
-        """NAV_ADJ_FACTOR alone must map to adjfactor."""
+        """NAV_ADJ_FACTOR is the sole adjfactor *value* source (kline NaN).
+
+        The kline ``adjfactor`` column exists but carries no values, so every
+        value must come from ``NAV_ADJ_FACTOR`` via the Fix 4 coalesce.  Both
+        source columns are present: without the coalesce the rename maps both
+        to ``adjfactor``, ``to_numeric`` raises TypeError on the duplicate
+        columns, and the batch dies — so this fails with Fix 4 reverted.
+        """
         raw = _AMAZING_RAW.copy()
-        raw = raw.drop(columns=["adjfactor"])
+        raw["adjfactor"] = np.nan  # present but empty — NAV carries the values
         raw["NAV_ADJ_FACTOR"] = [1.0, 1.05, 1.05]
-        out = normalize_amazingdata("stock", raw)
-        assert out["adjfactor"].tolist() == [1.0, 1.05, 1.05]
+        out = normalize_amazingdata("stock", raw)  # must not raise TypeError
+        assert out.columns.tolist().count("adjfactor") == 1
+        assert out["adjfactor"].tolist() == pytest.approx([1.0, 1.05, 1.05])
 
     # Fix 5 (optional P5): AKShare volume must be integer-typed.
     def test_akshare_volume_int_dtype(self):
