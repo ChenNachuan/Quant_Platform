@@ -209,13 +209,13 @@ def _apply_filter(df: pd.DataFrame, filter_expr: str) -> pd.Series:
 def evaluate_column_check(df: pd.DataFrame, rule: dict) -> pd.Series:
     """Evaluate a declarative column_check rule. Returns failure mask."""
     failures = pd.Series(False, index=df.index)
+    value = rule["value"]
     for col in rule["columns"]:
         if col not in df.columns:
             failures = failures | pd.Series(True, index=df.index)
             continue
-        failures = failures | _apply_condition(
-            df[col], rule["condition"], rule["value"]
-        )
+        col_value = value[col] if isinstance(value, dict) else value
+        failures = failures | _apply_condition(df[col], rule["condition"], col_value)
     if "filter" in rule and rule["filter"]:
         in_scope = _apply_filter(df, rule["filter"])
         failures = failures & in_scope
@@ -594,6 +594,10 @@ class TestCleanSample:
                 ov["daily_tickers"] = set(CLEAN_TICKERS)
             elif "adjfactor_stable" in fn_path:
                 ov["ca_dates"] = set()
+            elif "open_gap" in fn_path:
+                ov["ca_dates"] = set()
+            elif "calendar_completeness" in fn_path:
+                ov["today"] = TODAY
             elif "no_future_dates" in fn_path or "freshness" in fn_path:
                 ov["today"] = TODAY
             elif "calendar_forward" in fn_path:
@@ -722,7 +726,12 @@ class TestHardTriggerCases:
 
     def test_C07_calendar_completeness(self):
         cal = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-15"]})  # 13-day gap
-        result = evaluate_custom_check(cal, self._rule("C07"), forward_days=30)
+        result = evaluate_custom_check(
+            cal,
+            self._rule("C07"),
+            forward_days=30,
+            today=pd.Timestamp("2024-01-02"),
+        )
         self._assert_caught("C07", result)
 
     def test_C10_industry_coverage(self):
@@ -833,3 +842,78 @@ class TestHardTriggerCases:
         daily.loc[0, "high"] = 0.01  # below minute max high
         result = evaluate_cross_rule(self._rule("K08"), daily, minute)
         self._assert_caught("K08", result)
+
+
+# ── Review-fix regression cases ───────────────────────────────────────
+
+
+class TestReviewFixRegression:
+    """Guard against the 6 review findings recurring."""
+
+    def test_L04_effective_threshold_is_105_pct(self):
+        """Board limit 10% + tolerance 0.5% = 10.5%; 10.8% must fail."""
+        df = _make_clean_daily()
+        df.loc[0, "prev_close"] = 10.0
+        df.loc[0, "close"] = 10.8  # 8% change > 10.5%? no; push higher
+        df.loc[0, "close"] = 10.0 * 1.108  # 10.8% > 10.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert result.iloc[0], "10.8% change must exceed effective 10.5% limit"
+
+    def test_L04_boundary_at_105_pct_passes(self):
+        """Change just below 10.5% must pass (le semantics)."""
+        df = _make_clean_daily()
+        df.loc[0, "prev_close"] = 100.0
+        df.loc[0, "close"] = 110.49  # 10.49% < 10.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "change at 10.49% must pass"
+
+    def test_L09_pb_1500_fails(self):
+        """PB=1500 exceeds PB range (-1000, 1000); must fail."""
+        df = _make_clean_fundamental()
+        df.loc[0, "pb"] = 1500.0
+        rule = _get_rules()["L09"]
+        result = evaluate_column_check(df, rule)
+        assert result.iloc[0], "PB=1500 must exceed PB range limit"
+
+    def test_L09_pe_1500_passes(self):
+        """PE=1500 is within PE range (-10000, 10000); must pass."""
+        df = _make_clean_fundamental()
+        df.loc[0, "pe"] = 1500.0
+        rule = _get_rules()["L09"]
+        result = evaluate_column_check(df, rule)
+        assert not result.iloc[0], "PE=1500 is within PE range"
+
+    def test_K01_ca_day_gap_not_flagged(self):
+        """Ex-right day gap must be skipped when ca_dates is provided."""
+        df = _make_clean_daily()
+        df.loc[0, "open"] = 20.0  # 100% gap from prev_close=10.0
+        df.loc[0, "trade_date"] = "2024-01-02"
+        rule = _get_rules()["K01"]
+        result = evaluate_custom_check(df, rule, ca_dates={"2024-01-02"})
+        assert not result.iloc[0], "CA-day gap must not be flagged"
+
+    def test_K01_non_ca_day_gap_flagged(self):
+        """Non-CA-day gap above threshold must be flagged."""
+        df = _make_clean_daily()
+        df.loc[0, "open"] = 20.0  # 100% gap from prev_close=10.0
+        rule = _get_rules()["K01"]
+        result = evaluate_custom_check(df, rule, ca_dates=set())
+        assert result.iloc[0], "non-CA-day gap must be flagged"
+
+    def test_C03_returns_aggregate_length_1(self):
+        """C03 must return a length-1 __aggregate__ Series, not a multi-row mask."""
+        df = _make_clean_minute()
+        rule = _get_rules()["C03"]
+        result = evaluate_custom_check(df, rule, expected_bars=240)
+        assert len(result) == 1
+        assert result.index[0] == "__aggregate__"
+
+    def test_T03_returns_aggregate_length_1(self):
+        """T03 must return a length-1 __aggregate__ Series."""
+        df = _make_clean_daily()
+        rule = _get_rules()["T03"]
+        result = evaluate_custom_check(df, rule, today=TODAY)
+        assert len(result) == 1
+        assert result.index[0] == "__aggregate__"

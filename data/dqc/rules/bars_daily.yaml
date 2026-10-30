@@ -119,9 +119,9 @@ rules:
     type: custom_check
     function: "checks.custom_checks.check_price_limit_stock"
     params:
-      main_limit: 0.105
-      chinext_star_limit: 0.205
-      ipo_first_5d_limit: 0.305
+      main_limit: 0.10
+      chinext_star_limit: 0.20
+      ipo_first_5d_limit: 0.30
       tolerance: 0.005
     applicability: [daily]
     threshold: "main 10.5% / ChiNext-Star 20.5% / IPO first 5 days 30.5% (= board limit + 0.5% tolerance)"
@@ -216,6 +216,7 @@ rules:
     function: "checks.custom_checks.check_open_gap"
     params:
       max_gap: 0.10
+      ca_table: "corporate_actions"
     applicability: [daily]
     threshold: "non-ex-right day adjusted open / prev close gap <= 10%"
     threshold_source: statistical

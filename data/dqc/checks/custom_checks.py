@@ -46,8 +46,8 @@ def check_minute_bar_count(
 ) -> pd.Series:
     """C03: every ticker every day must have exactly *expected_bars* bars."""
     counts = df.groupby(["ticker", "trade_date"]).size()
-    failed_mask = counts != expected_bars
-    return failed_mask.rename("__aggregate__").reset_index(drop=True)
+    has_bad = bool((counts != expected_bars).any())
+    return pd.Series([has_bad], index=["__aggregate__"])
 
 
 def check_null_soft_fields(
@@ -78,11 +78,16 @@ def check_adjfactor_present(
 def check_calendar_completeness(
     df: pd.DataFrame, forward_days: int = 30, today=None, **_
 ) -> pd.Series:
-    """C07: calendar must cover current year + *forward_days* trading days without gaps."""
+    """C07: calendar must cover [today, today+forward_days] trading days without gaps."""
+    ref = (
+        pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
+    )
     dates = pd.to_datetime(df["trade_date"]).sort_values().unique()
-    if len(dates) < 2:
-        return pd.Series([False], index=["__aggregate__"])
-    diffs = pd.Series(dates).diff().dropna()
+    window_end = ref + pd.Timedelta(days=forward_days * 2)
+    forward_dates = dates[(dates >= ref) & (dates <= window_end)]
+    if len(forward_dates) < 2:
+        return pd.Series([len(forward_dates) < forward_days], index=["__aggregate__"])
+    diffs = pd.Series(forward_dates).diff().dropna()
     has_gap = bool((diffs > pd.Timedelta(days=5)).any())
     return pd.Series([has_gap], index=["__aggregate__"])
 
@@ -133,9 +138,9 @@ def check_ohlc_relation(df: pd.DataFrame, tolerance: float = 0.0, **_) -> pd.Ser
 
 def check_price_limit_stock(
     df: pd.DataFrame,
-    main_limit: float = 0.105,
-    chinext_star_limit: float = 0.205,
-    ipo_first_5d_limit: float = 0.305,
+    main_limit: float = 0.10,
+    chinext_star_limit: float = 0.20,
+    ipo_first_5d_limit: float = 0.30,
     tolerance: float = 0.005,
     **_,
 ) -> pd.Series:
@@ -178,12 +183,18 @@ def check_factor_nan_rate(
 # ── Consistency K01–K05, K09–K11 ─────────────────────────────────────
 
 
-def check_open_gap(df: pd.DataFrame, max_gap: float = 0.10, **_) -> pd.Series:
+def check_open_gap(
+    df: pd.DataFrame, max_gap: float = 0.10, ca_dates=None, **_
+) -> pd.Series:
     """K01: non-ex-right-day adjusted open / prev_close gap <= max_gap."""
     if "prev_close" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
     gap = ((df["open"] - df["prev_close"]) / df["prev_close"]).abs()
-    return gap > max_gap
+    failed = gap > max_gap
+    if ca_dates:
+        is_ca = df["trade_date"].isin(ca_dates)
+        failed = failed & ~is_ca
+    return failed
 
 
 def check_volume_amount_match(df: pd.DataFrame, **_) -> pd.Series:
@@ -300,7 +311,8 @@ def check_no_future_dates(df: pd.DataFrame, today=None, **_) -> pd.Series:
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
     dates = pd.to_datetime(df["trade_date"])
-    return (dates > ref).rename("__aggregate__").reset_index(drop=True)
+    has_future = bool((dates > ref).any())
+    return pd.Series([has_future], index=["__aggregate__"])
 
 
 def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
