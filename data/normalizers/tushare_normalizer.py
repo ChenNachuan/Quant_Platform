@@ -36,8 +36,11 @@ _COLUMN_MAP: dict[str, str] = {
     "amount": "amount",
     "adj_factor": "adjfactor",
     "suspend_d": "suspend",
-    "suspend": "suspend",
 }
+
+#: When the frame carries both ``suspend_d`` and ``suspend``, coalesce before
+#: rename so we do not get two columns mapped to the same target.
+_SUSPEND_COALESCE_PRIMARY = "suspend_d"
 
 _NUMERIC_COLS = (
     "open",
@@ -65,7 +68,20 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     if asset_type != "stock":
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
-    df = raw_df.rename(columns=_COLUMN_MAP).copy()
+    df = raw_df.copy()
+    # Fix (optional finding #52): coalesce dual suspend columns before rename.
+    # suspend_d is the authoritative source; suspend is the pre-merged fallback.
+    if _SUSPEND_COALESCE_PRIMARY in df.columns and "suspend" in df.columns:
+        # Coerce suspend_d tokens to bool, preserving NaN so the suspend
+        # fallback can fill them (filling NaN→False first would block fallback).
+        sd = df["suspend_d"]
+        if sd.dtype == object or sd.dtype.name == "string":
+            coerced = sd.map({"S": True, " ": False})
+        else:
+            coerced = sd.astype("boolean")
+        df["suspend_d"] = coerced.fillna(df["suspend"].astype(bool))
+        df = df.drop(columns=["suspend"])
+    df = df.rename(columns=_COLUMN_MAP)
 
     # Type conversion: dates and numerics
     if "trade_date" in df.columns:
