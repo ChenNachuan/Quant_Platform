@@ -650,6 +650,32 @@ class TestQuarantineSavePath:
         assert not old_file.exists(), "expired quarantine file should be deleted"
         assert new_file.exists(), "recent quarantine file should survive"
 
+    def test_cleanup_quarantine_does_not_touch_raw(self, tmp_path):
+        """Finding 1 regression: cleanup_quarantine must not delete outside quarantine/."""
+        from data.quarantine import cleanup_quarantine
+
+        # Expired file in raw/ — must survive cleanup_quarantine
+        raw_dir = tmp_path / "raw" / "akshare" / "stock"
+        raw_dir.mkdir(parents=True)
+        raw_file = raw_dir / "2020-01-01.parquet"
+        raw_file.write_bytes(b"fake")
+
+        # Expired file in quarantine/ — should be deleted
+        q_dir = tmp_path / "quarantine" / "stock"
+        q_dir.mkdir(parents=True)
+        q_file = q_dir / "2020-01-01.parquet"
+        q_file.write_bytes(b"fake")
+
+        (tmp_path / "lifecycle.yaml").write_text(
+            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+        )
+
+        cleanup_quarantine(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        assert not q_file.exists(), "expired quarantine file should be deleted"
+        assert raw_file.exists(), (
+            "cleanup_quarantine must NOT delete files outside quarantine/"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Optional review finding regressions (PR #51)
@@ -675,19 +701,27 @@ class TestOptionalFindingRegressions:
         assert out["suspend"].iloc[0] is True or out["suspend"].iloc[0] == True  # noqa: E712
 
     def test_tushare_dual_suspend_suspend_wins_when_d_nan(self):
-        """Finding #52: suspend fallback used when suspend_d is NaN."""
+        """Finding #52: suspend fallback fills the suspend_d NaN row.
+
+        Mixed frame is required for discrimination: with ``suspend_d``
+        all-NaN the coalesce collapses to a bool column and old and new code
+        both take the bool else-branch downstream, so an all-None probe
+        cannot fail when fix 2 reverts.  Here row 1's ``None`` must fall
+        back to ``suspend=True``; the pre-fix ``fillna`` keeps object dtype
+        and the token mapper later drops that row to False.
+        """
         raw = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ"],
-                "trade_date": ["20250314"],
-                "vol": [100],
-                "amount": [500],
-                "suspend_d": [None],
-                "suspend": [True],
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20250312", "20250313", "20250314"],
+                "vol": [100, 100, 100],
+                "amount": [500, 500, 500],
+                "suspend_d": ["S", None, " "],
+                "suspend": [True, True, False],
             }
         )
         out = normalize_tushare("stock", raw)
-        assert bool(out["suspend"].iloc[0]) is True
+        assert out["suspend"].tolist() == [True, True, False]
 
     def test_amazingdata_adjfactor_nav_wins(self):
         """Finding #53: NAV_ADJ_FACTOR wins when both carry non-NaN values."""
