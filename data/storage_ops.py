@@ -320,7 +320,8 @@ def write_parquet_atomic(
         except OSError:
             logger.warning(
                 "wrote %s but could not fsync %s; committed but not durable",
-                target, target.parent,
+                target,
+                target.parent,
             )
 
 
@@ -520,7 +521,10 @@ def _match_policy(rel_parts: tuple[str, ...], policies: list[dict]) -> dict:
         if not prefix:
             continue
         prefix_parts = tuple(prefix.split("/"))
-        if rel_parts[: len(prefix_parts)] == prefix_parts and len(prefix_parts) > best_len:
+        if (
+            rel_parts[: len(prefix_parts)] == prefix_parts
+            and len(prefix_parts) > best_len
+        ):
             best = policy
             best_len = len(prefix_parts)
     return best if best is not None else {}
@@ -529,6 +533,7 @@ def _match_policy(rel_parts: tuple[str, ...], policies: list[dict]) -> dict:
 def cleanup_expired(
     root: str | os.PathLike[str] = "data_platform",
     *,
+    subdir: str | None = None,
     dry_run: bool = True,
     config_path: str | os.PathLike[str] | None = None,
     today: date | None = None,
@@ -539,6 +544,11 @@ def cleanup_expired(
     so there is no "call it and it deletes" path.  Production callers pass
     ``dry_run=False`` explicitly (§3).
 
+    *subdir* scopes the walk and deletion to one subtree under *root* while
+    keeping policy-relative paths rooted at *root* — so ``subdir="raw"`` only
+    touches files under ``root/raw/`` but still matches the ``raw/`` lifecycle
+    policy.
+
     Rules with ``retention: permanent`` are skipped.  Files whose name has no
     parseable date are kept.  ``.tmp`` / ``.lock`` residue is the job of
     :func:`cleanup_stale_tmp` / :func:`cleanup_stale_locks`, not this one.
@@ -547,13 +557,16 @@ def cleanup_expired(
     (``dry_run=True``).
     """
     root = Path(root)
+    scan_root = root / subdir if subdir else root
+    if not scan_root.exists():
+        return []
     policy_doc = load_lifecycle(config_path)
     policies = list(policy_doc.get("policies", []))
     default_policy = {"retention": policy_doc.get("default", "permanent")}
     cutoff_today = today if today is not None else date.today()
 
     removed: list[Path] = []
-    for path in _iter_files(root):
+    for path in _iter_files(scan_root):
         if path.name.endswith((_TMP_SUFFIX, _LOCK_SUFFIX)):
             continue
         try:
