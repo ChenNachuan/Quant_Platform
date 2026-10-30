@@ -163,15 +163,19 @@ def cleanup_quarantine(
 
     Thin wrapper over ``storage_ops.cleanup_expired`` — no days literal in
     Python.  Covers repair path C (T+30 auto-clean).
+
+    Scope: passes ``subdir=quarantine`` so ``cleanup_expired`` only walks and
+    deletes within this subtree while keeping policy-relative paths rooted at
+    *data_root* (finding 1: scoping the deletion, not the returned list).
     """
     from data.storage_ops import cleanup_expired
 
     q_root = Path(data_root) / QUARANTINE_ROOT
     if not q_root.exists():
         return []
-    removed = cleanup_expired(
+    return cleanup_expired(
         root=data_root,
+        subdir=QUARANTINE_ROOT,
         dry_run=dry_run,
         today=today,
     )
-    return [p for p in removed if q_root in p.parents or p.parent == q_root]

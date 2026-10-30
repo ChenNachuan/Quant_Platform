@@ -402,6 +402,30 @@ class TestRawLanding:
             load_raw("akshare", "stock", date(2025, 1, 1), data_root=tmp_path) is None
         )
 
+    def test_cleanup_raw_does_not_touch_quarantine(self, tmp_path):
+        """Finding 1 regression: cleanup_raw must not delete outside raw/."""
+        from data.raw import cleanup_raw
+
+        # Expired file in quarantine/ — must survive cleanup_raw
+        q_dir = tmp_path / "quarantine" / "stock"
+        q_dir.mkdir(parents=True)
+        q_file = q_dir / "2020-01-01.parquet"
+        q_file.write_bytes(b"fake")
+
+        # Expired file in raw/ — should be deleted
+        raw_dir = tmp_path / "raw" / "akshare" / "stock"
+        raw_dir.mkdir(parents=True)
+        raw_file = raw_dir / "2020-01-01.parquet"
+        raw_file.write_bytes(b"fake")
+
+        (tmp_path / "lifecycle.yaml").write_text(
+            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+        )
+
+        cleanup_raw(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        assert not raw_file.exists(), "expired raw file should be deleted"
+        assert q_file.exists(), "cleanup_raw must NOT delete files outside raw/"
+
 
 class TestWatermarkIdempotentRerun:
     """ac-2: watermark persistence + idempotent re-run.
@@ -416,6 +440,25 @@ class TestWatermarkIdempotentRerun:
 
         write_watermark("akshare", "stock", "2025-03-14", tmp_path)
         assert read_watermark("akshare", "stock", tmp_path) == "2025-03-14"
+
+    def test_same_date_double_save_idempotent(self, tmp_path):
+        """ac-2: re-running the same date must not duplicate rows."""
+        from data.raw import load_raw, save_raw
+
+        df = pd.DataFrame({"close": [10.5, 11.0], "ticker": ["000001.SZ", "600000.SH"]})
+        d = date(2025, 3, 14)
+
+        # First save
+        save_raw(df, "akshare", "stock", d, data_root=tmp_path)
+        first = load_raw("akshare", "stock", d, data_root=tmp_path)
+        assert first is not None and len(first) == 2
+
+        # Second save — same date, same data (idempotent re-run)
+        save_raw(df, "akshare", "stock", d, data_root=tmp_path)
+        second = load_raw("akshare", "stock", d, data_root=tmp_path)
+        assert second is not None
+        assert len(second) == 2, "double-save must not duplicate rows"
+        assert second["close"].tolist() == pytest.approx([10.5, 11.0])
 
     def test_watermark_overwrite(self, tmp_path):
         from data.source_adapter import read_watermark, write_watermark

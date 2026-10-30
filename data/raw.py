@@ -112,16 +112,19 @@ def cleanup_raw(
     Thin wrapper over ``storage_ops.cleanup_expired`` — no days literal in
     Python.  ``.watermarks.json`` survives because ``parse_date_from_filename``
     returns ``None`` for it (ac-2 asserts this explicitly).
+
+    Scope: passes ``subdir=raw`` so ``cleanup_expired`` only walks and deletes
+    within this subtree while keeping policy-relative paths rooted at
+    *data_root* (finding 1: scoping the deletion, not the returned list).
     """
     from data.storage_ops import cleanup_expired
 
     raw_root = Path(data_root) / RAW_ROOT
     if not raw_root.exists():
         return []
-    removed = cleanup_expired(
+    return cleanup_expired(
         root=data_root,
+        subdir=RAW_ROOT,
         dry_run=dry_run,
         today=today,
     )
-    # Filter to raw/ only — cleanup_expired operates on the whole tree.
-    return [p for p in removed if raw_root in p.parents or p.parent == raw_root]

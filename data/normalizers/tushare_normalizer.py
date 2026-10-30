@@ -72,7 +72,14 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     # Fix (optional finding #52): coalesce dual suspend columns before rename.
     # suspend_d is the authoritative source; suspend is the pre-merged fallback.
     if _SUSPEND_COALESCE_PRIMARY in df.columns and "suspend" in df.columns:
-        df["suspend_d"] = df["suspend_d"].fillna(df["suspend"])
+        # Coerce suspend_d tokens to bool, preserving NaN so the suspend
+        # fallback can fill them (filling NaN→False first would block fallback).
+        sd = df["suspend_d"]
+        if sd.dtype == object or sd.dtype.name == "string":
+            coerced = sd.map({"S": True, " ": False})
+        else:
+            coerced = sd.astype("boolean")
+        df["suspend_d"] = coerced.fillna(df["suspend"].astype(bool))
         df = df.drop(columns=["suspend"])
     df = df.rename(columns=_COLUMN_MAP)
 
