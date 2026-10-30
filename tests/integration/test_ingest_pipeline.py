@@ -196,6 +196,31 @@ class TestCorporateActionEdge:
         out = normalize_amazingdata("stock", raw)
         assert out["adjfactor"].tolist() == [1.0, 1.05, 1.05]
 
+    def test_amazingdata_adjfactor_nav_nan_falls_back(self):
+        """Kline adjfactor used when NAV_ADJ_FACTOR is NaN (coalesce invariant).
+
+        Reclassified from the #53 regression set: with NAV all-NaN both
+        coalesce directions resolve to kline's value, so this passes with the
+        direction reverted and cannot claim #53.  The direction claim lives
+        in ``TestOptionalFindingRegressions`` mixed-row check.
+        """
+        raw = pd.DataFrame(
+            {
+                "code": ["000001.SZ"],
+                "kline_time": ["2025-03-14"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+                "amount": [10200.0],
+                "adjfactor": [0.85],  # kline has value
+                "NAV_ADJ_FACTOR": [None],  # NAV missing
+            }
+        )
+        out = normalize_amazingdata("stock", raw)
+        assert out["adjfactor"].iloc[0] == pytest.approx(0.85)
+
 
 # ---------------------------------------------------------------------------
 # Dispatch and column contract
@@ -642,21 +667,17 @@ class TestOptionalFindingRegressions:
             "NAV_ADJ_FACTOR must win when both carry values"
         )
 
-    def test_amazingdata_adjfactor_nav_nan_falls_back(self):
-        """Finding #53: kline adjfactor used when NAV_ADJ_FACTOR is NaN."""
-        raw = pd.DataFrame(
-            {
-                "code": ["000001.SZ"],
-                "kline_time": ["2025-03-14"],
-                "open": [10.0],
-                "high": [10.5],
-                "low": [9.8],
-                "close": [10.2],
-                "volume": [1000],
-                "amount": [10200.0],
-                "adjfactor": [0.85],  # kline has value
-                "NAV_ADJ_FACTOR": [None],  # NAV missing
-            }
-        )
+    def test_amazingdata_adjfactor_nav_mixed_rows(self):
+        """Finding #53: NAV wins where present, kline fills NAV-NaN rows.
+
+        One frame carries both shapes.  NAV-present rows hold values that
+        conflict with kline's, so reverting the direction (NAV wins → kline
+        wins) flips those rows and fails the column assert; the NAV-NaN row
+        keeps the fallback claim in the same check.  Replaces the old
+        ``nav_nan_falls_back`` (NAV all-NaN): that shape resolves to kline's
+        value under *both* directions and cannot discriminate #53.
+        """
+        raw = _AMAZING_RAW.copy()  # kline adjfactor = [1.0, 1.05, 1.05]
+        raw["NAV_ADJ_FACTOR"] = [0.90, np.nan, 0.70]
         out = normalize_amazingdata("stock", raw)
-        assert out["adjfactor"].iloc[0] == pytest.approx(0.85)
+        assert out["adjfactor"].tolist() == pytest.approx([0.90, 1.05, 0.70])
