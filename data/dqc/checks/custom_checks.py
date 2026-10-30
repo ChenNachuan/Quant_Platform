@@ -85,8 +85,8 @@ def check_calendar_completeness(
     dates = pd.to_datetime(df["trade_date"]).sort_values().unique()
     window_end = ref + pd.Timedelta(days=forward_days * 2)
     forward_dates = dates[(dates >= ref) & (dates <= window_end)]
-    if len(forward_dates) < 2:
-        return pd.Series([len(forward_dates) < forward_days], index=["__aggregate__"])
+    if len(forward_dates) < forward_days:
+        return pd.Series([True], index=["__aggregate__"])
     diffs = pd.Series(forward_dates).diff().dropna()
     has_gap = bool((diffs > pd.Timedelta(days=5)).any())
     return pd.Series([has_gap], index=["__aggregate__"])

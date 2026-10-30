@@ -530,7 +530,12 @@ class TestHardBoundaryDeclarations:
 
 class TestUniquenessAcrossFiles:
     def test_multi_asset_rules_consistent_across_files(self):
-        """A rule appearing in multiple YAMLs must have identical severity and type."""
+        """A rule appearing in multiple YAMLs must be an identical copy everywhere.
+
+        Full-body comparison, not just severity/type: _unique_rules is
+        first-wins, so a diverging copy silently shadows the corrected one
+        (C05 params once diverged exactly this way).
+        """
         entries = _load_all_rules()
         by_id = {}
         for fname, rule in entries:
@@ -540,14 +545,13 @@ class TestUniquenessAcrossFiles:
             by_id[rid].append((fname, rule))
         for rid, occurrences in by_id.items():
             if len(occurrences) > 1:
-                severities = {r["severity"] for _f, r in occurrences}
-                types = {r["type"] for _f, r in occurrences}
-                assert len(severities) == 1, (
-                    f"{rid}: inconsistent severity across files: {severities}"
-                )
-                assert len(types) == 1, (
-                    f"{rid}: inconsistent type across files: {types}"
-                )
+                base_fname, base = occurrences[0]
+                for fname, rule in occurrences[1:]:
+                    for field in sorted(set(base) | set(rule)):
+                        assert base.get(field) == rule.get(field), (
+                            f"{rid}: {field} differs between {base_fname} and "
+                            f"{fname}: {base.get(field)!r} vs {rule.get(field)!r}"
+                        )
 
 
 # ── Clean sample: all 44 rules pass ───────────────────────────────────
@@ -917,3 +921,32 @@ class TestReviewFixRegression:
         result = evaluate_custom_check(df, rule, today=TODAY)
         assert len(result) == 1
         assert result.index[0] == "__aggregate__"
+
+    def test_C05_nan_pe_pb_caught(self):
+        """Effective C05 must include pe/pb — NaN in either must trip the rule.
+
+        Regression for the incomplete fix-2: only fundamental.yaml was
+        patched while the stale bars_daily.yaml copy shadowed it through
+        first-wins dedup, so NaN pe/pb passed unflagged.
+        """
+        rule = _get_rules()["C05"]
+        for col in ("pe", "pb"):
+            df = _make_clean_daily().copy()
+            df["pe"] = 15.0
+            df["pb"] = 1.5
+            df.loc[0, col] = np.nan
+            result = evaluate_custom_check(df, rule)
+            assert result.iloc[0], f"NaN {col} must be caught by effective C05"
+
+    def test_C07_forward_coverage_enforced(self):
+        """A 2-date calendar cannot cover forward_days=30 — must fail on coverage.
+
+        Regression: the < forward_days coverage guard used to fire only below
+        2 dates, so a 2-date gapless calendar passed vacuously.
+        """
+        cal = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-03"]})
+        rule = _get_rules()["C07"]
+        result = evaluate_custom_check(
+            cal, rule, forward_days=30, today=pd.Timestamp("2024-01-02")
+        )
+        assert result.iloc[0], "2-date calendar must fail forward coverage"

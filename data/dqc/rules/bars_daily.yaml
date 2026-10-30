@@ -53,7 +53,7 @@ rules:
     function: "checks.custom_checks.check_null_soft_fields"
     params:
       max_null_rate: 0.01
-      columns: [amount, adjfactor]
+      columns: [amount, adjfactor, pe, pb]
     applicability: [daily, fund]
     threshold: "null rate of amount/adjfactor/PE/PB <= 1%"
     threshold_source: statistical
