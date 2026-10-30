@@ -1,0 +1,163 @@
+# DQC rules — fundamental (fundamental data)
+# Source: docs/design/data/dqc_rules.md
+# Multi-asset rules repeat per their applicability mark.
+
+rules:
+  # ---- Completeness ----
+  - id: C01
+    name: row_count_vs_calendar
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_row_count_vs_calendar"
+    params:
+      comparison: "eq"
+    applicability: [daily, fund]
+    threshold: "deduplicated trade_date count == calendar trading day count"
+    threshold_source: fixed
+    boundary: "eq: both sides must match exactly; one extra or one missing date fails"
+    description: "Row count must equal calendar trading days"
+
+  - id: C02
+    name: row_count_vs_universe
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_row_count_vs_universe"
+    params:
+      min_ratio: 0.95
+    applicability: [daily, fund]
+    threshold: "single-day ticker count >= universe 95%"
+    threshold_source: statistical
+    boundary: "ge 0.95: ratio exactly 0.95 passes, 0.9499 fails"
+    description: "Daily ticker coverage vs universe"
+
+  - id: C05
+    name: null_soft_fields
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_null_soft_fields"
+    params:
+      max_null_rate: 0.01
+      columns: [amount, adjfactor]
+    applicability: [daily, fund]
+    threshold: "null rate of amount/adjfactor/PE/PB <= 1%"
+    threshold_source: statistical
+    boundary: "le 0.01: null rate exactly 1% passes, above 1% fails"
+    description: "Soft fields null rate"
+
+  # ---- Legality ----
+  - id: L09
+    name: pe_pb_range
+    severity: SOFT
+    type: column_check
+    columns: [pe, pb]
+    condition: "range"
+    value: [-10000, 10000]
+    applicability: [fund]
+    threshold: "PE in (-1e4, 1e4), PB in (-1e3, 1e3)"
+    threshold_source: statistical
+    boundary: "open interval: PE (-10000, 10000), PB (-1000, 1000); boundary values FAIL (exclusive)"
+    description: "PE/PB range validation"
+
+  - id: L10
+    name: market_cap_positive
+    severity: HARD
+    type: column_check
+    columns: [market_cap]
+    condition: "gt"
+    value: 0
+    applicability: [fund]
+    threshold: "total market cap > 0"
+    threshold_source: fixed
+    boundary: "gt 0: strictly greater than; 0 FAILS, any positive PASSES"
+    description: "Market cap must be positive"
+
+  - id: L13
+    name: ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^[036]\\d{5}\\.(SH|SZ)$"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "regex ^[036]\\d{5}\\.(SH|SZ)$"
+    threshold_source: fixed
+    boundary: "full regex match: partial match or mismatch fails"
+    description: "Ticker format validation"
+
+  - id: L14
+    name: date_format
+    severity: HARD
+    type: column_check
+    columns: [trade_date]
+    condition: "date_format"
+    value: "ISO8601"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "ISO 8601 date format"
+    threshold_source: fixed
+    boundary: "valid ISO 8601 date: non-parseable dates fail"
+    description: "Date format must be ISO 8601"
+
+  # ---- Consistency ----
+  - id: K11
+    name: fund_vs_daily_tickers
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_fund_vs_daily_tickers"
+    params:
+      max_diff: 5
+    applicability: [daily, fund]
+    threshold: "set difference <= 5"
+    threshold_source: statistical
+    boundary: "le 5: difference of exactly 5 passes, 6 fails"
+    description: "Ticker set consistency between fundamental and daily"
+
+  # ---- Timeliness ----
+  - id: T01
+    name: daily_freshness
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_daily_freshness"
+    params:
+      max_stale_days: 1
+    applicability: [daily, fund]
+    threshold: "latest trade_date within 1 trading day of now"
+    threshold_source: fixed
+    boundary: "le 1: exactly 1 trading day stale passes, 2 fails"
+    description: "Daily data freshness"
+
+  - id: T03
+    name: no_future_dates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_dates"
+    params: {}
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "all trade_date <= today"
+    threshold_source: fixed
+    boundary: "le today: today PASSES, any future date FAILS"
+    description: "No future dates"
+
+  - id: T04
+    name: date_ascending
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_ascending"
+    params: {}
+    applicability: [daily, minute, fund]
+    threshold: "strictly ascending with no duplicates within partition"
+    threshold_source: fixed
+    boundary: "strictly increasing: equal consecutive dates (duplicates) FAIL"
+    description: "Dates must be strictly ascending with no duplicates"
+
+  - id: T09
+    name: late_correction
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_late_correction"
+    params:
+      max_change_rate: 0.0001
+    applicability: [daily, fund]
+    threshold: "historical change > 0.01% triggers alert"
+    threshold_source: statistical
+    boundary: "gt 0.0001: change rate at exactly 0.01% does NOT trigger, above triggers"
+    description: "Late correction detection for historical data"
