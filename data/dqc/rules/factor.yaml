@@ -1,0 +1,126 @@
+# DQC rules — factor (factor data)
+# Source: docs/design/data/dqc_rules.md
+# Multi-asset rules repeat per their applicability mark.
+
+rules:
+  # ---- Completeness ----
+  - id: C08
+    name: factor_date_coverage
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_factor_date_coverage"
+    params:
+      window: 252
+      max_missing: 2
+    applicability: [factor]
+    threshold: "rolling 252-day missing <= 2 days"
+    threshold_source: statistical
+    boundary: "le 2: exactly 2 missing days in the window passes, 3 fails"
+    description: "Factor date coverage over rolling window"
+
+  - id: C09
+    name: factor_ticker_coverage
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_factor_ticker_coverage"
+    params:
+      min_ratio: 0.90
+    applicability: [factor]
+    threshold: ">= universe 90%"
+    threshold_source: statistical
+    boundary: "ge 0.90: ratio exactly 90% passes, below fails"
+    description: "Factor ticker coverage vs universe"
+
+  # ---- Legality ----
+  - id: L11
+    name: factor_finite
+    severity: HARD
+    type: column_check
+    columns: [value]
+    condition: "notinf"
+    value: null
+    applicability: [factor]
+    threshold: "no inf/-inf"
+    threshold_source: fixed
+    boundary: "notinf: any positive or negative infinity value fails"
+    description: "Factor values must be finite"
+
+  - id: L12
+    name: factor_nan_rate
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_factor_nan_rate"
+    params:
+      max_nan_rate: 0.10
+    applicability: [factor]
+    threshold: "NaN rate <= 10%"
+    threshold_source: statistical
+    boundary: "le 0.10: NaN rate at exactly 10% passes, above fails"
+    description: "Factor NaN rate"
+
+  - id: L13
+    name: ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^[036]\\d{5}\\.(SH|SZ)$"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "regex ^[036]\\d{5}\\.(SH|SZ)$"
+    threshold_source: fixed
+    boundary: "full regex match: partial match or mismatch fails"
+    description: "Ticker format validation"
+
+  - id: L14
+    name: date_format
+    severity: HARD
+    type: column_check
+    columns: [trade_date]
+    condition: "date_format"
+    value: "ISO8601"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "ISO 8601 date format"
+    threshold_source: fixed
+    boundary: "valid ISO 8601 date: non-parseable dates fail"
+    description: "Date format must be ISO 8601"
+
+  # ---- Consistency ----
+  - id: K09
+    name: factor_cross_section
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_factor_cross_section"
+    params:
+      min_std: 1.0e-8
+      max_abs_mean: 100
+    applicability: [factor]
+    threshold: "cross-sectional std > 1e-8 AND abs(mean) < 100"
+    threshold_source: fixed
+    boundary: "std gt 1e-8 (strictly), abs(mean) lt 100 (strictly); boundary values FAIL"
+    description: "Factor cross-sectional statistics sanity"
+
+  # ---- Timeliness ----
+  - id: T03
+    name: no_future_dates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_dates"
+    params: {}
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "all trade_date <= today"
+    threshold_source: fixed
+    boundary: "le today: today PASSES, any future date FAILS"
+    description: "No future dates"
+
+  - id: T07
+    name: factor_lag
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_factor_lag"
+    params:
+      max_lag_days: 2
+    applicability: [factor]
+    threshold: "D-day data arrives by D+2"
+    threshold_source: fixed
+    boundary: "le 2: arrival by exactly D+2 passes, D+3 fails"
+    description: "Factor data arrival lag"

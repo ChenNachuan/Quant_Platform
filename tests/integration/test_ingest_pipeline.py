@@ -758,3 +758,130 @@ class TestOptionalFindingRegressions:
         raw["NAV_ADJ_FACTOR"] = [0.90, np.nan, 0.70]
         out = normalize_amazingdata("stock", raw)
         assert out["adjfactor"].tolist() == pytest.approx([0.90, 1.05, 0.70])
+
+
+# ---------------------------------------------------------------------------
+# ac-3: K06–K08 cross-table consistency at the pipeline seam
+# ---------------------------------------------------------------------------
+
+
+def _make_consistent_pair():
+    """Return (daily_df, minute_df) that passes K06–K08."""
+    daily = pd.DataFrame(
+        {
+            "ticker": ["000001.SZ", "000001.SZ"],
+            "trade_date": ["2024-01-15", "2024-01-16"],
+            "open": [10.0, 10.5],
+            "high": [10.5, 11.0],
+            "low": [9.5, 10.0],
+            "close": [10.2, 10.8],
+            "volume": [100000.0, 120000.0],
+        }
+    )
+    minute = pd.DataFrame(
+        {
+            "ticker": ["000001.SZ"] * 4,
+            "trade_date": ["2024-01-15", "2024-01-15", "2024-01-16", "2024-01-16"],
+            "timestamp": [
+                "2024-01-15 09:30:00",
+                "2024-01-15 14:59:00",
+                "2024-01-16 09:30:00",
+                "2024-01-16 14:59:00",
+            ],
+            "open": [10.0, 10.2, 10.5, 10.8],
+            "high": [10.3, 10.5, 10.8, 11.0],
+            "low": [9.5, 9.8, 10.0, 10.3],
+            "close": [10.2, 10.2, 10.8, 10.8],
+            "volume": [50000.0, 50000.0, 60000.0, 60000.0],
+        }
+    )
+    return daily, minute
+
+
+class TestCrossTableK06K08:
+    """ac-3: inconsistent daily/minute pairs must be caught at the pipeline seam.
+
+    K06: daily close vs last minute close (tolerance 0.01).
+    K07: daily volume vs sum of minute volumes (rel diff <= 0.1 %).
+    K08: daily high/low must contain minute extremes.
+    """
+
+    def test_consistent_pair_passes_all_three(self):
+        from data.dqc.checks.cross_checks import (
+            check_daily_vs_minute_close,
+            check_daily_vs_minute_hl,
+            check_daily_vs_minute_volume,
+        )
+
+        daily, minute = _make_consistent_pair()
+        assert not check_daily_vs_minute_close(daily, minute, tolerance=0.01).any()
+        assert not check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001).any()
+        assert not check_daily_vs_minute_hl(daily, minute).any()
+
+    def test_K06_close_mismatch_beyond_tolerance(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "close"] = 99.0  # way off from last minute close 10.2
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert result.iloc[0], "K06 must catch close mismatch > 0.01"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K06_close_mismatch_within_tolerance_passes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "close"] = 10.205  # 0.005 from last minute close — within 0.01
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert not result.any(), "mismatch within tolerance must pass"
+
+    def test_K07_volume_sum_off_by_over_01pct(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily, minute = _make_consistent_pair()
+        # daily vol 100000 vs minute sum 100000 → OK for day 1.
+        # Corrupt day 1 daily volume to 101000 (1 % over)
+        daily.loc[0, "volume"] = 101000.0
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert result.iloc[0], "K07 must catch volume sum mismatch > 0.1 %"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K07_volume_sum_within_tolerance_passes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "volume"] = 100050.0  # 0.05 % over — within 0.1 %
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert not result.any(), "volume sum mismatch within 0.1 % must pass"
+
+    def test_K08_high_not_containing_minute_extremes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily, minute = _make_consistent_pair()
+        # daily high 10.5 < minute max high 10.5 is fine (>=).
+        # Corrupt: daily high drops below minute max high
+        daily.loc[0, "high"] = 9.0
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert result.iloc[0], "K08 must catch daily high < minute max high"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K08_low_not_containing_minute_extremes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "low"] = 11.0  # daily low 11 > minute min low 9.5
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert result.iloc[0], "K08 must catch daily low > minute min low"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K08_boundary_equality_passes(self):
+        """Daily high == minute max high and low == minute min low must pass."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily, minute = _make_consistent_pair()
+        # Day 1 minute max high = 10.5, min low = 9.5
+        # Set daily to exactly those extremes
+        daily.loc[0, "high"] = 10.5
+        daily.loc[0, "low"] = 9.5
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert not result.iloc[0], "boundary equality must pass (inclusive)"

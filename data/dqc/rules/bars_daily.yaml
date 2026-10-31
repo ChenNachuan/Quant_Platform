@@ -1,0 +1,389 @@
+# DQC rules — bars_daily (daily bars / daily+futures)
+# Source: docs/design/data/dqc_rules.md
+# Unique rule IDs across all 5 YAMLs = 44 (C01-C10, L01-L14, K01-K11, T01-T09).
+# Multi-asset rules repeat per their applicability mark.
+# HARD = reject-to-quarantine, SOFT = quality_flag only (never interchanged).
+
+rules:
+  # ---- Completeness C01-C10 ----
+  - id: C01
+    name: row_count_vs_calendar
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_row_count_vs_calendar"
+    params:
+      comparison: "eq"
+    applicability: [daily, fund]
+    threshold: "deduplicated trade_date count == calendar trading day count"
+    threshold_source: fixed
+    boundary: "eq: both sides must match exactly; one extra or one missing date fails"
+    description: "Row count must equal calendar trading days"
+
+  - id: C02
+    name: row_count_vs_universe
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_row_count_vs_universe"
+    params:
+      min_ratio: 0.95
+    applicability: [daily, fund]
+    threshold: "single-day ticker count >= universe 95%"
+    threshold_source: statistical
+    boundary: "ge 0.95: ratio exactly 0.95 passes, 0.9499 fails"
+    description: "Daily ticker coverage vs universe"
+
+  - id: C04
+    name: null_critical_fields
+    severity: HARD
+    type: column_check
+    columns: [open, high, low, close, volume]
+    condition: "notnull"
+    value: null
+    filter: "suspend == False"
+    applicability: [daily, minute]
+    threshold: "non-suspended OHLCV has zero nulls"
+    threshold_source: fixed
+    boundary: "notnull: any null in OHLCV for a non-suspended row fails"
+    description: "Critical fields must not be null for non-suspended rows"
+
+  - id: C05
+    name: null_soft_fields
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_null_soft_fields"
+    params:
+      max_null_rate: 0.01
+      columns: [amount, adjfactor, turnover, pe_ttm, pe_lyr, pb, ps_ttm]
+    applicability: [daily, fund]
+    threshold: "null rate of amount/adjfactor/turnover/PE/PB/PS <= 1%"
+    threshold_source: statistical
+    boundary: "le 0.01: null rate exactly 1% passes, above 1% fails"
+    description: "Soft fields null rate"
+
+  - id: C06
+    name: adjfactor_present
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_adjfactor_present"
+    params:
+      max_missing_rate: 0.0
+    applicability: [daily]
+    threshold: "ticker x date adjfactor missing rate = 0%"
+    threshold_source: fixed
+    boundary: "eq 0: any missing (ticker,date) adjfactor entry fails"
+    description: "Adjfactor must be present for every ticker x date"
+
+  - id: L01
+    name: price_positive
+    severity: HARD
+    type: column_check
+    columns: [open, high, low, close]
+    condition: "gt"
+    value: 0
+    filter: "suspend == False"
+    applicability: [daily, minute]
+    threshold: "non-suspended OHLC > 0"
+    threshold_source: fixed
+    boundary: "gt 0: strictly greater than; 0 FAILS, 0.001 PASSES"
+    description: "Prices must be positive for non-suspended rows"
+
+  - id: L02
+    name: volume_non_negative
+    severity: HARD
+    type: column_check
+    columns: [volume, amount]
+    condition: "ge"
+    value: 0
+    applicability: [daily, minute]
+    threshold: "volume, amount >= 0"
+    threshold_source: fixed
+    boundary: "ge 0: greater than or equal; 0 PASSES, -1 FAILS"
+    description: "Volume and amount must be non-negative"
+
+  - id: L03
+    name: ohlc_relation
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_ohlc_relation"
+    params:
+      tolerance: 0.0
+    applicability: [daily, minute]
+    threshold: "low <= open,close <= high"
+    threshold_source: fixed
+    boundary: "inclusive: low <= min(open,close) AND max(open,close) <= high; equality at boundary PASSES"
+    description: "OHLC relation: low is the lower bound, high is the upper bound"
+
+  - id: L04
+    name: price_limit_stock
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_price_limit_stock"
+    params:
+      main_limit: 0.10
+      chinext_star_limit: 0.20
+      ipo_first_5d_limit: 0.30
+      tolerance: 0.005
+    applicability: [daily]
+    threshold: "main 10.5% / ChiNext-Star 20.5% / IPO first 5 days 30.5% (= board limit + 0.5% tolerance)"
+    threshold_source: fixed
+    boundary: "le limit+tolerance: change rate at exactly limit+0.5% passes; 0.001 above fails"
+    description: "Stock price limit check"
+
+  - id: L05
+    name: price_limit_futures
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_price_limit_futures"
+    params:
+      tolerance: 0.005
+      contract_specs: null
+    applicability: [daily]
+    threshold: "contract limit + 0.5% (via contract_specs lookup)"
+    threshold_source: fixed
+    boundary: "le contract_limit+0.005: change at exactly contract limit + 0.5% passes"
+    description: "Futures price limit check (daily, futures filter)"
+
+  - id: L06
+    name: adjfactor_positive
+    severity: HARD
+    type: column_check
+    columns: [adjfactor]
+    condition: "gt"
+    value: 0
+    applicability: [daily]
+    threshold: "adjfactor > 0"
+    threshold_source: fixed
+    boundary: "gt 0: strictly greater than; 0 FAILS, any positive PASSES"
+    description: "Adjustment factor must be positive"
+
+  - id: L07
+    name: adjfactor_range
+    severity: SOFT
+    type: column_check
+    columns: [adjfactor]
+    condition: "range"
+    value:
+      adjfactor: [0.01, 1000]
+    applicability: [daily]
+    threshold: "adjfactor in (0.01, 1000)"
+    threshold_source: statistical
+    boundary: "open interval (0.01, 1000): 0.01 and 1000 both FAIL (exclusive)"
+    description: "Adjustment factor range"
+
+  - id: L08
+    name: boolean_flags
+    severity: HARD
+    type: column_check
+    columns: [suspend]
+    condition: "isbool_notnull"
+    value: null
+    applicability: [daily]
+    threshold: "suspend etc. flags are bool with no nulls"
+    threshold_source: fixed
+    boundary: "dtype bool + notnull: any null or non-bool value fails"
+    description: "Boolean flags must be properly typed and non-null"
+
+  - id: L13
+    name: ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^[036]\\d{5}\\.(SH|SZ)$"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "regex ^[036]\\d{5}\\.(SH|SZ)$"
+    threshold_source: fixed
+    boundary: "full regex match: partial match or mismatch fails"
+    description: "Ticker format validation"
+
+  - id: L14
+    name: date_format
+    severity: HARD
+    type: column_check
+    columns: [trade_date]
+    condition: "date_format"
+    value: "ISO8601"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "ISO 8601 date format"
+    threshold_source: fixed
+    boundary: "valid ISO 8601 date: non-parseable dates fail"
+    description: "Date format must be ISO 8601"
+
+  # ---- Consistency K01-K11 ----
+  - id: K01
+    name: open_gap_check
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_open_gap"
+    params:
+      max_gap: 0.10
+      ca_dates: null
+    applicability: [daily]
+    threshold: "non-ex-right day adjusted open / prev close gap <= 10%"
+    threshold_source: statistical
+    boundary: "le 0.10: gap at exactly 10% passes, above fails"
+    description: "Open gap vs previous close (non-ex-right days)"
+
+  - id: K02
+    name: volume_amount_match
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_volume_amount_match"
+    params: {}
+    applicability: [daily, minute]
+    threshold: "volume > 0 iff amount > 0"
+    threshold_source: fixed
+    boundary: "bidirectional: both zero or both positive; one zero + one positive fails"
+    description: "Volume and amount must both be zero or both be positive"
+
+  - id: K03
+    name: suspend_consistency
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_suspend_consistency"
+    params: {}
+    applicability: [daily]
+    threshold: "suspended => volume = 0 AND OHLC all equal"
+    threshold_source: fixed
+    boundary: "conditional: if suspend is True then volume must be exactly 0 and open==high==low==close; any violation fails"
+    description: "Suspended rows must have zero volume and flat OHLC"
+
+  - id: K04
+    name: limit_flag_consistency
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_limit_flag_consistency"
+    params:
+      tolerance: 0.01
+    applicability: [daily]
+    threshold: "is_limit_up => close = high; is_limit_down => close = low (tolerance 0.01)"
+    threshold_source: fixed
+    boundary: "le tolerance 0.01: abs(close-high) at exactly 0.01 for limit_up passes; above fails"
+    description: "Limit flag vs price relation consistency"
+
+  - id: K05
+    name: adjfactor_stable
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_adjfactor_stable"
+    params:
+      ca_dates: null
+    applicability: [daily]
+    threshold: "adjfactor unchanged on non-corporate-action days"
+    threshold_source: fixed
+    boundary: "eq: adjfactor must be exactly equal to previous day on non-CA days"
+    description: "Adjfactor stability outside corporate action dates"
+
+  - id: K06
+    name: daily_vs_minute_close
+    severity: HARD
+    type: custom_check
+    function: "checks.cross_checks.check_daily_vs_minute_close"
+    params:
+      tolerance: 0.01
+    applicability: [daily, minute]
+    threshold: "daily close == last minute close (+/- 0.01)"
+    threshold_source: fixed
+    boundary: "le 0.01: abs(daily_close - last_minute_close) at exactly 0.01 passes; above fails"
+    description: "Cross-table: daily close matches last minute close"
+
+  - id: K07
+    name: daily_vs_minute_volume
+    severity: HARD
+    type: custom_check
+    function: "checks.cross_checks.check_daily_vs_minute_volume"
+    params:
+      max_rel_diff: 0.001
+    applicability: [daily, minute]
+    threshold: "daily volume == sum of minute volumes (relative diff <= 0.1%)"
+    threshold_source: fixed
+    boundary: "le 0.001: relative difference at exactly 0.1% passes; above fails"
+    description: "Cross-table: daily volume matches minute volume sum"
+
+  - id: K08
+    name: daily_vs_minute_hl
+    severity: HARD
+    type: custom_check
+    function: "checks.cross_checks.check_daily_vs_minute_hl"
+    params: {}
+    applicability: [daily, minute]
+    threshold: "daily high/low contain minute extremes"
+    threshold_source: fixed
+    boundary: "ge/le: daily_high >= max(minute_high) AND daily_low <= min(minute_low); equality passes"
+    description: "Cross-table: daily high/low contain minute extremes"
+
+  - id: K11
+    name: fund_vs_daily_tickers
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_fund_vs_daily_tickers"
+    params:
+      max_diff: 5
+    applicability: [daily, fund]
+    threshold: "set difference <= 5"
+    threshold_source: statistical
+    boundary: "le 5: difference of exactly 5 passes, 6 fails"
+    description: "Ticker set consistency between fundamental and daily"
+
+  # ---- Timeliness T01-T09 ----
+  - id: T01
+    name: daily_freshness
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_daily_freshness"
+    params:
+      max_stale_days: 1
+    applicability: [daily, fund]
+    threshold: "latest trade_date within 1 trading day of now"
+    threshold_source: fixed
+    boundary: "le 1: exactly 1 trading day stale passes, 2 fails"
+    description: "Daily data freshness"
+
+  - id: T03
+    name: no_future_dates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_dates"
+    params: {}
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "all trade_date <= today"
+    threshold_source: fixed
+    boundary: "le today: today PASSES, any future date FAILS"
+    description: "No future dates"
+
+  - id: T04
+    name: date_ascending
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_ascending"
+    params: {}
+    applicability: [daily, minute, fund]
+    threshold: "strictly ascending with no duplicates within partition"
+    threshold_source: fixed
+    boundary: "strictly increasing: equal consecutive dates (duplicates) FAIL"
+    description: "Dates must be strictly ascending with no duplicates"
+
+  - id: T06
+    name: adjfactor_idempotent
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_adjfactor_idempotent"
+    params: {}
+    applicability: [daily]
+    threshold: "re-ingestion adjfactor unchanged"
+    threshold_source: fixed
+    boundary: "eq: re-ingested adjfactor must exactly match original"
+    description: "Adjfactor idempotency on re-ingestion"
+
+  - id: T09
+    name: late_correction
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_late_correction"
+    params:
+      max_change_rate: 0.0001
+    applicability: [daily, fund]
+    threshold: "historical change > 0.01% triggers alert"
+    threshold_source: statistical
+    boundary: "gt 0.0001: change rate at exactly 0.01% does NOT trigger, above triggers"
+    description: "Late correction detection for historical data"
