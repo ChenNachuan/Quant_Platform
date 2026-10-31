@@ -1027,6 +1027,16 @@ class TestSecondReviewRegression:
         df.loc[0, "close"] = 99.0  # large change to trigger
         prev["suspend"] = prev["suspend"].astype(bool)
         df["suspend"] = df["suspend"].astype(bool)
+        # Column order decides which column the T09 loop reaches first.
+        # With close ahead of suspend the loop fires on close and
+        # early-returns before the non-numeric column, so pre-fix code
+        # never raises and the guard passes against broken code. Put the
+        # bool column first so the loop must reach it before any fire.
+        ordered = ["ticker", "trade_date", "suspend"] + [
+            c for c in df.columns if c not in ("ticker", "trade_date", "suspend")
+        ]
+        df = df[ordered]
+        prev = prev[ordered]
         rule = _get_rules()["T09"]
         result = evaluate_custom_check(df, rule, previous_data=prev)
         assert result.iloc[0], "T09 must detect close change without TypeError"
