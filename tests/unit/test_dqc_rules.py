@@ -711,7 +711,7 @@ class TestHardTriggerCases:
 
     def test_C01_row_count_vs_calendar(self):
         df = self._daily()
-        cal = {"2024-01-02", "2024-01-03", "2024-01-04"}
+        cal = {"2024-01-02"}  # frame has 2 dates, calendar only 1 in range
         result = evaluate_custom_check(df, self._rule("C01"), calendar_dates=cal)
         self._assert_caught("C01", result)
 
@@ -950,3 +950,124 @@ class TestReviewFixRegression:
             cal, rule, forward_days=30, today=pd.Timestamp("2024-01-02")
         )
         assert result.iloc[0], "2-date calendar must fail forward coverage"
+
+
+class TestSecondReviewRegression:
+    """Guard against the second review's findings (L05/K06-K08/T09 + lighter)."""
+
+    def test_L05_lookup_table_reaches_function(self):
+        """YAML key must match function param — lookup_table alias works."""
+        from data.dqc.checks.custom_checks import check_price_limit_futures
+
+        df = pd.DataFrame(
+            {
+                "ticker": ["IF2401.CFE"],
+                "close": [1100.0],
+                "prev_close": [1000.0],  # 10% change > 5% limit
+            }
+        )
+        # Via contract_specs directly
+        result1 = check_price_limit_futures(
+            df, contract_specs={"IF2401.CFE": 0.05}, tolerance=0.005
+        )
+        assert result1.iloc[0], "contract_specs=5% limit must flag 10% change"
+        # Via lookup_table alias (the YAML param name)
+        result2 = check_price_limit_futures(
+            df, lookup_table={"IF2401.CFE": 0.05}, tolerance=0.005
+        )
+        assert result2.iloc[0], "lookup_table alias must reach the function"
+
+    def test_K06_missing_minute_bars_flagged(self):
+        """Ticker-day with no minute bars must be a failure, not silently skipped."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        # Remove all minute bars for ticker 000001.SZ on 2024-01-02
+        minute = minute[
+            ~((minute["ticker"] == "000001.SZ") & (minute["trade_date"] == "2024-01-02"))
+        ]
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert result.loc[("000001.SZ", "2024-01-02")], (
+            "missing minute bars must flag K06"
+        )
+
+    def test_K07_missing_minute_bars_flagged(self):
+        """Ticker-day with no minute bars must fail K07 volume check."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        minute = minute[
+            ~((minute["ticker"] == "000001.SZ") & (minute["trade_date"] == "2024-01-02"))
+        ]
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert result.loc[("000001.SZ", "2024-01-02")], (
+            "missing minute bars must flag K07"
+        )
+
+    def test_K08_missing_minute_bars_flagged(self):
+        """Ticker-day with no minute bars must fail K08 high/low check."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        minute = minute[
+            ~((minute["ticker"] == "000001.SZ") & (minute["trade_date"] == "2024-01-02"))
+        ]
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert result.loc[("000001.SZ", "2024-01-02")], (
+            "missing minute bars must flag K08"
+        )
+
+    def test_T09_bool_columns_no_typeerror(self):
+        """T09 must skip non-numeric columns, not crash on them."""
+        df = _make_clean_daily()
+        prev = df.copy()
+        df.loc[0, "close"] = 99.0  # large change to trigger
+        prev["suspend"] = prev["suspend"].astype(bool)
+        df["suspend"] = df["suspend"].astype(bool)
+        rule = _get_rules()["T09"]
+        result = evaluate_custom_check(df, rule, previous_data=prev)
+        assert result.iloc[0], "T09 must detect close change without TypeError"
+
+    def test_K04_nan_limit_flags_safe(self):
+        """NaN in limit_up must be treated as False, not raise or coerce to True."""
+        df = _make_clean_daily()
+        df["limit_up"] = df["limit_up"].astype(float)
+        df.loc[0, "limit_up"] = np.nan
+        rule = _get_rules()["K04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "NaN limit_up must not trigger K04"
+
+    def test_T06_nan_rows_not_flagged(self):
+        """Rows only in one side of the merge must not count as changes."""
+        df = _make_clean_daily()
+        prev = df.copy()
+        # Add a new row to df that doesn't exist in prev
+        new_row = df.iloc[[0]].copy()
+        new_row["trade_date"] = "2024-01-05"
+        df = pd.concat([df, new_row], ignore_index=True)
+        rule = _get_rules()["T06"]
+        result = evaluate_custom_check(df, rule, previous_adjfactor=prev)
+        assert not result.iloc[0], "unmatched rows must not flag T06"
+
+    def test_T08_dedup_forward_count(self):
+        """T08 must count distinct dates, not raw rows."""
+        # Calendar with duplicate dates but few distinct ones
+        cal = pd.DataFrame({"trade_date": ["2024-01-02"] * 35})
+        rule = _get_rules()["T08"]
+        result = evaluate_custom_check(
+            cal, rule, min_forward_days=30, today=pd.Timestamp("2024-01-01")
+        )
+        assert result.iloc[0], "35 rows of 1 distinct date must fail T08"
+
+    def test_L04_nan_flag_columns_safe(self):
+        """NaN in is_chinext_star must be treated as False, not raise."""
+        df = _make_clean_daily()
+        df["is_chinext_star"] = df.get("is_chinext_star", pd.Series(False, index=df.index))
+        df["is_chinext_star"] = df["is_chinext_star"].astype(float)
+        df.loc[0, "is_chinext_star"] = np.nan
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "NaN is_chinext_star must not trigger L04"

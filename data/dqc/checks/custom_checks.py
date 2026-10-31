@@ -23,9 +23,17 @@ import pandas as pd
 def check_row_count_vs_calendar(
     df: pd.DataFrame, calendar_dates=None, comparison: str = "eq", **_
 ) -> pd.Series:
-    """C01: deduplicated trade_date count must match calendar trading days."""
-    actual = df["trade_date"].nunique()
-    expected = len(calendar_dates) if calendar_dates is not None else actual
+    """C01: deduplicated trade_date count must match calendar trading days.
+
+    When *calendar_dates* is not injected the check fails (missing dependency),
+    and the expected count is restricted to the frame's date range.
+    """
+    if calendar_dates is None:
+        return pd.Series([True], index=["__aggregate__"])
+    dates = pd.to_datetime(df["trade_date"])
+    cal = pd.to_datetime(list(calendar_dates))
+    expected = int(((cal >= dates.min()) & (cal <= dates.max())).sum())
+    actual = dates.nunique()
     failed = actual != expected if comparison == "eq" else actual < expected
     return pd.Series([failed], index=["__aggregate__"])
 
@@ -76,9 +84,17 @@ def check_adjfactor_present(
 
 
 def check_calendar_completeness(
-    df: pd.DataFrame, forward_days: int = 30, today=None, **_
+    df: pd.DataFrame,
+    forward_days: int = 30,
+    today=None,
+    max_gap_days: int = 12,
+    **_,
 ) -> pd.Series:
-    """C07: calendar must cover [today, today+forward_days] trading days without gaps."""
+    """C07: calendar must cover [today, today+forward_days] trading days without gaps.
+
+    *max_gap_days* accommodates A-share holidays (Spring Festival ~11 calendar
+    days).  Gaps beyond this threshold indicate genuinely missing sessions.
+    """
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
@@ -88,20 +104,31 @@ def check_calendar_completeness(
     if len(forward_dates) < forward_days:
         return pd.Series([True], index=["__aggregate__"])
     diffs = pd.Series(forward_dates).diff().dropna()
-    has_gap = bool((diffs > pd.Timedelta(days=5)).any())
+    has_gap = bool((diffs > pd.Timedelta(days=max_gap_days)).any())
     return pd.Series([has_gap], index=["__aggregate__"])
 
 
 def check_factor_date_coverage(
-    df: pd.DataFrame, window: int = 252, max_missing: int = 2, **_
+    df: pd.DataFrame,
+    window: int = 252,
+    max_missing: int = 2,
+    calendar_dates=None,
+    **_,
 ) -> pd.Series:
-    """C08: rolling *window*-day missing dates <= *max_missing*."""
-    dates = sorted(df["trade_date"].unique())
+    """C08: rolling *window*-day missing dates <= *max_missing*.
+
+    When *calendar_dates* is provided, compares the last *window* calendar
+    dates against the frame's dates to count truly absent sessions.
+    """
+    dates = set(df["trade_date"].unique())
+    if calendar_dates is not None:
+        cal_sorted = sorted(calendar_dates)[-window:]
+        missing = len(set(cal_sorted) - dates)
+        return pd.Series([missing > max_missing], index=["__aggregate__"])
+    # Without a reference calendar, compare total distinct dates against window.
     if len(dates) >= window:
         return pd.Series([False], index=["__aggregate__"])
-    expected = window
-    actual = len(dates)
-    return pd.Series([(expected - actual) > max_missing], index=["__aggregate__"])
+    return pd.Series([(window - len(dates)) > max_missing], index=["__aggregate__"])
 
 
 def check_factor_ticker_coverage(
@@ -150,9 +177,11 @@ def check_price_limit_stock(
     change = ((df["close"] - df["prev_close"]) / df["prev_close"]).abs()
     limit = pd.Series(main_limit, index=df.index)
     if "is_chinext_star" in df.columns:
-        limit = limit.where(~df["is_chinext_star"], chinext_star_limit)
+        is_chinext = df["is_chinext_star"].fillna(False).astype(bool)
+        limit = limit.where(~is_chinext, chinext_star_limit)
     if "is_ipo_first_5d" in df.columns:
-        limit = limit.where(~df["is_ipo_first_5d"], ipo_first_5d_limit)
+        is_ipo = df["is_ipo_first_5d"].fillna(False).astype(bool)
+        limit = limit.where(~is_ipo, ipo_first_5d_limit)
     return change > limit + tolerance
 
 
@@ -160,9 +189,12 @@ def check_price_limit_futures(
     df: pd.DataFrame,
     tolerance: float = 0.005,
     contract_specs=None,
+    lookup_table=None,
     **_,
 ) -> pd.Series:
     """L05: futures price change must stay within contract limit + tolerance."""
+    if contract_specs is None:
+        contract_specs = lookup_table
     if contract_specs is None or "prev_close" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
     change = ((df["close"] - df["prev_close"]) / df["prev_close"]).abs()
@@ -224,10 +256,10 @@ def check_limit_flag_consistency(
     """K04: limit_up => close ≈ high; limit_down => close ≈ low (within tolerance)."""
     failed = pd.Series(False, index=df.index)
     if "limit_up" in df.columns:
-        lu = df["limit_up"].astype(bool)
+        lu = df["limit_up"].fillna(False).astype(bool)
         failed |= lu & ((df["close"] - df["high"]).abs() > tolerance)
     if "limit_down" in df.columns:
-        ld = df["limit_down"].astype(bool)
+        ld = df["limit_down"].fillna(False).astype(bool)
         failed |= ld & ((df["close"] - df["low"]).abs() > tolerance)
     return failed
 
@@ -294,7 +326,7 @@ def check_daily_freshness(
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
-    stale = (ref - latest).days > max_stale_days + 3  # rough calendar-day proxy
+    stale = max(len(pd.bdate_range(latest, ref)) - 1, 0) > max_stale_days
     return pd.Series([bool(stale)], index=["__aggregate__"])
 
 
@@ -339,14 +371,12 @@ def check_minute_timestamp_order(df: pd.DataFrame, **_) -> pd.Series:
     if "timestamp" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
     ts = pd.to_datetime(df["timestamp"])
-    grp = df.groupby(["ticker", "trade_date"])
-    failed = pd.Series(False, index=df.index)
-    for _, group in grp:
-        gts = ts.loc[group.index]
-        diff = gts.diff()
-        bad = (diff <= pd.Timedelta(0)) & diff.notna()
-        failed.loc[group.index] = bad.fillna(False)
-    return failed
+    diff = ts.groupby([df["ticker"], df["trade_date"]]).diff()
+    bad_order = (diff <= pd.Timedelta(0)) & diff.notna()
+    # Gap detection: consecutive bars should be <= 2 minutes (1-min bars with
+    # a single-bar gap tolerance for lunch break at 11:30-13:00).
+    gap = (diff > pd.Timedelta(minutes=2)) & (diff != pd.Timedelta(hours=1, minutes=30))
+    return (bad_order | gap).fillna(False)
 
 
 def check_adjfactor_idempotent(
@@ -359,9 +389,11 @@ def check_adjfactor_idempotent(
         previous_adjfactor,
         on=["ticker", "trade_date"],
         suffixes=("_new", "_old"),
-        how="outer",
+        how="inner",
     )
-    changed = merged["adjfactor_new"] != merged["adjfactor_old"]
+    changed = merged["adjfactor_new"].ne(merged["adjfactor_old"]) & merged[
+        ["adjfactor_new", "adjfactor_old"]
+    ].notna().all(axis=1)
     return pd.Series([bool(changed.any())], index=["__aggregate__"])
 
 
@@ -386,7 +418,7 @@ def check_calendar_forward(
     )
     dates = pd.to_datetime(df["trade_date"])
     forward = dates[dates >= ref]
-    return pd.Series([len(forward) < min_forward_days], index=["__aggregate__"])
+    return pd.Series([forward.nunique() < min_forward_days], index=["__aggregate__"])
 
 
 def check_late_correction(
@@ -399,7 +431,11 @@ def check_late_correction(
     if previous_data is None:
         return pd.Series([False], index=["__aggregate__"])
     key = ["ticker", "trade_date"]
-    val_cols = [c for c in df.columns if c not in key and c in previous_data.columns]
+    val_cols = [
+        c
+        for c in df.select_dtypes(include="number").columns
+        if c not in key and c in previous_data.columns
+    ]
     merged = df[key + val_cols].merge(
         previous_data[key + val_cols], on=key, suffixes=("_new", "_old"), how="inner"
     )

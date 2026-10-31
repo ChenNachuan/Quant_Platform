@@ -5,6 +5,9 @@ Each function takes ``(daily_df, minute_df, **params)`` and returns
 
 These are the only rules that require two frames in one call.  Ingest-time vs
 weekly-batch scheduling is S9-T3's concern (KB pin K5).
+
+All three use ``how="left"`` on the daily frame so a ticker-day with no minute
+bars is flagged as a failure rather than silently dropped.
 """
 
 from __future__ import annotations
@@ -26,10 +29,10 @@ def check_daily_vs_minute_close(
         .rename("minute_last_close")
     )
     merged = daily_df.set_index(["ticker", "trade_date"])[["close"]].join(
-        last_min, how="inner"
+        last_min, how="left"
     )
     diff = (merged["close"] - merged["minute_last_close"]).abs()
-    return (diff > tolerance).rename("failed")
+    return (merged["minute_last_close"].isna() | (diff > tolerance)).rename("failed")
 
 
 def check_daily_vs_minute_volume(
@@ -45,11 +48,11 @@ def check_daily_vs_minute_volume(
         .rename("minute_vol_sum")
     )
     merged = daily_df.set_index(["ticker", "trade_date"])[["volume"]].join(
-        min_sum, how="inner"
+        min_sum, how="left"
     )
     denom = merged["volume"].abs().replace(0, 1)
     rel = (merged["volume"] - merged["minute_vol_sum"]).abs() / denom
-    return (rel > max_rel_diff).rename("failed")
+    return (merged["minute_vol_sum"].isna() | (rel > max_rel_diff)).rename("failed")
 
 
 def check_daily_vs_minute_hl(
@@ -63,8 +66,9 @@ def check_daily_vs_minute_hl(
         minute_low=("low", "min"),
     )
     merged = daily_df.set_index(["ticker", "trade_date"])[["high", "low"]].join(
-        agg, how="inner"
+        agg, how="left"
     )
     high_fail = merged["high"] < merged["minute_high"]
     low_fail = merged["low"] > merged["minute_low"]
-    return (high_fail | low_fail).rename("failed")
+    missing = merged["minute_high"].isna() | merged["minute_low"].isna()
+    return (missing | high_fail | low_fail).rename("failed")
