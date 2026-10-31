@@ -53,9 +53,9 @@ rules:
     function: "checks.custom_checks.check_null_soft_fields"
     params:
       max_null_rate: 0.01
-      columns: [amount, adjfactor, pe, pb]
+      columns: [amount, adjfactor, turnover, pe_ttm, pe_lyr, pb, ps_ttm]
     applicability: [daily, fund]
-    threshold: "null rate of amount/adjfactor/PE/PB <= 1%"
+    threshold: "null rate of amount/adjfactor/turnover/PE/PB/PS <= 1%"
     threshold_source: statistical
     boundary: "le 0.01: null rate exactly 1% passes, above 1% fails"
     description: "Soft fields null rate"
@@ -256,7 +256,7 @@ rules:
     params:
       tolerance: 0.01
     applicability: [daily]
-    threshold: "limit_up => close = high; limit_down => close = low (tolerance 0.01)"
+    threshold: "is_limit_up => close = high; is_limit_down => close = low (tolerance 0.01)"
     threshold_source: fixed
     boundary: "le tolerance 0.01: abs(close-high) at exactly 0.01 for limit_up passes; above fails"
     description: "Limit flag vs price relation consistency"

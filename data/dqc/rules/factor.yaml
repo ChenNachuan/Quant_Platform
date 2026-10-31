@@ -36,7 +36,7 @@ rules:
     name: factor_finite
     severity: HARD
     type: column_check
-    columns: [factor_value]
+    columns: [value]
     condition: "notinf"
     value: null
     applicability: [factor]

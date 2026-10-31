@@ -194,7 +194,7 @@ rules:
     function: "checks.custom_checks.check_minute_timestamp_order"
     params: {}
     applicability: [minute]
-    threshold: "within ticker x date, minute timestamps strictly ascending and continuous"
+    threshold: "within ticker x date, minute datetimes strictly ascending and continuous (1min, lunch gap 88-92min)"
     threshold_source: fixed
-    boundary: "strictly increasing + continuous: duplicates or gaps both FAIL"
-    description: "Minute timestamp ordering and continuity"
+    boundary: "strictly increasing + continuous: duplicates or gaps (except 88-92min lunch) FAIL"
+    description: "Minute datetime ordering and continuity"

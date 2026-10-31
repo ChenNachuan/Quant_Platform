@@ -217,8 +217,10 @@ def evaluate_column_check(df: pd.DataFrame, rule: dict) -> pd.Series:
         col_value = value[col] if isinstance(value, dict) else value
         failures = failures | _apply_condition(df[col], rule["condition"], col_value)
     if "filter" in rule and rule["filter"]:
-        in_scope = _apply_filter(df, rule["filter"])
-        failures = failures & in_scope
+        filter_col = rule["filter"].split("==")[0].strip()
+        if filter_col in df.columns:
+            in_scope = _apply_filter(df, rule["filter"])
+            failures = failures & in_scope
     return failures
 
 
@@ -275,8 +277,8 @@ def _make_clean_daily() -> pd.DataFrame:
                     "amount": (100000 + i * 10000) * c,
                     "adjfactor": 1.0,
                     "suspend": False,
-                    "limit_up": False,
-                    "limit_down": False,
+                    "is_limit_up": False,
+                    "is_limit_down": False,
                     "prev_close": o,
                 }
             )
@@ -296,7 +298,7 @@ def _make_clean_minute() -> pd.DataFrame:
                 {
                     "ticker": drow["ticker"],
                     "trade_date": drow["trade_date"],
-                    "timestamp": f"{drow['trade_date']} {9 + j // 60:02d}:{j % 60:02d}:00",
+                    "datetime": f"{drow['trade_date']} {9 + j // 60:02d}:{j % 60:02d}:00",
                     "open": price,
                     "high": price,
                     "low": price,
@@ -316,9 +318,11 @@ def _make_clean_fundamental() -> pd.DataFrame:
                 {
                     "ticker": ticker,
                     "trade_date": dt,
-                    "pe": 15.0,
+                    "pe_ttm": 15.0,
+                    "pe_lyr": 14.0,
                     "pb": 1.5,
-                    "market_cap": 1e9,
+                    "total_market_cap": 1e9,
+                    "float_market_cap": 8e8,
                 }
             )
     return pd.DataFrame(rows)
@@ -329,9 +333,7 @@ def _make_clean_factor() -> pd.DataFrame:
     rows = []
     for ti, ticker in enumerate(CLEAN_TICKERS):
         for dt in dates:
-            rows.append(
-                {"ticker": ticker, "trade_date": dt, "factor_value": 0.5 + ti * 0.1}
-            )
+            rows.append({"ticker": ticker, "trade_date": dt, "value": 0.5 + ti * 0.1})
     return pd.DataFrame(rows)
 
 
@@ -690,11 +692,11 @@ class TestHardTriggerCases:
         self._assert_caught("L08", evaluate_column_check(df, self._rule("L08")))
 
     def test_L10_market_cap_positive(self):
-        df = pd.DataFrame({"market_cap": [1e9, 0]})
+        df = pd.DataFrame({"total_market_cap": [1e9, 0], "float_market_cap": [8e8, 0]})
         self._assert_caught("L10", evaluate_column_check(df, self._rule("L10")))
 
     def test_L11_factor_finite(self):
-        df = pd.DataFrame({"factor_value": [0.5, float("inf")]})
+        df = pd.DataFrame({"value": [0.5, float("inf")]})
         self._assert_caught("L11", evaluate_column_check(df, self._rule("L11")))
 
     def test_L13_ticker_format(self):
@@ -814,10 +816,10 @@ class TestHardTriggerCases:
 
     def test_T05_minute_timestamp_order(self):
         df = self._minute().head(4).copy()
-        # Swap timestamps to break ordering
-        df.loc[0, "timestamp"], df.loc[1, "timestamp"] = (
-            df.loc[1, "timestamp"],
-            df.loc[0, "timestamp"],
+        # Swap datetimes to break ordering
+        df.loc[0, "datetime"], df.loc[1, "datetime"] = (
+            df.loc[1, "datetime"],
+            df.loc[0, "datetime"],
         )
         result = evaluate_custom_check(df, self._rule("T05"))
         self._assert_caught("T05", result)
@@ -884,7 +886,7 @@ class TestReviewFixRegression:
     def test_L09_pe_1500_passes(self):
         """PE=1500 is within PE range (-10000, 10000); must pass."""
         df = _make_clean_fundamental()
-        df.loc[0, "pe"] = 1500.0
+        df.loc[0, "pe_ttm"] = 1500.0
         rule = _get_rules()["L09"]
         result = evaluate_column_check(df, rule)
         assert not result.iloc[0], "PE=1500 is within PE range"
@@ -923,16 +925,16 @@ class TestReviewFixRegression:
         assert result.index[0] == "__aggregate__"
 
     def test_C05_nan_pe_pb_caught(self):
-        """Effective C05 must include pe/pb — NaN in either must trip the rule.
+        """Effective C05 must include pe_ttm/pb — NaN in either must trip the rule.
 
         Regression for the incomplete fix-2: only fundamental.yaml was
         patched while the stale bars_daily.yaml copy shadowed it through
         first-wins dedup, so NaN pe/pb passed unflagged.
         """
         rule = _get_rules()["C05"]
-        for col in ("pe", "pb"):
+        for col in ("pe_ttm", "pb"):
             df = _make_clean_daily().copy()
-            df["pe"] = 15.0
+            df["pe_ttm"] = 15.0
             df["pb"] = 1.5
             df.loc[0, col] = np.nan
             result = evaluate_custom_check(df, rule)
@@ -985,7 +987,10 @@ class TestSecondReviewRegression:
         minute = _make_clean_minute()
         # Remove all minute bars for ticker 000001.SZ on 2024-01-02
         minute = minute[
-            ~((minute["ticker"] == "000001.SZ") & (minute["trade_date"] == "2024-01-02"))
+            ~(
+                (minute["ticker"] == "000001.SZ")
+                & (minute["trade_date"] == "2024-01-02")
+            )
         ]
         result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
         assert result.loc[("000001.SZ", "2024-01-02")], (
@@ -999,7 +1004,10 @@ class TestSecondReviewRegression:
         daily = _make_clean_daily()
         minute = _make_clean_minute()
         minute = minute[
-            ~((minute["ticker"] == "000001.SZ") & (minute["trade_date"] == "2024-01-02"))
+            ~(
+                (minute["ticker"] == "000001.SZ")
+                & (minute["trade_date"] == "2024-01-02")
+            )
         ]
         result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
         assert result.loc[("000001.SZ", "2024-01-02")], (
@@ -1013,7 +1021,10 @@ class TestSecondReviewRegression:
         daily = _make_clean_daily()
         minute = _make_clean_minute()
         minute = minute[
-            ~((minute["ticker"] == "000001.SZ") & (minute["trade_date"] == "2024-01-02"))
+            ~(
+                (minute["ticker"] == "000001.SZ")
+                & (minute["trade_date"] == "2024-01-02")
+            )
         ]
         result = check_daily_vs_minute_hl(daily, minute)
         assert result.loc[("000001.SZ", "2024-01-02")], (
@@ -1042,10 +1053,10 @@ class TestSecondReviewRegression:
         assert result.iloc[0], "T09 must detect close change without TypeError"
 
     def test_K04_nan_limit_flags_safe(self):
-        """NaN in limit_up must be treated as False, not raise or coerce to True."""
+        """NaN in is_limit_up must be treated as False, not raise or coerce to True."""
         df = _make_clean_daily()
-        df["limit_up"] = df["limit_up"].astype(float)
-        df.loc[0, "limit_up"] = np.nan
+        df["is_limit_up"] = df["is_limit_up"].astype(float)
+        df.loc[0, "is_limit_up"] = np.nan
         rule = _get_rules()["K04"]
         result = evaluate_custom_check(df, rule)
         assert not result.iloc[0], "NaN limit_up must not trigger K04"
@@ -1075,9 +1086,126 @@ class TestSecondReviewRegression:
     def test_L04_nan_flag_columns_safe(self):
         """NaN in is_chinext_star must be treated as False, not raise."""
         df = _make_clean_daily()
-        df["is_chinext_star"] = df.get("is_chinext_star", pd.Series(False, index=df.index))
+        df["is_chinext_star"] = df.get(
+            "is_chinext_star", pd.Series(False, index=df.index)
+        )
         df["is_chinext_star"] = df["is_chinext_star"].astype(float)
         df.loc[0, "is_chinext_star"] = np.nan
         rule = _get_rules()["L04"]
         result = evaluate_custom_check(df, rule)
         assert not result.iloc[0], "NaN is_chinext_star must not trigger L04"
+
+
+class TestThirdReviewRegression:
+    """Guard against the third review's 21 findings (schema alignment class)."""
+
+    def test_T04_minute_clean_batch_passes(self):
+        """240 rows per (ticker, trade_date) with ascending timestamps must pass."""
+        df = _make_clean_minute()
+        result = evaluate_custom_check(df, _get_rules()["T04"])
+        assert not result.any(), "clean minute batch must pass T04"
+
+    def test_T05_minute_clean_batch_passes(self):
+        """1-minute intervals with no gaps must pass T05."""
+        df = _make_clean_minute()
+        result = evaluate_custom_check(df, _get_rules()["T05"])
+        assert not result.any(), "clean minute batch must pass T05"
+
+    def test_K06_suspended_stock_exempt(self):
+        """Suspended stock (suspend=True, volume=0, no minute bars) must not fail K06."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily = _make_clean_daily()
+        daily.loc[0, "suspend"] = True
+        daily.loc[0, "volume"] = 0
+        daily.loc[0, "amount"] = 0.0
+        daily.loc[0, "open"] = daily.loc[0, "close"]
+        daily.loc[0, "high"] = daily.loc[0, "close"]
+        daily.loc[0, "low"] = daily.loc[0, "close"]
+        minute = _make_clean_minute()
+        # Remove all minute bars for the suspended row
+        minute = minute[
+            ~(
+                (minute["ticker"] == daily.loc[0, "ticker"])
+                & (minute["trade_date"] == daily.loc[0, "trade_date"])
+            )
+        ]
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert not result.loc[(daily.loc[0, "ticker"], daily.loc[0, "trade_date"])], (
+            "suspended stock with no minute bars must be exempt from K06"
+        )
+
+    def test_K07_suspended_stock_exempt(self):
+        """Suspended stock must not fail K07 volume check."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily = _make_clean_daily()
+        daily.loc[0, "suspend"] = True
+        daily.loc[0, "volume"] = 0
+        daily.loc[0, "amount"] = 0.0
+        minute = _make_clean_minute()
+        minute = minute[
+            ~(
+                (minute["ticker"] == daily.loc[0, "ticker"])
+                & (minute["trade_date"] == daily.loc[0, "trade_date"])
+            )
+        ]
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert not result.loc[(daily.loc[0, "ticker"], daily.loc[0, "trade_date"])], (
+            "suspended stock with no minute bars must be exempt from K07"
+        )
+
+    def test_prev_close_derived_when_absent(self):
+        """L04 must derive prev_close from prior-day close when column is missing."""
+        df = _make_clean_daily()
+        del df["prev_close"]  # Remove to match real schema
+        # Row 1: prev_close derived from row 0's close = 10.2
+        df.loc[1, "close"] = 10.2 * 1.108  # 10.8% change > 10.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert result.iloc[1], "derived prev_close must catch 10.8% change"
+
+    def test_chinext_star_derived_from_ticker(self):
+        """L04 must apply 20% limit for 30xxxx.SZ tickers without flag columns."""
+        df = _make_clean_daily()
+        df.loc[0, "ticker"] = "300001.SZ"  # ChiNext
+        df.loc[0, "close"] = df.loc[0, "prev_close"] * 1.15  # 15% < 20.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "15% change on ChiNext must pass (20% limit)"
+
+    def test_column_names_match_storage_schema(self):
+        """Rules must reference columns that exist in data/storage_schema.py."""
+        import data.storage_schema as ss
+
+        def _schema_cols(schema):
+            return set(schema.columns.keys())
+
+        all_cols = set()
+        for attr_name in dir(ss):
+            obj = getattr(ss, attr_name)
+            if hasattr(obj, "columns") and hasattr(obj.columns, "keys"):
+                all_cols |= _schema_cols(obj)
+
+        # Columns the DQC frame contract adds or aliases beyond storage schemas
+        extra = {
+            "is_chinext_star",
+            "is_ipo_first_5d",
+            "arrival_date",
+            "prev_close",
+            "trade_date",  # DQC contract name (factor schema uses "date")
+        }
+        known = all_cols | extra
+
+        entries = _load_all_rules()
+        for fname, rule in entries:
+            if rule["type"] == "column_check":
+                for col in rule.get("columns", []):
+                    assert col in known, (
+                        f"{rule['id']} in {fname}: column '{col}' not in storage schemas"
+                    )
+            params = rule.get("params") or {}
+            for pcol in params.get("columns", []):
+                assert pcol in known, (
+                    f"{rule['id']} in {fname}: param column '{pcol}' not in storage schemas"
+                )

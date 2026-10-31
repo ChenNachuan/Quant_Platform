@@ -10,11 +10,64 @@ Return shapes (CheckResult candidate for dqc_runtime.md):
 
 External reference data (calendar, universe, corporate actions, etc.) is
 injected at call time, never read from disk inside these functions.
+
+Column names follow ``data/storage_schema.py``.  Where a check historically
+used a different name (``factor_value`` vs ``value``, ``timestamp`` vs
+``datetime``, ``limit_up`` vs ``is_limit_up``), the canonical schema name is
+tried first with a legacy fallback so both DQC-frame spellings bind.
 """
 
 from __future__ import annotations
 
 import pandas as pd
+
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+
+def _col(df: pd.DataFrame, *candidates: str) -> str | None:
+    """Return the first column name from *candidates* present in *df*."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _value_col(df: pd.DataFrame) -> str | None:
+    """Factor value column: schema name ``value``, legacy ``factor_value``."""
+    return _col(df, "value", "factor_value")
+
+
+def _dt_col(df: pd.DataFrame) -> str | None:
+    """Minute bar timestamp column: schema name ``datetime``, legacy ``timestamp``."""
+    return _col(df, "datetime", "timestamp")
+
+
+def _date_col(df: pd.DataFrame) -> str | None:
+    """Date column: ``trade_date`` (DQC contract), legacy ``date`` (factor schema)."""
+    return _col(df, "trade_date", "date")
+
+
+def _prev_close(df: pd.DataFrame) -> pd.Series:
+    """Return ``prev_close`` if present, else derive from prior-day close."""
+    if "prev_close" in df.columns:
+        return df["prev_close"]
+    sorted_df = df.sort_values(["ticker", "trade_date"])
+    prev = sorted_df.groupby("ticker")["close"].shift(1)
+    return prev.reindex(df.index)
+
+
+def _bool_series(s: pd.Series) -> pd.Series:
+    """Coerce a flag column to bool, treating NaN as False."""
+    return s.fillna(False).astype(bool)
+
+
+def _is_suspended(df: pd.DataFrame) -> pd.Series:
+    """Return a bool Series of suspended rows (all-False when no suspend col)."""
+    c = _col(df, "suspend")
+    if c is None:
+        return pd.Series(False, index=df.index)
+    return _bool_series(df[c])
 
 
 # ── Completeness C01–C10 ──────────────────────────────────────────────
@@ -30,7 +83,10 @@ def check_row_count_vs_calendar(
     """
     if calendar_dates is None:
         return pd.Series([True], index=["__aggregate__"])
-    dates = pd.to_datetime(df["trade_date"])
+    dc = _date_col(df)
+    if dc is None:
+        return pd.Series([True], index=["__aggregate__"])
+    dates = pd.to_datetime(df[dc])
     cal = pd.to_datetime(list(calendar_dates))
     expected = int(((cal >= dates.min()) & (cal <= dates.max())).sum())
     actual = dates.nunique()
@@ -43,8 +99,10 @@ def check_row_count_vs_universe(
 ) -> pd.Series:
     """C02: single-day ticker count >= universe * min_ratio."""
     if universe is None or len(universe) == 0:
-        return pd.Series([False], index=["__aggregate__"])
-    ratios = df.groupby("trade_date")["ticker"].nunique() / len(universe)
+        return pd.Series([True], index=["__aggregate__"])
+    ratios = df.groupby(_date_col(df) or "trade_date")["ticker"].nunique() / len(
+        universe
+    )
     failed = bool((ratios < min_ratio).any())
     return pd.Series([failed], index=["__aggregate__"])
 
@@ -53,7 +111,7 @@ def check_minute_bar_count(
     df: pd.DataFrame, expected_bars: int = 240, **_
 ) -> pd.Series:
     """C03: every ticker every day must have exactly *expected_bars* bars."""
-    counts = df.groupby(["ticker", "trade_date"]).size()
+    counts = df.groupby(["ticker", _date_col(df) or "trade_date"]).size()
     has_bad = bool((counts != expected_bars).any())
     return pd.Series([has_bad], index=["__aggregate__"])
 
@@ -61,7 +119,11 @@ def check_minute_bar_count(
 def check_null_soft_fields(
     df: pd.DataFrame, max_null_rate: float = 0.01, columns=None, **_
 ) -> pd.Series:
-    """C05: null rate of *columns* must be <= max_null_rate."""
+    """C05: null rate of *columns* must be <= max_null_rate.
+
+    Columns absent from the frame are silently skipped (the same C05 rule
+    covers both daily and fundamental frames whose column sets differ).
+    """
     if columns is None:
         return pd.Series([False], index=["__aggregate__"])
     for col in columns:
@@ -98,7 +160,8 @@ def check_calendar_completeness(
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
-    dates = pd.to_datetime(df["trade_date"]).sort_values().unique()
+    dc = _date_col(df) or "trade_date"
+    dates = pd.to_datetime(df[dc]).sort_values().unique()
     window_end = ref + pd.Timedelta(days=forward_days * 2)
     forward_dates = dates[(dates >= ref) & (dates <= window_end)]
     if len(forward_dates) < forward_days:
@@ -117,15 +180,18 @@ def check_factor_date_coverage(
 ) -> pd.Series:
     """C08: rolling *window*-day missing dates <= *max_missing*.
 
-    When *calendar_dates* is provided, compares the last *window* calendar
-    dates against the frame's dates to count truly absent sessions.
+    The window is anchored at the frame's latest date.  When *calendar_dates*
+    is provided, counts truly absent sessions within the last *window*
+    calendar dates up to the frame's max date.
     """
-    dates = set(df["trade_date"].unique())
+    dc = _date_col(df) or "trade_date"
+    frame_dates = pd.to_datetime(df[dc])
+    dates = set(frame_dates.unique())
     if calendar_dates is not None:
-        cal_sorted = sorted(calendar_dates)[-window:]
+        cal_all = pd.to_datetime(list(calendar_dates))
+        cal_sorted = sorted(cal_all[cal_all <= frame_dates.max()])[-window:]
         missing = len(set(cal_sorted) - dates)
         return pd.Series([missing > max_missing], index=["__aggregate__"])
-    # Without a reference calendar, compare total distinct dates against window.
     if len(dates) >= window:
         return pd.Series([False], index=["__aggregate__"])
     return pd.Series([(window - len(dates)) > max_missing], index=["__aggregate__"])
@@ -136,7 +202,7 @@ def check_factor_ticker_coverage(
 ) -> pd.Series:
     """C09: factor ticker coverage >= universe * min_ratio."""
     if universe is None or len(universe) == 0:
-        return pd.Series([False], index=["__aggregate__"])
+        return pd.Series([True], index=["__aggregate__"])
     coverage = df["ticker"].nunique() / len(universe)
     return pd.Series([coverage < min_ratio], index=["__aggregate__"])
 
@@ -146,7 +212,7 @@ def check_industry_coverage(
 ) -> pd.Series:
     """C10: active ticker industry coverage must be *min_ratio* (default 100 %)."""
     if universe is None or len(universe) == 0:
-        return pd.Series([False], index=["__aggregate__"])
+        return pd.Series([True], index=["__aggregate__"])
     covered = set(df["ticker"].unique()) if "ticker" in df.columns else set()
     ratio = len(covered & set(universe)) / len(universe)
     return pd.Series([ratio < min_ratio], index=["__aggregate__"])
@@ -171,17 +237,28 @@ def check_price_limit_stock(
     tolerance: float = 0.005,
     **_,
 ) -> pd.Series:
-    """L04: daily price change must stay within board limit + tolerance."""
-    if "prev_close" not in df.columns:
+    """L04: daily price change must stay within board limit + tolerance.
+
+    Board type is derived from the ticker prefix when dedicated flag columns
+    are absent: 30xxxx.SZ / 68xxxx.SH are ChiNext / STAR (20 % limit).
+    """
+    pc = _prev_close(df)
+    if pc.isna().all():
         return pd.Series([False] * len(df), index=df.index)
-    change = ((df["close"] - df["prev_close"]) / df["prev_close"]).abs()
+    change = ((df["close"] - pc) / pc).abs()
     limit = pd.Series(main_limit, index=df.index)
+
+    # Derive board from ticker prefix when flags are not in the frame.
+    tickers = df["ticker"].astype(str)
+    is_chinext_star = tickers.str.startswith("30") | tickers.str.startswith("68")
     if "is_chinext_star" in df.columns:
-        is_chinext = df["is_chinext_star"].fillna(False).astype(bool)
-        limit = limit.where(~is_chinext, chinext_star_limit)
+        is_chinext_star = _bool_series(df["is_chinext_star"])
+    limit = limit.where(~is_chinext_star, chinext_star_limit)
+
     if "is_ipo_first_5d" in df.columns:
-        is_ipo = df["is_ipo_first_5d"].fillna(False).astype(bool)
+        is_ipo = _bool_series(df["is_ipo_first_5d"])
         limit = limit.where(~is_ipo, ipo_first_5d_limit)
+
     return change > limit + tolerance
 
 
@@ -195,9 +272,10 @@ def check_price_limit_futures(
     """L05: futures price change must stay within contract limit + tolerance."""
     if contract_specs is None:
         contract_specs = lookup_table
-    if contract_specs is None or "prev_close" not in df.columns:
+    pc = _prev_close(df)
+    if contract_specs is None or pc.isna().all():
         return pd.Series([False] * len(df), index=df.index)
-    change = ((df["close"] - df["prev_close"]) / df["prev_close"]).abs()
+    change = ((df["close"] - pc) / pc).abs()
     limits = df["ticker"].map(contract_specs).fillna(0.10)
     return change > limits + tolerance
 
@@ -206,9 +284,10 @@ def check_factor_nan_rate(
     df: pd.DataFrame, max_nan_rate: float = 0.10, **_
 ) -> pd.Series:
     """L12: factor NaN rate must be <= max_nan_rate."""
-    if "factor_value" not in df.columns:
+    vc = _value_col(df)
+    if vc is None:
         return pd.Series([False], index=["__aggregate__"])
-    rate = df["factor_value"].isna().mean()
+    rate = df[vc].isna().mean()
     return pd.Series([rate > max_nan_rate], index=["__aggregate__"])
 
 
@@ -219,12 +298,13 @@ def check_open_gap(
     df: pd.DataFrame, max_gap: float = 0.10, ca_dates=None, **_
 ) -> pd.Series:
     """K01: non-ex-right-day adjusted open / prev_close gap <= max_gap."""
-    if "prev_close" not in df.columns:
+    pc = _prev_close(df)
+    if pc.isna().all():
         return pd.Series([False] * len(df), index=df.index)
-    gap = ((df["open"] - df["prev_close"]) / df["prev_close"]).abs()
+    gap = ((df["open"] - pc) / pc).abs()
     failed = gap > max_gap
-    if ca_dates:
-        is_ca = df["trade_date"].isin(ca_dates)
+    if ca_dates is not None and len(ca_dates):
+        is_ca = df[_date_col(df) or "trade_date"].isin(ca_dates)
         failed = failed & ~is_ca
     return failed
 
@@ -240,7 +320,7 @@ def check_suspend_consistency(df: pd.DataFrame, **_) -> pd.Series:
     """K03: suspended rows must have volume == 0 and OHLC all equal."""
     if "suspend" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
-    sus = df["suspend"].astype(bool)
+    sus = _bool_series(df["suspend"])
     flat = (
         (df["open"] == df["high"])
         & (df["high"] == df["low"])
@@ -255,11 +335,13 @@ def check_limit_flag_consistency(
 ) -> pd.Series:
     """K04: limit_up => close ≈ high; limit_down => close ≈ low (within tolerance)."""
     failed = pd.Series(False, index=df.index)
-    if "limit_up" in df.columns:
-        lu = df["limit_up"].fillna(False).astype(bool)
+    up_col = _col(df, "is_limit_up", "limit_up")
+    down_col = _col(df, "is_limit_down", "limit_down")
+    if up_col is not None:
+        lu = _bool_series(df[up_col])
         failed |= lu & ((df["close"] - df["high"]).abs() > tolerance)
-    if "limit_down" in df.columns:
-        ld = df["limit_down"].fillna(False).astype(bool)
+    if down_col is not None:
+        ld = _bool_series(df[down_col])
         failed |= ld & ((df["close"] - df["low"]).abs() > tolerance)
     return failed
 
@@ -268,12 +350,13 @@ def check_adjfactor_stable(df: pd.DataFrame, ca_dates=None, **_) -> pd.Series:
     """K05: adjfactor unchanged on non-corporate-action days."""
     if "adjfactor" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
-    df_sorted = df.sort_values(["ticker", "trade_date"])
+    dc = _date_col(df) or "trade_date"
+    df_sorted = df.sort_values(["ticker", dc])
     prev = df_sorted.groupby("ticker")["adjfactor"].shift(1)
     changed = df_sorted["adjfactor"] != prev
     is_ca = (
-        df_sorted["trade_date"].isin(ca_dates)
-        if ca_dates
+        df_sorted[dc].isin(ca_dates)
+        if ca_dates is not None and len(ca_dates)
         else pd.Series(False, index=df_sorted.index)
     )
     failed = changed & ~is_ca & prev.notna()
@@ -287,9 +370,11 @@ def check_factor_cross_section(
     **_,
 ) -> pd.Series:
     """K09: cross-sectional std > min_std and abs(mean) < max_abs_mean."""
-    if "factor_value" not in df.columns:
+    vc = _value_col(df)
+    if vc is None:
         return pd.Series([False], index=["__aggregate__"])
-    grouped = df.groupby("trade_date")["factor_value"]
+    dc = _date_col(df) or "trade_date"
+    grouped = df.groupby(dc)[vc]
     bad_std = (grouped.std() <= min_std).any()
     bad_mean = (grouped.mean().abs() >= max_abs_mean).any()
     return pd.Series([bool(bad_std or bad_mean)], index=["__aggregate__"])
@@ -298,7 +383,7 @@ def check_factor_cross_section(
 def check_industry_universe_match(df: pd.DataFrame, universe=None, **_) -> pd.Series:
     """K10: universe set must equal industry set."""
     if universe is None:
-        return pd.Series([False], index=["__aggregate__"])
+        return pd.Series([True], index=["__aggregate__"])
     industry_set = set(df["ticker"].unique()) if "ticker" in df.columns else set()
     universe_set = set(universe)
     return pd.Series([industry_set != universe_set], index=["__aggregate__"])
@@ -309,7 +394,7 @@ def check_fund_vs_daily_tickers(
 ) -> pd.Series:
     """K11: set difference between fundamental and daily tickers <= max_diff."""
     if daily_tickers is None:
-        return pd.Series([False], index=["__aggregate__"])
+        return pd.Series([True], index=["__aggregate__"])
     fund_set = set(df["ticker"].unique()) if "ticker" in df.columns else set()
     diff = fund_set.symmetric_difference(set(daily_tickers))
     return pd.Series([len(diff) > max_diff], index=["__aggregate__"])
@@ -319,22 +404,42 @@ def check_fund_vs_daily_tickers(
 
 
 def check_daily_freshness(
-    df: pd.DataFrame, max_stale_days: int = 1, today=None, **_
+    df: pd.DataFrame,
+    max_stale_days: int = 1,
+    today=None,
+    calendar_dates=None,
+    **_,
 ) -> pd.Series:
-    """T01: latest trade_date within max_stale_days trading days of *today*."""
-    latest = pd.to_datetime(df["trade_date"]).max()
+    """T01: latest trade_date within max_stale_days trading days of *today*.
+
+    Trading-day distance is computed against the injected *calendar_dates*
+    when available; falls back to business-day count otherwise.
+    """
+    dc = _date_col(df) or "trade_date"
+    latest = pd.to_datetime(df[dc]).max()
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
-    stale = max(len(pd.bdate_range(latest, ref)) - 1, 0) > max_stale_days
+    if calendar_dates is not None:
+        cal = pd.to_datetime(list(calendar_dates))
+        between = cal[(cal > latest) & (cal <= ref)]
+        stale = len(between) > max_stale_days
+    else:
+        stale = max(len(pd.bdate_range(latest, ref)) - 1, 0) > max_stale_days
     return pd.Series([bool(stale)], index=["__aggregate__"])
 
 
 def check_minute_freshness(
-    df: pd.DataFrame, max_stale_days: int = 1, today=None, **_
+    df: pd.DataFrame,
+    max_stale_days: int = 1,
+    today=None,
+    calendar_dates=None,
+    **_,
 ) -> pd.Series:
     """T02: same as T01 but for minute data."""
-    return check_daily_freshness(df, max_stale_days=max_stale_days, today=today)
+    return check_daily_freshness(
+        df, max_stale_days=max_stale_days, today=today, calendar_dates=calendar_dates
+    )
 
 
 def check_no_future_dates(df: pd.DataFrame, today=None, **_) -> pd.Series:
@@ -342,14 +447,30 @@ def check_no_future_dates(df: pd.DataFrame, today=None, **_) -> pd.Series:
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
-    dates = pd.to_datetime(df["trade_date"])
+    dc = _date_col(df) or "trade_date"
+    dates = pd.to_datetime(df[dc])
     has_future = bool((dates > ref).any())
     return pd.Series([has_future], index=["__aggregate__"])
 
 
 def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
-    """T04: trade_date strictly ascending with no duplicates within partition."""
-    dates = pd.to_datetime(df["trade_date"])
+    """T04: trade_date strictly ascending with no duplicates within partition.
+
+    For minute frames (240 rows per ticker x trade_date) the partition key is
+    ``(ticker, trade_date)`` and ordering is validated on the ``datetime``
+    column; for other frames it partitions by ``ticker`` on the date column.
+    """
+    dc = _date_col(df) or "trade_date"
+    ts_col = _dt_col(df)
+    if ts_col is not None and "ticker" in df.columns:
+        # Minute-frame: check that timestamps within (ticker, trade_date) are
+        # strictly ascending (no duplicates or out-of-order bars).
+        ts = pd.to_datetime(df[ts_col])
+        diff = ts.groupby([df["ticker"], df[dc]]).diff()
+        bad = (diff <= pd.Timedelta(0)) & diff.notna()
+        return bad.fillna(False)
+
+    dates = pd.to_datetime(df[dc])
     failed = pd.Series(False, index=df.index)
     grp_col = "ticker" if "ticker" in df.columns else None
     if grp_col:
@@ -368,14 +489,16 @@ def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
 
 def check_minute_timestamp_order(df: pd.DataFrame, **_) -> pd.Series:
     """T05: within ticker x date, timestamps strictly ascending and continuous."""
-    if "timestamp" not in df.columns:
+    ts_col = _dt_col(df)
+    if ts_col is None:
         return pd.Series([False] * len(df), index=df.index)
-    ts = pd.to_datetime(df["timestamp"])
-    diff = ts.groupby([df["ticker"], df["trade_date"]]).diff()
+    dc = _date_col(df) or "trade_date"
+    ts = pd.to_datetime(df[ts_col])
+    diff = ts.groupby([df["ticker"], df[dc]]).diff()
     bad_order = (diff <= pd.Timedelta(0)) & diff.notna()
-    # Gap detection: consecutive bars should be <= 2 minutes (1-min bars with
-    # a single-bar gap tolerance for lunch break at 11:30-13:00).
-    gap = (diff > pd.Timedelta(minutes=2)) & (diff != pd.Timedelta(hours=1, minutes=30))
+    # Lunch break (11:30 → 13:01 bar-end) is 91 minutes; accept 88-92.
+    lunch_break = (diff > pd.Timedelta(minutes=88)) & (diff <= pd.Timedelta(minutes=92))
+    gap = (diff > pd.Timedelta(minutes=2)) & ~lunch_break
     return (bad_order | gap).fillna(False)
 
 
@@ -385,9 +508,10 @@ def check_adjfactor_idempotent(
     """T06: re-ingestion adjfactor must be unchanged."""
     if previous_adjfactor is None:
         return pd.Series([False], index=["__aggregate__"])
-    merged = df[["ticker", "trade_date", "adjfactor"]].merge(
+    dc = _date_col(df) or "trade_date"
+    merged = df[["ticker", dc, "adjfactor"]].merge(
         previous_adjfactor,
-        on=["ticker", "trade_date"],
+        on=["ticker", dc],
         suffixes=("_new", "_old"),
         how="inner",
     )
@@ -398,14 +522,37 @@ def check_adjfactor_idempotent(
 
 
 def check_factor_lag(
-    df: pd.DataFrame, max_lag_days: int = 2, today=None, **_
+    df: pd.DataFrame,
+    max_lag_days: int = 2,
+    today=None,
+    calendar_dates=None,
+    **_,
 ) -> pd.Series:
-    """T07: D-day factor data must arrive by D+2."""
+    """T07: D-day factor data must arrive by D+2 (trading days when calendar available)."""
     if "arrival_date" not in df.columns:
         return pd.Series([False], index=["__aggregate__"])
-    lag = (
-        pd.to_datetime(df["arrival_date"]) - pd.to_datetime(df["trade_date"])
-    ).dt.days
+    dc = _date_col(df) or "trade_date"
+    td = pd.to_datetime(df[dc])
+    ad = pd.to_datetime(df["arrival_date"])
+    # Filter to rows at or before *today*.
+    if today is not None:
+        ref = pd.to_datetime(today)
+        mask = td <= ref
+        td = td[mask]
+        ad = ad[mask]
+    if len(td) == 0:
+        return pd.Series([False], index=["__aggregate__"])
+    if calendar_dates is not None:
+        cal = pd.to_datetime(list(calendar_dates)).sort_values()
+        lag = pd.Series(
+            [
+                int(((cal > d) & (cal <= a)).sum()) if pd.notna(a) else 0
+                for d, a in zip(td, ad)
+            ],
+            index=td.index,
+        )
+    else:
+        lag = (ad - td).dt.days
     return pd.Series([bool((lag > max_lag_days).any())], index=["__aggregate__"])
 
 
@@ -416,7 +563,8 @@ def check_calendar_forward(
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
-    dates = pd.to_datetime(df["trade_date"])
+    dc = _date_col(df) or "trade_date"
+    dates = pd.to_datetime(df[dc])
     forward = dates[dates >= ref]
     return pd.Series([forward.nunique() < min_forward_days], index=["__aggregate__"])
 
@@ -430,7 +578,7 @@ def check_late_correction(
     """T09: historical change > max_change_rate triggers alert."""
     if previous_data is None:
         return pd.Series([False], index=["__aggregate__"])
-    key = ["ticker", "trade_date"]
+    key = ["ticker", _date_col(df) or "trade_date"]
     val_cols = [
         c
         for c in df.select_dtypes(include="number").columns
