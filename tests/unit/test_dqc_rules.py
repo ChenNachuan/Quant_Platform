@@ -124,6 +124,23 @@ YAML_ASSET_MARK = {
     "reference.yaml": "reference",
 }
 
+# YAML file -> data.storage_schema.SCHEMA tables its frames are drawn from.
+# Rules load per asset (run_all_checks(df, date, asset_type)), so a rule's
+# filter may only name columns the owning file's tables actually have.
+YAML_ASSET_TABLES = {
+    "bars_daily.yaml": ["bars_daily"],
+    "bars_minute.yaml": ["bars_minute"],
+    "fundamental.yaml": ["fundamental"],
+    "factor.yaml": ["factor"],
+    "reference.yaml": [
+        "calendar",
+        "contract_specs",
+        "industry",
+        "corporate_actions",
+        "continuous",
+    ],
+}
+
 
 def _load_all_rules():
     """Load all rules from the 5 YAML files, returning (file, rule) tuples."""
@@ -202,7 +219,13 @@ def _apply_condition(series: pd.Series, condition: str, value) -> pd.Series:
 
 
 def _apply_filter(df: pd.DataFrame, filter_expr: str) -> pd.Series:
-    """Evaluate a boolean filter expression; True = row is in scope."""
+    """Evaluate a boolean filter expression; True = row is in scope.
+
+    The expression is evaluated with ``df.eval`` against the frame, so every
+    name it mentions must be a real column: a filter naming an absent column
+    is a rule/schema mismatch and raises. Filters are schema-scoped per rules
+    file (bars_minute has no ``suspend``), never skipped when a name is absent.
+    """
     return df.eval(filter_expr).astype(bool)
 
 
@@ -217,10 +240,8 @@ def evaluate_column_check(df: pd.DataFrame, rule: dict) -> pd.Series:
         col_value = value[col] if isinstance(value, dict) else value
         failures = failures | _apply_condition(df[col], rule["condition"], col_value)
     if "filter" in rule and rule["filter"]:
-        filter_col = rule["filter"].split("==")[0].strip()
-        if filter_col in df.columns:
-            in_scope = _apply_filter(df, rule["filter"])
-            failures = failures & in_scope
+        in_scope = _apply_filter(df, rule["filter"])
+        failures = failures & in_scope
     return failures
 
 
@@ -537,6 +558,11 @@ class TestUniquenessAcrossFiles:
         Full-body comparison, not just severity/type: _unique_rules is
         first-wins, so a diverging copy silently shadows the corrected one
         (C05 params once diverged exactly this way).
+
+        ``filter`` is exempt: it is schema-scoped to the owning file's asset
+        (bars_daily filters on ``suspend``; BARS_MINUTE_SCHEMA has no such
+        column). Filter validity per file is enforced by
+        test_column_names_match_storage_schema.
         """
         entries = _load_all_rules()
         by_id = {}
@@ -550,6 +576,8 @@ class TestUniquenessAcrossFiles:
                 base_fname, base = occurrences[0]
                 for fname, rule in occurrences[1:]:
                     for field in sorted(set(base) | set(rule)):
+                        if field == "filter":
+                            continue
                         assert base.get(field) == rule.get(field), (
                             f"{rid}: {field} differs between {base_fname} and "
                             f"{fname}: {base.get(field)!r} vs {rule.get(field)!r}"
@@ -1106,10 +1134,24 @@ class TestThirdReviewRegression:
         assert not result.any(), "clean minute batch must pass T04"
 
     def test_T05_minute_clean_batch_passes(self):
-        """1-minute intervals with no gaps must pass T05."""
+        """Clean 1-minute batch passes T05; out-of-order datetimes must fire.
+
+        The clean half alone cannot tell "validates and finds nothing" from an
+        all-False stub, so the dirty half is what guards T05's
+        timestamp->datetime rename: pre-rename code reads the absent
+        ``timestamp`` column and returns all-False for schema-conformant
+        frames, so it passes clean and misses the violation.
+        """
         df = _make_clean_minute()
         result = evaluate_custom_check(df, _get_rules()["T05"])
         assert not result.any(), "clean minute batch must pass T05"
+        dirty = df.copy()
+        dirty.loc[0, "datetime"], dirty.loc[1, "datetime"] = (
+            dirty.loc[1, "datetime"],
+            dirty.loc[0, "datetime"],
+        )
+        result = evaluate_custom_check(dirty, _get_rules()["T05"])
+        assert result.any(), "out-of-order minute datetimes must fire T05"
 
     def test_K06_suspended_stock_exempt(self):
         """Suspended stock (suspend=True, volume=0, no minute bars) must not fail K06."""
@@ -1209,3 +1251,41 @@ class TestThirdReviewRegression:
                 assert pcol in known, (
                     f"{rule['id']} in {fname}: param column '{pcol}' not in storage schemas"
                 )
+            # filter expressions are schema-scoped to the owning file's asset
+            filt = rule.get("filter")
+            if filt:
+                file_cols = set()
+                for table in YAML_ASSET_TABLES[fname]:
+                    file_cols |= _schema_cols(ss.SCHEMA[table])
+                file_cols |= extra
+                for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(filt)):
+                    if name in {"True", "False", "None", "true", "false", "null"}:
+                        continue
+                    assert name in file_cols, (
+                        f"{rule['id']} in {fname}: filter names '{name}' "
+                        f"absent from the file's asset schema"
+                    )
+
+    def test_C04_L01_run_on_minute_frame(self):
+        """C04/L01 must evaluate on a schema-conformant minute frame.
+
+        Minute bars have no ``suspend`` column (BARS_MINUTE_SCHEMA), so the
+        bars_minute copies must not filter on it — ``df.eval`` would raise
+        UndefinedVariableError and two HARD rules could never run. The checks
+        must still flag a real bad close once the filter is gone.
+        """
+        df = _make_clean_minute()
+        minute_rules = {
+            rule["id"]: rule
+            for fname, rule in _load_all_rules()
+            if fname == "bars_minute.yaml"
+        }
+        for rid, bad_close in (("C04", np.nan), ("L01", 0.0)):
+            rule = minute_rules[rid]
+            assert not evaluate_column_check(df, rule).any(), (
+                f"{rid} must pass a clean minute frame"
+            )
+            dirty = df.copy()
+            dirty.loc[0, "close"] = bad_close
+            flagged = evaluate_column_check(dirty, rule)
+            assert flagged.iloc[0], f"{rid} must flag a bad minute close"

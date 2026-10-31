@@ -24,7 +24,9 @@ rules:
     columns: [open, high, low, close, volume]
     condition: "notnull"
     value: null
-    filter: "suspend == False"
+    # No suspend filter on the minute copy: BARS_MINUTE_SCHEMA has no suspend
+    # column (a suspended session produces no minute bars, so every row is
+    # non-suspended and in scope). The bars_daily copy keeps the filter.
     applicability: [daily, minute]
     threshold: "non-suspended OHLCV has zero nulls"
     threshold_source: fixed
@@ -39,7 +41,7 @@ rules:
     columns: [open, high, low, close]
     condition: "gt"
     value: 0
-    filter: "suspend == False"
+    # No suspend filter on the minute copy — see C04 above.
     applicability: [daily, minute]
     threshold: "non-suspended OHLC > 0"
     threshold_source: fixed
