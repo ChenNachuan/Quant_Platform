@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -758,3 +759,460 @@ class TestOptionalFindingRegressions:
         raw["NAV_ADJ_FACTOR"] = [0.90, np.nan, 0.70]
         out = normalize_amazingdata("stock", raw)
         assert out["adjfactor"].tolist() == pytest.approx([0.90, 1.05, 0.70])
+
+
+# ---------------------------------------------------------------------------
+# ac-3: K06–K08 cross-table consistency at the pipeline seam
+# ---------------------------------------------------------------------------
+
+
+def _make_consistent_pair():
+    """Return (daily_df, minute_df) that passes K06–K08."""
+    daily = pd.DataFrame(
+        {
+            "ticker": ["000001.SZ", "000001.SZ"],
+            "trade_date": ["2024-01-15", "2024-01-16"],
+            "open": [10.0, 10.5],
+            "high": [10.5, 11.0],
+            "low": [9.5, 10.0],
+            "close": [10.2, 10.8],
+            "volume": [100000.0, 120000.0],
+        }
+    )
+    minute = pd.DataFrame(
+        {
+            "ticker": ["000001.SZ"] * 4,
+            "trade_date": ["2024-01-15", "2024-01-15", "2024-01-16", "2024-01-16"],
+            "timestamp": [
+                "2024-01-15 09:30:00",
+                "2024-01-15 14:59:00",
+                "2024-01-16 09:30:00",
+                "2024-01-16 14:59:00",
+            ],
+            "open": [10.0, 10.2, 10.5, 10.8],
+            "high": [10.3, 10.5, 10.8, 11.0],
+            "low": [9.5, 9.8, 10.0, 10.3],
+            "close": [10.2, 10.2, 10.8, 10.8],
+            "volume": [50000.0, 50000.0, 60000.0, 60000.0],
+        }
+    )
+    return daily, minute
+
+
+class TestCrossTableK06K08:
+    """ac-3: inconsistent daily/minute pairs must be caught at the pipeline seam.
+
+    K06: daily close vs last minute close (tolerance 0.01).
+    K07: daily volume vs sum of minute volumes (rel diff <= 0.1 %).
+    K08: daily high/low must contain minute extremes.
+    """
+
+    def test_consistent_pair_passes_all_three(self):
+        from data.dqc.checks.cross_checks import (
+            check_daily_vs_minute_close,
+            check_daily_vs_minute_hl,
+            check_daily_vs_minute_volume,
+        )
+
+        daily, minute = _make_consistent_pair()
+        assert not check_daily_vs_minute_close(daily, minute, tolerance=0.01).any()
+        assert not check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001).any()
+        assert not check_daily_vs_minute_hl(daily, minute).any()
+
+    def test_K06_close_mismatch_beyond_tolerance(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "close"] = 99.0  # way off from last minute close 10.2
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert result.iloc[0], "K06 must catch close mismatch > 0.01"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K06_close_mismatch_within_tolerance_passes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "close"] = 10.205  # 0.005 from last minute close — within 0.01
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert not result.any(), "mismatch within tolerance must pass"
+
+    def test_K07_volume_sum_off_by_over_01pct(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily, minute = _make_consistent_pair()
+        # daily vol 100000 vs minute sum 100000 → OK for day 1.
+        # Corrupt day 1 daily volume to 101000 (1 % over)
+        daily.loc[0, "volume"] = 101000.0
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert result.iloc[0], "K07 must catch volume sum mismatch > 0.1 %"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K07_volume_sum_within_tolerance_passes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "volume"] = 100050.0  # 0.05 % over — within 0.1 %
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert not result.any(), "volume sum mismatch within 0.1 % must pass"
+
+    def test_K08_high_not_containing_minute_extremes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily, minute = _make_consistent_pair()
+        # daily high 10.5 < minute max high 10.5 is fine (>=).
+        # Corrupt: daily high drops below minute max high
+        daily.loc[0, "high"] = 9.0
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert result.iloc[0], "K08 must catch daily high < minute max high"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K08_low_not_containing_minute_extremes(self):
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily, minute = _make_consistent_pair()
+        daily.loc[0, "low"] = 11.0  # daily low 11 > minute min low 9.5
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert result.iloc[0], "K08 must catch daily low > minute min low"
+        assert not result.iloc[1], "day 2 should still pass"
+
+    def test_K08_boundary_equality_passes(self):
+        """Daily high == minute max high and low == minute min low must pass."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily, minute = _make_consistent_pair()
+        # Day 1 minute max high = 10.5, min low = 9.5
+        # Set daily to exactly those extremes
+        daily.loc[0, "high"] = 10.5
+        daily.loc[0, "low"] = 9.5
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert not result.iloc[0], "boundary equality must pass (inclusive)"
+
+
+# ── DQC report dual tables + CLI (S9-T3 iteration 2) ──────────────────
+
+
+def _dqc_daily_frame(date_str: str = "2024-01-03", n: int = 3) -> pd.DataFrame:
+    """A bars_daily batch that passes every bars_daily rule."""
+    rows = []
+    for i in range(1, n + 1):
+        px = 10.0 + i
+        rows.append(
+            {
+                "ticker": f"000{i:03d}.SZ",
+                "trade_date": date_str,
+                "open": px,
+                "high": px * 1.02,
+                "low": px * 0.98,
+                "close": px * 1.01,
+                "volume": 1000 + i,
+                "amount": px * 1000.0,
+                "adjfactor": 1.0,
+                "turnover": 0.5,
+                "suspend": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+                "prev_close": px,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _dqc_overrides(date_str: str = "2024-01-03", tickers=None) -> dict:
+    """The reference injection a clean batch needs (same shape as the
+    build_reference_overrides output of a seeded data root)."""
+    tickers = tickers or [f"000{i:03d}.SZ" for i in range(1, 4)]
+    return {
+        "calendar_dates": [date_str],
+        "universe": tickers,
+        "daily_tickers": tickers,
+        "today": date_str,
+    }
+
+
+def _dqc_fake_result(rule_id: str, df: pd.DataFrame, failing) -> object:
+    """A CheckResult with a row-aligned failure mask (test double, not a stub
+    of the code under test — the engine builds the real ones)."""
+    from data.dqc import engine
+    from data.dqc.severity import severity_config_for
+
+    mask = pd.Series(failing, index=df.index, dtype=bool)
+    cfg = severity_config_for(rule_id)
+    count = int(mask.sum())
+    return engine.CheckResult(
+        rule_id=rule_id,
+        rule_name=rule_id,
+        dimension="legality",
+        severity="HARD",
+        action_taken=cfg.row_action,
+        total_rows=len(df),
+        failing_rows=mask,
+        failing_rate=count / len(df),
+        sample_tickers=[],
+        sample_values=[],
+    )
+
+
+def _seed_dqc_reference_stores(root, date_str="2024-01-03", tickers=None):
+    """Seed calendar / industry / prior bars so build_reference_overrides
+    supplies the four overrides the smoke-proven clean batch needs."""
+    tickers = tickers or [f"000{i:03d}.SZ" for i in range(1, 4)]
+    cal = root / "asset" / "calendar"
+    cal.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"trade_date": [date_str]}).to_parquet(cal / "sse.parquet")
+    ref = root / "asset" / "reference"
+    ref.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"ticker": tickers}).to_parquet(ref / "industry.parquet")
+    bars = root / "asset" / "bars_daily"
+    bars.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {"ticker": tickers, "trade_date": ["2024-01-02"] * len(tickers)}
+    ).to_parquet(bars / "2024-01-02.parquet")
+
+
+class TestDqcReportTables:
+    DATA_DATE = date(2024, 1, 3)
+
+    def test_accepted_batch_writes_both_report_tables(self, tmp_path):
+        from data.dqc import engine, report
+
+        df = _dqc_daily_frame()
+        out = engine.ingest_with_dqc(
+            df,
+            self.DATA_DATE,
+            "bars_daily",
+            overrides=_dqc_overrides(),
+            data_root=tmp_path,
+        )
+        assert len(out) == 3
+        assert (out["quality_flag"] == 0).all()
+        assert (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+
+        detail_file = (
+            tmp_path / "dqc" / "_dqc_results" / "month=2024-01" / "data.parquet"
+        )
+        assert detail_file.exists()
+        detail = report.load_detail(tmp_path)
+        hard, soft = engine.run_all_checks(df, self.DATA_DATE, "bars_daily")
+        assert len(detail) == len(hard) + len(soft)  # one row per rule per run
+        assert set(detail["action_taken"]) == {"pass"}
+        assert (detail["rule_version"] == engine.RULE_VERSION).all()
+        assert isinstance(json.loads(detail.iloc[0]["sample_tickers"]), list)
+        assert isinstance(json.loads(detail.iloc[0]["sample_values"]), list)
+
+        summary = report.load_summary(tmp_path)
+        assert len(summary) == 1
+        row = summary.iloc[0]
+        assert row["batch_status"] == "accepted"
+        assert row["total_rows"] == 3
+        assert (
+            row["total_rows"]
+            == row["rows_dropped"] + row["rows_flagged"] + row["rows_clean"]
+        )
+        assert row["rows_dropped"] == 0 and row["rows_clean"] == 3
+        assert row["drop_rate"] == 0.0
+        assert json.loads(row["hard_rules_failed"]) == []
+        assert json.loads(row["soft_rules_failed"]) == []
+
+    def test_rejected_batch_reports_and_quarantines(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from data.dqc import engine, report
+        from data.dqc.severity import DQCBatchReject
+
+        df = _dqc_daily_frame(n=20)
+        # five disjoint HARD failures, each at (not above) its own escalation
+        # threshold: the union drop rate trips the global valve instead
+        hard = []
+        start = 0
+        for rule_id, count in (
+            ("L10", 1),
+            ("L11", 1),
+            ("K02", 1),
+            ("K03", 1),
+            ("C04", 4),
+        ):
+            hard.append(
+                _dqc_fake_result(
+                    rule_id, df, [start <= i < start + count for i in range(20)]
+                )
+            )
+            start += count
+        monkeypatch.setattr(engine, "run_all_checks", lambda *a, **k: (hard, []))
+
+        with pytest.raises(DQCBatchReject) as excinfo:
+            engine.ingest_with_dqc(df, self.DATA_DATE, "bars_daily", data_root=tmp_path)
+        detail_reject = excinfo.value.detail
+        assert detail_reject["reject_reason"].startswith("global_valve")
+
+        # S5 quarantine record
+        assert (tmp_path / "quarantine" / "bars_daily" / "2024-01-03.parquet").exists()
+        meta = json.loads(
+            (
+                tmp_path / "quarantine" / "bars_daily" / "2024-01-03.rejection.json"
+            ).read_text()
+        )
+        assert meta["reject_reason"] == detail_reject["reject_reason"]
+
+        # report tables record the refusal
+        detail = report.load_detail(tmp_path)
+        assert set(detail["action_taken"]) == {"reject_batch"}
+        assert set(detail["rule_id"]) == {"L10", "L11", "K02", "K03", "C04"}
+        row = report.load_summary(tmp_path).iloc[0]
+        assert row["batch_status"] == "rejected"
+        assert row["rows_dropped"] == meta["rows_would_drop"] == 8
+        assert (
+            row["total_rows"]
+            == row["rows_dropped"] + row["rows_flagged"] + row["rows_clean"]
+        )
+        assert "L10" in json.loads(row["hard_rules_failed"])
+
+        # AC4: quarantine CLI lists the batch with its reject reason
+        assert report.main(["quarantine", "--data-root", str(tmp_path), "--json"]) == 0
+        listing = json.loads(capsys.readouterr().out)
+        assert listing[0]["data_date"] == "2024-01-03"
+        assert listing[0]["asset_type"] == "bars_daily"
+        assert listing[0]["reject_reason"] == detail_reject["reject_reason"]
+        assert "L10" in listing[0]["hard_rules_triggered"]
+
+    def test_dashboard_summarizes_batches(self, tmp_path, monkeypatch, capsys):
+        from data.dqc import engine, report
+        from data.dqc.severity import DQCBatchReject
+
+        engine.ingest_with_dqc(
+            _dqc_daily_frame(),
+            self.DATA_DATE,
+            "bars_daily",
+            overrides=_dqc_overrides(),
+            data_root=tmp_path,
+        )
+        hard = [_dqc_fake_result("T03", _dqc_daily_frame(n=2), [True, False])]
+        monkeypatch.setattr(engine, "run_all_checks", lambda *a, **k: (hard, []))
+        with pytest.raises(DQCBatchReject):
+            engine.ingest_with_dqc(
+                _dqc_daily_frame(n=2),
+                self.DATA_DATE,
+                "bars_daily",
+                data_root=tmp_path,
+            )
+
+        assert (
+            report.main(["dashboard", "--data-root", str(tmp_path), "--last", "5"]) == 0
+        )
+        out = capsys.readouterr().out
+        assert "batch_status" in out
+        assert "accepted" in out and "rejected" in out
+
+    def test_reingest_cli_end_to_end(self, tmp_path, monkeypatch):
+        import data.adapters
+        import data.normalizers
+
+        from data.dqc import engine, report
+        from data.source_adapter import FetchResult
+
+        _seed_dqc_reference_stores(tmp_path)
+        df = _dqc_daily_frame()
+
+        class _FakeAdapter:
+            def fetch(self, asset_type, trade_date, watermark=None):
+                return FetchResult(
+                    df=df.copy(),
+                    source="fake",
+                    asset_type=asset_type,
+                    trade_date=trade_date,
+                    row_count=len(df),
+                    watermark=None,
+                )
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            data.adapters, "get_adapter", lambda source, **kw: _FakeAdapter()
+        )
+        monkeypatch.setattr(
+            data.normalizers,
+            "get_normalizer",
+            lambda source: lambda asset_type, raw: raw.copy(),
+        )
+        rc = report.main(
+            [
+                "reingest",
+                "--source",
+                "fake",
+                "--asset",
+                "bars_daily",
+                "--date",
+                "2024-01-03",
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        assert (
+            tmp_path / "raw" / "fake" / "bars_daily" / "2024-01-03.parquet"
+        ).exists()
+        assert (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+        assert report.load_summary(tmp_path).iloc[0]["batch_status"] == "accepted"
+        detail = report.load_detail(tmp_path)
+        assert set(detail["action_taken"]) == {"pass"}
+        assert (detail["rule_version"] == engine.RULE_VERSION).all()
+
+    def test_revalidate_cli_is_report_only(self, tmp_path, monkeypatch, capsys):
+        import data.normalizers
+
+        from data.dqc import engine, report
+        from data.raw import save_raw
+
+        _seed_dqc_reference_stores(tmp_path)
+        good = _dqc_daily_frame()
+        bad = _dqc_daily_frame(n=3)
+        bad.loc[bad.index[:1], "trade_date"] = "2025-01-01"  # T03 future date
+        save_raw(good, "fake", "bars_daily", date(2024, 1, 3), data_root=tmp_path)
+        save_raw(bad, "fake", "bars_daily", date(2024, 1, 4), data_root=tmp_path)
+        monkeypatch.setattr(
+            data.normalizers,
+            "get_normalizer",
+            lambda source: lambda asset_type, raw: raw.copy(),
+        )
+
+        rc = report.main(
+            [
+                "revalidate",
+                "--source",
+                "fake",
+                "--asset",
+                "bars_daily",
+                "--start",
+                "2024-01-03",
+                "--end",
+                "2024-01-04",
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 1  # one batch would be rejected
+        out = capsys.readouterr().out
+        assert "2 batch(es)" in out and "1 would reject" in out
+
+        detail = report.load_detail(tmp_path)
+        assert (detail["action_taken"] == "reject_batch").any()
+        assert (detail["rule_version"] == engine.RULE_VERSION).all()
+        # report only: no landing write, no summary rows, no quarantine
+        assert not (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+        assert report.load_summary(tmp_path).empty
+        assert not (tmp_path / "quarantine").exists()
+
+    def test_module_invocation_resolves(self):
+        """AC4's literal ``python -m dqc.report`` entry point must run."""
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[2]
+        proc = subprocess.run(
+            [sys.executable, "-m", "dqc.report", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        assert proc.returncode == 0
+        assert "quarantine" in proc.stdout and "reingest" in proc.stdout

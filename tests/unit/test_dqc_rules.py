@@ -1,0 +1,1291 @@
+"""Structural and constructive tests for DQC rules — 44 rules across 5 asset YAMLs.
+
+Part 1: structural validation (counts, continuity, applicability, YAML shape).
+Part 2: declarative evaluation harness + clean-sample test + 27 HARD trigger cases.
+
+Source of truth: docs/design/data/dqc_rules.md (four dimension tables).
+"""
+
+import importlib
+import re
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+RULES_DIR = Path(__file__).parent.parent.parent / "data" / "dqc" / "rules"
+
+YAML_FILES = [
+    "bars_daily.yaml",
+    "bars_minute.yaml",
+    "fundamental.yaml",
+    "factor.yaml",
+    "reference.yaml",
+]
+
+# Expected ID ranges per dimension
+EXPECTED_IDS = {
+    "C": [f"C{i:02d}" for i in range(1, 11)],  # C01-C10
+    "L": [f"L{i:02d}" for i in range(1, 15)],  # L01-L14
+    "K": [f"K{i:02d}" for i in range(1, 12)],  # K01-K11
+    "T": [f"T{i:02d}" for i in range(1, 10)],  # T01-T09
+}
+ALL_EXPECTED_IDS = sorted([rid for ids in EXPECTED_IDS.values() for rid in ids])
+
+# Expected HARD/SOFT counts per dimension prefix
+EXPECTED_HARD = {"C": 6, "L": 9, "K": 7, "T": 5}  # total 27
+EXPECTED_SOFT = {"C": 4, "L": 5, "K": 4, "T": 4}  # total 17
+
+# Applicability marks from the design tables: rule_id -> set of marks
+EXPECTED_APPLICABILITY = {
+    "C01": {"daily", "fund"},
+    "C02": {"daily", "fund"},
+    "C03": {"minute"},
+    "C04": {"daily", "minute"},
+    "C05": {"daily", "fund"},
+    "C06": {"daily"},
+    "C07": {"reference"},
+    "C08": {"factor"},
+    "C09": {"factor"},
+    "C10": {"reference"},
+    "L01": {"daily", "minute"},
+    "L02": {"daily", "minute"},
+    "L03": {"daily", "minute"},
+    "L04": {"daily"},
+    "L05": {"daily"},  # futures filter within daily
+    "L06": {"daily"},
+    "L07": {"daily"},
+    "L08": {"daily"},
+    "L09": {"fund"},
+    "L10": {"fund"},
+    "L11": {"factor"},
+    "L12": {"factor"},
+    "L13": {"daily", "minute", "fund", "factor", "reference"},
+    "L14": {"daily", "minute", "fund", "factor", "reference"},
+    "K01": {"daily"},
+    "K02": {"daily", "minute"},
+    "K03": {"daily"},
+    "K04": {"daily"},
+    "K05": {"daily"},
+    "K06": {"daily", "minute"},
+    "K07": {"daily", "minute"},
+    "K08": {"daily", "minute"},
+    "K09": {"factor"},
+    "K10": {"reference"},
+    "K11": {"daily", "fund"},
+    "T01": {"daily", "fund"},
+    "T02": {"minute"},
+    "T03": {"daily", "minute", "fund", "factor", "reference"},
+    "T04": {"daily", "minute", "fund"},
+    "T05": {"minute"},
+    "T06": {"daily"},
+    "T07": {"factor"},
+    "T08": {"reference"},
+    "T09": {"daily", "fund"},
+}
+
+REQUIRED_FIELDS = {
+    "id",
+    "name",
+    "severity",
+    "type",
+    "applicability",
+    "threshold",
+    "threshold_source",
+    "boundary",
+    "description",
+}
+VALID_SEVERITIES = {"HARD", "SOFT"}
+VALID_TYPES = {"column_check", "custom_check"}
+VALID_CONDITIONS = {
+    "gt",
+    "ge",
+    "lt",
+    "le",
+    "eq",
+    "ne",
+    "in",
+    "range",
+    "regex",
+    "notnull",
+    "isbool",
+    "isbool_notnull",
+    "notinf",
+    "date_format",
+}
+
+# YAML file -> asset mark it represents
+YAML_ASSET_MARK = {
+    "bars_daily.yaml": "daily",
+    "bars_minute.yaml": "minute",
+    "fundamental.yaml": "fund",
+    "factor.yaml": "factor",
+    "reference.yaml": "reference",
+}
+
+# YAML file -> data.storage_schema.SCHEMA tables its frames are drawn from.
+# Rules load per asset (run_all_checks(df, date, asset_type)), so a rule's
+# filter may only name columns the owning file's tables actually have.
+YAML_ASSET_TABLES = {
+    "bars_daily.yaml": ["bars_daily"],
+    "bars_minute.yaml": ["bars_minute"],
+    "fundamental.yaml": ["fundamental"],
+    "factor.yaml": ["factor"],
+    "reference.yaml": [
+        "calendar",
+        "contract_specs",
+        "industry",
+        "corporate_actions",
+        "continuous",
+    ],
+}
+
+
+def _load_all_rules():
+    """Load all rules from the 5 YAML files, returning (file, rule) tuples."""
+    entries = []
+    for fname in YAML_FILES:
+        path = RULES_DIR / fname
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        for rule in data["rules"]:
+            entries.append((fname, rule))
+    return entries
+
+
+def _unique_rules(entries):
+    """Return dict of unique rule_id -> rule (first occurrence wins)."""
+    seen = {}
+    for _fname, rule in entries:
+        rid = rule["id"]
+        if rid not in seen:
+            seen[rid] = rule
+    return seen
+
+
+# ── Evaluation harness ────────────────────────────────────────────────
+
+_RULES_CACHE: dict | None = None
+
+
+def _get_rules() -> dict:
+    global _RULES_CACHE
+    if _RULES_CACHE is None:
+        _RULES_CACHE = _unique_rules(_load_all_rules())
+    return _RULES_CACHE
+
+
+def _resolve_function(func_path: str):
+    """Resolve 'checks.custom_checks.foo' -> callable from data.dqc.checks."""
+    full = "data.dqc." + func_path
+    mod_name, fn_name = full.rsplit(".", 1)
+    mod = importlib.import_module(mod_name)
+    return getattr(mod, fn_name)
+
+
+def _apply_condition(series: pd.Series, condition: str, value) -> pd.Series:
+    """Return a boolean failure mask for a single column."""
+    if condition == "gt":
+        return series <= value
+    if condition == "ge":
+        return series < value
+    if condition == "lt":
+        return series >= value
+    if condition == "le":
+        return series > value
+    if condition == "eq":
+        return series != value
+    if condition == "ne":
+        return series == value
+    if condition == "range":
+        return (series <= value[0]) | (series >= value[1])
+    if condition == "regex":
+        return ~series.astype(str).str.match(value, na=False)
+    if condition == "notnull":
+        return series.isna()
+    if condition == "isbool_notnull":
+        is_bool = series.map(
+            lambda x: isinstance(x, (bool, np.bool_)) if pd.notna(x) else False
+        )
+        return series.isna() | ~is_bool
+    if condition == "notinf":
+        if series.dtype.kind in "fc":
+            return series.abs() == float("inf")
+        return pd.Series(False, index=series.index)
+    if condition == "date_format":
+        return pd.to_datetime(series, errors="coerce", format="ISO8601").isna()
+    raise ValueError(f"Unknown condition: {condition}")
+
+
+def _apply_filter(df: pd.DataFrame, filter_expr: str) -> pd.Series:
+    """Evaluate a boolean filter expression; True = row is in scope.
+
+    The expression is evaluated with ``df.eval`` against the frame, so every
+    name it mentions must be a real column: a filter naming an absent column
+    is a rule/schema mismatch and raises. Filters are schema-scoped per rules
+    file (bars_minute has no ``suspend``), never skipped when a name is absent.
+    """
+    return df.eval(filter_expr).astype(bool)
+
+
+def evaluate_column_check(df: pd.DataFrame, rule: dict) -> pd.Series:
+    """Evaluate a declarative column_check rule. Returns failure mask."""
+    failures = pd.Series(False, index=df.index)
+    value = rule["value"]
+    for col in rule["columns"]:
+        if col not in df.columns:
+            failures = failures | pd.Series(True, index=df.index)
+            continue
+        col_value = value[col] if isinstance(value, dict) else value
+        failures = failures | _apply_condition(df[col], rule["condition"], col_value)
+    if "filter" in rule and rule["filter"]:
+        in_scope = _apply_filter(df, rule["filter"])
+        failures = failures & in_scope
+    return failures
+
+
+def evaluate_custom_check(df: pd.DataFrame, rule: dict, **overrides) -> pd.Series:
+    """Call the rule's custom check function. Returns failure mask."""
+    fn = _resolve_function(rule["function"])
+    params = dict(rule.get("params") or {})
+    params.update(overrides)
+    return fn(df, **params)
+
+
+def evaluate_rule(rule: dict, df: pd.DataFrame, **overrides) -> pd.Series:
+    """Evaluate any rule (column or custom) against a DataFrame."""
+    if rule["type"] == "column_check":
+        return evaluate_column_check(df, rule)
+    return evaluate_custom_check(df, rule, **overrides)
+
+
+def evaluate_cross_rule(
+    rule: dict, daily_df: pd.DataFrame, minute_df: pd.DataFrame, **overrides
+) -> pd.Series:
+    """Evaluate a cross-table rule (K06-K08)."""
+    fn = _resolve_function(rule["function"])
+    params = dict(rule.get("params") or {})
+    params.update(overrides)
+    return fn(daily_df, minute_df, **params)
+
+
+# ── Clean sample fixtures ─────────────────────────────────────────────
+
+TODAY = pd.Timestamp("2024-01-04")
+CLEAN_DATES = ["2024-01-02", "2024-01-03"]
+CLEAN_TICKERS = ["000001.SZ", "000002.SZ"]
+
+
+def _make_clean_daily() -> pd.DataFrame:
+    rows = []
+    prices = {
+        "000001.SZ": [(10.0, 10.5, 9.8, 10.2), (10.2, 10.6, 10.0, 10.3)],
+        "000002.SZ": [(20.0, 20.5, 19.8, 20.2), (20.2, 20.6, 20.0, 20.3)],
+    }
+    for ticker in CLEAN_TICKERS:
+        for i, dt in enumerate(CLEAN_DATES):
+            o, h, lo, c = prices[ticker][i]
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "trade_date": dt,
+                    "open": o,
+                    "high": h,
+                    "low": lo,
+                    "close": c,
+                    "volume": 100000 + i * 10000,
+                    "amount": (100000 + i * 10000) * c,
+                    "adjfactor": 1.0,
+                    "suspend": False,
+                    "is_limit_up": False,
+                    "is_limit_down": False,
+                    "prev_close": o,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_clean_minute() -> pd.DataFrame:
+    """240 bars per ticker per date, consistent with daily OHLCV."""
+    daily = _make_clean_daily()
+    rows = []
+    for _, drow in daily.iterrows():
+        o, c = drow["open"], drow["close"]
+        vol_per_bar = drow["volume"] / 240
+        for j in range(240):
+            price = o if j < 120 else c
+            rows.append(
+                {
+                    "ticker": drow["ticker"],
+                    "trade_date": drow["trade_date"],
+                    "datetime": f"{drow['trade_date']} {9 + j // 60:02d}:{j % 60:02d}:00",
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": vol_per_bar,
+                    "amount": vol_per_bar * price,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_clean_fundamental() -> pd.DataFrame:
+    rows = []
+    for ticker in CLEAN_TICKERS:
+        for dt in CLEAN_DATES:
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "trade_date": dt,
+                    "pe_ttm": 15.0,
+                    "pe_lyr": 14.0,
+                    "pb": 1.5,
+                    "total_market_cap": 1e9,
+                    "float_market_cap": 8e8,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_clean_factor() -> pd.DataFrame:
+    dates = pd.bdate_range("2023-01-02", periods=250).strftime("%Y-%m-%d").tolist()
+    rows = []
+    for ti, ticker in enumerate(CLEAN_TICKERS):
+        for dt in dates:
+            rows.append({"ticker": ticker, "trade_date": dt, "value": 0.5 + ti * 0.1})
+    return pd.DataFrame(rows)
+
+
+def _make_clean_reference() -> pd.DataFrame:
+    """Industry/classification table for reference rules."""
+    rows = [{"ticker": t, "industry": "BANK"} for t in CLEAN_TICKERS]
+    return pd.DataFrame(rows)
+
+
+def _make_clean_calendar() -> pd.DataFrame:
+    """Trading calendar covering past + 30 future days from TODAY."""
+    dates = pd.bdate_range("2023-01-02", "2025-02-28").strftime("%Y-%m-%d").tolist()
+    return pd.DataFrame({"trade_date": dates})
+
+
+class TestYamlFilesExist:
+    def test_all_five_files_present(self):
+        for fname in YAML_FILES:
+            assert (RULES_DIR / fname).exists(), f"{fname} missing"
+
+    def test_each_file_parses(self):
+        for fname in YAML_FILES:
+            path = RULES_DIR / fname
+            with open(path) as f:
+                data = yaml.safe_load(f)
+            assert "rules" in data, f"{fname} missing 'rules' key"
+            assert isinstance(data["rules"], list)
+            assert len(data["rules"]) > 0
+
+
+class TestRuleCountAndContinuity:
+    def test_unique_ids_exactly_44(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        assert len(unique) == 44, f"expected 44 unique ids, got {len(unique)}"
+
+    def test_id_continuity_each_dimension(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        actual_ids = set(unique.keys())
+        for prefix, expected_list in EXPECTED_IDS.items():
+            for rid in expected_list:
+                assert rid in actual_ids, f"{rid} missing from rules"
+        assert actual_ids == set(ALL_EXPECTED_IDS), (
+            f"unexpected ids: {actual_ids - set(ALL_EXPECTED_IDS)}, "
+            f"missing: {set(ALL_EXPECTED_IDS) - actual_ids}"
+        )
+
+    def test_dimension_id_counts(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        for prefix, expected_list in EXPECTED_IDS.items():
+            actual = [r for r in unique if r.startswith(prefix)]
+            assert len(actual) == len(expected_list), (
+                f"{prefix}: expected {len(expected_list)}, got {len(actual)}"
+            )
+
+
+class TestHardSoftBreakdown:
+    def test_hard_total_27(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        hard = [r for r in unique.values() if r["severity"] == "HARD"]
+        assert len(hard) == 27, f"expected 27 HARD, got {len(hard)}"
+
+    def test_soft_total_17(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        soft = [r for r in unique.values() if r["severity"] == "SOFT"]
+        assert len(soft) == 17, f"expected 17 SOFT, got {len(soft)}"
+
+    def test_hard_per_dimension(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        for prefix, expected_count in EXPECTED_HARD.items():
+            actual = sum(
+                1
+                for r in unique.values()
+                if r["severity"] == "HARD" and r["id"].startswith(prefix)
+            )
+            assert actual == expected_count, (
+                f"{prefix}: expected {expected_count} HARD, got {actual}"
+            )
+
+    def test_soft_per_dimension(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        for prefix, expected_count in EXPECTED_SOFT.items():
+            actual = sum(
+                1
+                for r in unique.values()
+                if r["severity"] == "SOFT" and r["id"].startswith(prefix)
+            )
+            assert actual == expected_count, (
+                f"{prefix}: expected {expected_count} SOFT, got {actual}"
+            )
+
+
+class TestApplicability:
+    def test_each_rule_applicability_matches_design(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        for rid, expected_marks in EXPECTED_APPLICABILITY.items():
+            assert rid in unique, f"{rid} not found"
+            actual = set(unique[rid]["applicability"])
+            assert actual == expected_marks, (
+                f"{rid}: expected {expected_marks}, got {actual}"
+            )
+
+    def test_rules_appear_in_correct_yaml_files(self):
+        entries = _load_all_rules()
+        for fname, rule in entries:
+            asset = YAML_ASSET_MARK[fname]
+            marks = set(rule["applicability"])
+            assert asset in marks, (
+                f"{rule['id']} in {fname} but applicability={marks} "
+                f"does not include '{asset}'"
+            )
+
+
+class TestYamlShape:
+    def test_required_fields_present(self):
+        entries = _load_all_rules()
+        for fname, rule in entries:
+            for field in REQUIRED_FIELDS:
+                assert field in rule, (
+                    f"{rule.get('id', '?')} in {fname}: missing '{field}'"
+                )
+
+    def test_severity_valid(self):
+        entries = _load_all_rules()
+        for _fname, rule in entries:
+            assert rule["severity"] in VALID_SEVERITIES, (
+                f"{rule['id']}: invalid severity '{rule['severity']}'"
+            )
+
+    def test_type_valid(self):
+        entries = _load_all_rules()
+        for _fname, rule in entries:
+            assert rule["type"] in VALID_TYPES, (
+                f"{rule['id']}: invalid type '{rule['type']}'"
+            )
+
+    def test_column_check_has_required_subfields(self):
+        entries = _load_all_rules()
+        for fname, rule in entries:
+            if rule["type"] == "column_check":
+                for field in ("columns", "condition", "value"):
+                    assert field in rule, (
+                        f"{rule['id']} in {fname}: column_check missing '{field}'"
+                    )
+                assert rule["condition"] in VALID_CONDITIONS, (
+                    f"{rule['id']}: unknown condition '{rule['condition']}'"
+                )
+
+    def test_custom_check_has_function(self):
+        entries = _load_all_rules()
+        for fname, rule in entries:
+            if rule["type"] == "custom_check":
+                assert "function" in rule, (
+                    f"{rule['id']} in {fname}: custom_check missing 'function'"
+                )
+
+    def test_threshold_source_valid(self):
+        valid_sources = {"fixed", "statistical", "adaptive"}
+        entries = _load_all_rules()
+        for _fname, rule in entries:
+            assert rule["threshold_source"] in valid_sources, (
+                f"{rule['id']}: invalid threshold_source '{rule['threshold_source']}'"
+            )
+
+
+class TestHardBoundaryDeclarations:
+    def test_every_hard_rule_has_boundary(self):
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        for rid, rule in unique.items():
+            if rule["severity"] == "HARD":
+                assert "boundary" in rule, f"{rid}: HARD rule missing 'boundary'"
+                assert len(rule["boundary"]) > 0, f"{rid}: empty boundary"
+
+    def test_boundary_declares_endpoint_semantics(self):
+        """Boundary must contain endpoint language (inclusive/exclusive/gt/ge/le/eq)."""
+        endpoint_pattern = re.compile(
+            r"(gt|ge|lt|le|eq|inclusive|exclusive|strictly|boundary|FAILS|PASSES|passes|fails)",
+            re.IGNORECASE,
+        )
+        entries = _load_all_rules()
+        unique = _unique_rules(entries)
+        for rid, rule in unique.items():
+            if rule["severity"] == "HARD":
+                assert endpoint_pattern.search(rule["boundary"]), (
+                    f"{rid}: boundary lacks endpoint semantics: {rule['boundary']}"
+                )
+
+
+class TestUniquenessAcrossFiles:
+    def test_multi_asset_rules_consistent_across_files(self):
+        """A rule appearing in multiple YAMLs must be an identical copy everywhere.
+
+        Full-body comparison, not just severity/type: _unique_rules is
+        first-wins, so a diverging copy silently shadows the corrected one
+        (C05 params once diverged exactly this way).
+
+        ``filter`` is exempt: it is schema-scoped to the owning file's asset
+        (bars_daily filters on ``suspend``; BARS_MINUTE_SCHEMA has no such
+        column). Filter validity per file is enforced by
+        test_column_names_match_storage_schema.
+        """
+        entries = _load_all_rules()
+        by_id = {}
+        for fname, rule in entries:
+            rid = rule["id"]
+            if rid not in by_id:
+                by_id[rid] = []
+            by_id[rid].append((fname, rule))
+        for rid, occurrences in by_id.items():
+            if len(occurrences) > 1:
+                base_fname, base = occurrences[0]
+                for fname, rule in occurrences[1:]:
+                    for field in sorted(set(base) | set(rule)):
+                        if field == "filter":
+                            continue
+                        assert base.get(field) == rule.get(field), (
+                            f"{rid}: {field} differs between {base_fname} and "
+                            f"{fname}: {base.get(field)!r} vs {rule.get(field)!r}"
+                        )
+
+
+# ── Clean sample: all 44 rules pass ───────────────────────────────────
+
+
+class TestCleanSample:
+    """A clean small sample must produce 0 failures across all 44 rules."""
+
+    def _run_all(self, overrides_map=None):
+        rules = _get_rules()
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        fund = _make_clean_fundamental()
+        factor = _make_clean_factor()
+        reference = _make_clean_reference()
+        calendar = _make_clean_calendar()
+
+        frame_map = {
+            "daily": daily,
+            "minute": minute,
+            "fund": fund,
+            "factor": factor,
+            "reference": reference,
+        }
+        overrides_map = overrides_map or {}
+        total_failures = 0
+        failures_detail = {}
+
+        for rid, rule in sorted(rules.items()):
+            ov = dict(overrides_map.get(rid, {}))
+            # Inject external data based on function name
+            fn_path = rule.get("function", "")
+            if "row_count_vs_calendar" in fn_path:
+                ov["calendar_dates"] = set(daily["trade_date"].unique())
+            elif "row_count_vs_universe" in fn_path:
+                ov["universe"] = set(CLEAN_TICKERS)
+            elif "factor_ticker_coverage" in fn_path:
+                ov["universe"] = set(CLEAN_TICKERS)
+            elif "industry_coverage" in fn_path:
+                ov["universe"] = set(CLEAN_TICKERS)
+            elif "industry_universe_match" in fn_path:
+                ov["universe"] = set(CLEAN_TICKERS)
+            elif "fund_vs_daily_tickers" in fn_path:
+                ov["daily_tickers"] = set(CLEAN_TICKERS)
+            elif "adjfactor_stable" in fn_path:
+                ov["ca_dates"] = set()
+            elif "open_gap" in fn_path:
+                ov["ca_dates"] = set()
+            elif "calendar_completeness" in fn_path:
+                ov["today"] = TODAY
+            elif "no_future_dates" in fn_path or "freshness" in fn_path:
+                ov["today"] = TODAY
+            elif "calendar_forward" in fn_path:
+                ov["today"] = TODAY
+
+            # Pick primary frame — some rules need a different one
+            primary = rule["applicability"][0]
+            if rid in ("C07", "T08"):
+                df = calendar
+            else:
+                df = frame_map.get(primary, daily)
+
+            if "cross_checks" in fn_path:
+                result = evaluate_cross_rule(rule, daily, minute, **ov)
+            else:
+                result = evaluate_rule(rule, df, **ov)
+
+            n_fail = (
+                int(result.sum())
+                if isinstance(result, pd.Series)
+                else int(bool(result))
+            )
+            if n_fail > 0:
+                failures_detail[rid] = n_fail
+            total_failures += n_fail
+
+        return total_failures, failures_detail
+
+    def test_all_44_rules_pass_clean_sample(self):
+        total, detail = self._run_all()
+        assert total == 0, f"clean sample should have 0 failures, got {total}: {detail}"
+
+    def test_clean_k06_k08_pair(self):
+        rules = _get_rules()
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        for rid in ("K06", "K07", "K08"):
+            result = evaluate_cross_rule(rules[rid], daily, minute)
+            assert not result.any(), f"{rid} should pass on clean pair"
+
+
+# ── 27 HARD trigger cases ─────────────────────────────────────────────
+
+
+class TestHardTriggerCases:
+    """Each HARD rule gets a minimal dirty sample that trips exactly it."""
+
+    def _rule(self, rid):
+        return _get_rules()[rid]
+
+    def _daily(self):
+        return _make_clean_daily()
+
+    def _minute(self):
+        return _make_clean_minute()
+
+    def _assert_caught(self, rid, failures):
+        assert failures.any(), f"{rid} should catch the dirty sample"
+
+    # ── Column-check HARD triggers ──
+
+    def test_C04_null_critical_fields(self):
+        df = self._daily()
+        df.loc[0, "close"] = np.nan
+        self._assert_caught("C04", evaluate_column_check(df, self._rule("C04")))
+
+    def test_L01_price_positive(self):
+        df = self._daily()
+        df.loc[0, "close"] = 0
+        self._assert_caught("L01", evaluate_column_check(df, self._rule("L01")))
+
+    def test_L02_volume_non_negative(self):
+        df = self._daily()
+        df.loc[0, "volume"] = -1
+        self._assert_caught("L02", evaluate_column_check(df, self._rule("L02")))
+
+    def test_L06_adjfactor_positive(self):
+        df = self._daily()
+        df.loc[0, "adjfactor"] = 0
+        self._assert_caught("L06", evaluate_column_check(df, self._rule("L06")))
+
+    def test_L08_boolean_flags(self):
+        df = self._daily()
+        df["suspend"] = df["suspend"].astype(object)
+        df.loc[0, "suspend"] = None
+        self._assert_caught("L08", evaluate_column_check(df, self._rule("L08")))
+
+    def test_L10_market_cap_positive(self):
+        df = pd.DataFrame({"total_market_cap": [1e9, 0], "float_market_cap": [8e8, 0]})
+        self._assert_caught("L10", evaluate_column_check(df, self._rule("L10")))
+
+    def test_L11_factor_finite(self):
+        df = pd.DataFrame({"value": [0.5, float("inf")]})
+        self._assert_caught("L11", evaluate_column_check(df, self._rule("L11")))
+
+    def test_L13_ticker_format(self):
+        df = self._daily()
+        df.loc[0, "ticker"] = "999999.XX"
+        self._assert_caught("L13", evaluate_column_check(df, self._rule("L13")))
+
+    def test_L14_date_format(self):
+        df = self._daily()
+        df.loc[0, "trade_date"] = "not-a-date"
+        self._assert_caught("L14", evaluate_column_check(df, self._rule("L14")))
+
+    # ── Custom-check HARD triggers ──
+
+    def test_C01_row_count_vs_calendar(self):
+        df = self._daily()
+        cal = {"2024-01-02"}  # frame has 2 dates, calendar only 1 in range
+        result = evaluate_custom_check(df, self._rule("C01"), calendar_dates=cal)
+        self._assert_caught("C01", result)
+
+    def test_C03_minute_bar_count(self):
+        df = self._minute()
+        # Drop one bar so count = 239 != 240
+        df = df.iloc[:-1]
+        result = evaluate_custom_check(df, self._rule("C03"), expected_bars=240)
+        self._assert_caught("C03", result)
+
+    def test_C06_adjfactor_present(self):
+        df = self._daily()
+        df.loc[0, "adjfactor"] = np.nan
+        result = evaluate_custom_check(df, self._rule("C06"), max_missing_rate=0.0)
+        self._assert_caught("C06", result)
+
+    def test_C07_calendar_completeness(self):
+        cal = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-15"]})  # 13-day gap
+        result = evaluate_custom_check(
+            cal,
+            self._rule("C07"),
+            forward_days=30,
+            today=pd.Timestamp("2024-01-02"),
+        )
+        self._assert_caught("C07", result)
+
+    def test_C10_industry_coverage(self):
+        ref = pd.DataFrame({"ticker": ["000001.SZ"]})  # missing 000002.SZ
+        result = evaluate_custom_check(
+            ref, self._rule("C10"), universe=set(CLEAN_TICKERS)
+        )
+        self._assert_caught("C10", result)
+
+    def test_L03_ohlc_relation(self):
+        df = self._daily()
+        df.loc[0, "low"] = 11.0  # low > close
+        result = evaluate_custom_check(df, self._rule("L03"), tolerance=0.0)
+        self._assert_caught("L03", result)
+
+    def test_K02_volume_amount_match(self):
+        df = self._daily()
+        df.loc[0, "volume"] = 0  # but amount stays > 0
+        result = evaluate_custom_check(df, self._rule("K02"))
+        self._assert_caught("K02", result)
+
+    def test_K03_suspend_consistency(self):
+        df = self._daily()
+        df.loc[0, "suspend"] = True  # but volume > 0 and OHLC not flat
+        result = evaluate_custom_check(df, self._rule("K03"))
+        self._assert_caught("K03", result)
+
+    def test_K05_adjfactor_stable(self):
+        df = self._daily()
+        df.loc[1, "adjfactor"] = 2.0  # changed on non-CA day
+        result = evaluate_custom_check(df, self._rule("K05"), ca_dates=set())
+        self._assert_caught("K05", result)
+
+    def test_K10_industry_universe_match(self):
+        ref = pd.DataFrame({"ticker": ["000001.SZ"]})  # missing 000002.SZ
+        result = evaluate_custom_check(
+            ref, self._rule("K10"), universe=set(CLEAN_TICKERS)
+        )
+        self._assert_caught("K10", result)
+
+    def test_T01_daily_freshness(self):
+        df = self._daily()
+        result = evaluate_custom_check(
+            df,
+            self._rule("T01"),
+            max_stale_days=1,
+            today=pd.Timestamp("2024-03-01"),  # 2 months stale
+        )
+        self._assert_caught("T01", result)
+
+    def test_T02_minute_freshness(self):
+        df = self._minute()
+        result = evaluate_custom_check(
+            df,
+            self._rule("T02"),
+            max_stale_days=1,
+            today=pd.Timestamp("2024-03-01"),
+        )
+        self._assert_caught("T02", result)
+
+    def test_T03_no_future_dates(self):
+        df = self._daily()
+        df.loc[0, "trade_date"] = "2025-12-31"
+        result = evaluate_custom_check(df, self._rule("T03"), today=TODAY)
+        self._assert_caught("T03", result)
+
+    def test_T04_date_ascending(self):
+        df = self._daily()
+        # Swap two dates to break ascending order
+        df.loc[0, "trade_date"], df.loc[1, "trade_date"] = (
+            df.loc[1, "trade_date"],
+            df.loc[0, "trade_date"],
+        )
+        result = evaluate_custom_check(df, self._rule("T04"))
+        self._assert_caught("T04", result)
+
+    def test_T05_minute_timestamp_order(self):
+        df = self._minute().head(4).copy()
+        # Swap datetimes to break ordering
+        df.loc[0, "datetime"], df.loc[1, "datetime"] = (
+            df.loc[1, "datetime"],
+            df.loc[0, "datetime"],
+        )
+        result = evaluate_custom_check(df, self._rule("T05"))
+        self._assert_caught("T05", result)
+
+    # ── Cross-check HARD triggers (K06-K08) ──
+
+    def test_K06_daily_vs_minute_close(self):
+        daily = self._daily()
+        minute = self._minute()
+        daily.loc[0, "close"] = 99.0  # diverges from last minute close
+        result = evaluate_cross_rule(self._rule("K06"), daily, minute, tolerance=0.01)
+        self._assert_caught("K06", result)
+
+    def test_K07_daily_vs_minute_volume(self):
+        daily = self._daily()
+        minute = self._minute()
+        daily.loc[0, "volume"] = 999999  # diverges from sum of minute volumes
+        result = evaluate_cross_rule(
+            self._rule("K07"), daily, minute, max_rel_diff=0.001
+        )
+        self._assert_caught("K07", result)
+
+    def test_K08_daily_vs_minute_hl(self):
+        daily = self._daily()
+        minute = self._minute()
+        daily.loc[0, "high"] = 0.01  # below minute max high
+        result = evaluate_cross_rule(self._rule("K08"), daily, minute)
+        self._assert_caught("K08", result)
+
+
+# ── Review-fix regression cases ───────────────────────────────────────
+
+
+class TestReviewFixRegression:
+    """Guard against the 6 review findings recurring."""
+
+    def test_L04_effective_threshold_is_105_pct(self):
+        """Board limit 10% + tolerance 0.5% = 10.5%; 10.8% must fail."""
+        df = _make_clean_daily()
+        df.loc[0, "prev_close"] = 10.0
+        df.loc[0, "close"] = 10.8  # 8% change > 10.5%? no; push higher
+        df.loc[0, "close"] = 10.0 * 1.108  # 10.8% > 10.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert result.iloc[0], "10.8% change must exceed effective 10.5% limit"
+
+    def test_L04_boundary_at_105_pct_passes(self):
+        """Change just below 10.5% must pass (le semantics)."""
+        df = _make_clean_daily()
+        df.loc[0, "prev_close"] = 100.0
+        df.loc[0, "close"] = 110.49  # 10.49% < 10.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "change at 10.49% must pass"
+
+    def test_L09_pb_1500_fails(self):
+        """PB=1500 exceeds PB range (-1000, 1000); must fail."""
+        df = _make_clean_fundamental()
+        df.loc[0, "pb"] = 1500.0
+        rule = _get_rules()["L09"]
+        result = evaluate_column_check(df, rule)
+        assert result.iloc[0], "PB=1500 must exceed PB range limit"
+
+    def test_L09_pe_1500_passes(self):
+        """PE=1500 is within PE range (-10000, 10000); must pass."""
+        df = _make_clean_fundamental()
+        df.loc[0, "pe_ttm"] = 1500.0
+        rule = _get_rules()["L09"]
+        result = evaluate_column_check(df, rule)
+        assert not result.iloc[0], "PE=1500 is within PE range"
+
+    def test_K01_ca_day_gap_not_flagged(self):
+        """Ex-right day gap must be skipped when ca_dates is provided."""
+        df = _make_clean_daily()
+        df.loc[0, "open"] = 20.0  # 100% gap from prev_close=10.0
+        df.loc[0, "trade_date"] = "2024-01-02"
+        rule = _get_rules()["K01"]
+        result = evaluate_custom_check(df, rule, ca_dates={"2024-01-02"})
+        assert not result.iloc[0], "CA-day gap must not be flagged"
+
+    def test_K01_non_ca_day_gap_flagged(self):
+        """Non-CA-day gap above threshold must be flagged."""
+        df = _make_clean_daily()
+        df.loc[0, "open"] = 20.0  # 100% gap from prev_close=10.0
+        rule = _get_rules()["K01"]
+        result = evaluate_custom_check(df, rule, ca_dates=set())
+        assert result.iloc[0], "non-CA-day gap must be flagged"
+
+    def test_C03_returns_aggregate_length_1(self):
+        """C03 must return a length-1 __aggregate__ Series, not a multi-row mask."""
+        df = _make_clean_minute()
+        rule = _get_rules()["C03"]
+        result = evaluate_custom_check(df, rule, expected_bars=240)
+        assert len(result) == 1
+        assert result.index[0] == "__aggregate__"
+
+    def test_T03_returns_aggregate_length_1(self):
+        """T03 must return a length-1 __aggregate__ Series."""
+        df = _make_clean_daily()
+        rule = _get_rules()["T03"]
+        result = evaluate_custom_check(df, rule, today=TODAY)
+        assert len(result) == 1
+        assert result.index[0] == "__aggregate__"
+
+    def test_C05_nan_pe_pb_caught(self):
+        """Effective C05 must include pe_ttm/pb — NaN in either must trip the rule.
+
+        Regression for the incomplete fix-2: only fundamental.yaml was
+        patched while the stale bars_daily.yaml copy shadowed it through
+        first-wins dedup, so NaN pe/pb passed unflagged.
+        """
+        rule = _get_rules()["C05"]
+        for col in ("pe_ttm", "pb"):
+            df = _make_clean_daily().copy()
+            df["pe_ttm"] = 15.0
+            df["pb"] = 1.5
+            df.loc[0, col] = np.nan
+            result = evaluate_custom_check(df, rule)
+            assert result.iloc[0], f"NaN {col} must be caught by effective C05"
+
+    def test_C07_forward_coverage_enforced(self):
+        """A 2-date calendar cannot cover forward_days=30 — must fail on coverage.
+
+        Regression: the < forward_days coverage guard used to fire only below
+        2 dates, so a 2-date gapless calendar passed vacuously.
+        """
+        cal = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-03"]})
+        rule = _get_rules()["C07"]
+        result = evaluate_custom_check(
+            cal, rule, forward_days=30, today=pd.Timestamp("2024-01-02")
+        )
+        assert result.iloc[0], "2-date calendar must fail forward coverage"
+
+
+class TestSecondReviewRegression:
+    """Guard against the second review's findings (L05/K06-K08/T09 + lighter)."""
+
+    def test_L05_lookup_table_reaches_function(self):
+        """YAML key must match function param — lookup_table alias works."""
+        from data.dqc.checks.custom_checks import check_price_limit_futures
+
+        df = pd.DataFrame(
+            {
+                "ticker": ["IF2401.CFE"],
+                "close": [1100.0],
+                "prev_close": [1000.0],  # 10% change > 5% limit
+            }
+        )
+        # Via contract_specs directly
+        result1 = check_price_limit_futures(
+            df, contract_specs={"IF2401.CFE": 0.05}, tolerance=0.005
+        )
+        assert result1.iloc[0], "contract_specs=5% limit must flag 10% change"
+        # Via lookup_table alias (the YAML param name)
+        result2 = check_price_limit_futures(
+            df, lookup_table={"IF2401.CFE": 0.05}, tolerance=0.005
+        )
+        assert result2.iloc[0], "lookup_table alias must reach the function"
+
+    def test_K06_missing_minute_bars_flagged(self):
+        """Ticker-day with no minute bars must be a failure, not silently skipped."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        # Remove all minute bars for ticker 000001.SZ on 2024-01-02
+        minute = minute[
+            ~(
+                (minute["ticker"] == "000001.SZ")
+                & (minute["trade_date"] == "2024-01-02")
+            )
+        ]
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert result.loc[("000001.SZ", "2024-01-02")], (
+            "missing minute bars must flag K06"
+        )
+
+    def test_K07_missing_minute_bars_flagged(self):
+        """Ticker-day with no minute bars must fail K07 volume check."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        minute = minute[
+            ~(
+                (minute["ticker"] == "000001.SZ")
+                & (minute["trade_date"] == "2024-01-02")
+            )
+        ]
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert result.loc[("000001.SZ", "2024-01-02")], (
+            "missing minute bars must flag K07"
+        )
+
+    def test_K08_missing_minute_bars_flagged(self):
+        """Ticker-day with no minute bars must fail K08 high/low check."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_hl
+
+        daily = _make_clean_daily()
+        minute = _make_clean_minute()
+        minute = minute[
+            ~(
+                (minute["ticker"] == "000001.SZ")
+                & (minute["trade_date"] == "2024-01-02")
+            )
+        ]
+        result = check_daily_vs_minute_hl(daily, minute)
+        assert result.loc[("000001.SZ", "2024-01-02")], (
+            "missing minute bars must flag K08"
+        )
+
+    def test_T09_bool_columns_no_typeerror(self):
+        """T09 must skip non-numeric columns, not crash on them."""
+        df = _make_clean_daily()
+        prev = df.copy()
+        df.loc[0, "close"] = 99.0  # large change to trigger
+        prev["suspend"] = prev["suspend"].astype(bool)
+        df["suspend"] = df["suspend"].astype(bool)
+        # Column order decides which column the T09 loop reaches first.
+        # With close ahead of suspend the loop fires on close and
+        # early-returns before the non-numeric column, so pre-fix code
+        # never raises and the guard passes against broken code. Put the
+        # bool column first so the loop must reach it before any fire.
+        ordered = ["ticker", "trade_date", "suspend"] + [
+            c for c in df.columns if c not in ("ticker", "trade_date", "suspend")
+        ]
+        df = df[ordered]
+        prev = prev[ordered]
+        rule = _get_rules()["T09"]
+        result = evaluate_custom_check(df, rule, previous_data=prev)
+        assert result.iloc[0], "T09 must detect close change without TypeError"
+
+    def test_K04_nan_limit_flags_safe(self):
+        """NaN in is_limit_up must be treated as False, not raise or coerce to True."""
+        df = _make_clean_daily()
+        df["is_limit_up"] = df["is_limit_up"].astype(float)
+        df.loc[0, "is_limit_up"] = np.nan
+        rule = _get_rules()["K04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "NaN limit_up must not trigger K04"
+
+    def test_T06_nan_rows_not_flagged(self):
+        """Rows only in one side of the merge must not count as changes."""
+        df = _make_clean_daily()
+        prev = df.copy()
+        # Add a new row to df that doesn't exist in prev
+        new_row = df.iloc[[0]].copy()
+        new_row["trade_date"] = "2024-01-05"
+        df = pd.concat([df, new_row], ignore_index=True)
+        rule = _get_rules()["T06"]
+        result = evaluate_custom_check(df, rule, previous_adjfactor=prev)
+        assert not result.iloc[0], "unmatched rows must not flag T06"
+
+    def test_T08_dedup_forward_count(self):
+        """T08 must count distinct dates, not raw rows."""
+        # Calendar with duplicate dates but few distinct ones
+        cal = pd.DataFrame({"trade_date": ["2024-01-02"] * 35})
+        rule = _get_rules()["T08"]
+        result = evaluate_custom_check(
+            cal, rule, min_forward_days=30, today=pd.Timestamp("2024-01-01")
+        )
+        assert result.iloc[0], "35 rows of 1 distinct date must fail T08"
+
+    def test_L04_nan_flag_columns_safe(self):
+        """NaN in is_chinext_star must be treated as False, not raise."""
+        df = _make_clean_daily()
+        df["is_chinext_star"] = df.get(
+            "is_chinext_star", pd.Series(False, index=df.index)
+        )
+        df["is_chinext_star"] = df["is_chinext_star"].astype(float)
+        df.loc[0, "is_chinext_star"] = np.nan
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "NaN is_chinext_star must not trigger L04"
+
+
+class TestThirdReviewRegression:
+    """Guard against the third review's 21 findings (schema alignment class)."""
+
+    def test_T04_minute_clean_batch_passes(self):
+        """240 rows per (ticker, trade_date) with ascending timestamps must pass."""
+        df = _make_clean_minute()
+        result = evaluate_custom_check(df, _get_rules()["T04"])
+        assert not result.any(), "clean minute batch must pass T04"
+
+    def test_T05_minute_clean_batch_passes(self):
+        """Clean 1-minute batch passes T05; out-of-order datetimes must fire.
+
+        The clean half alone cannot tell "validates and finds nothing" from an
+        all-False stub, so the dirty half is what guards T05's
+        timestamp->datetime rename: pre-rename code reads the absent
+        ``timestamp`` column and returns all-False for schema-conformant
+        frames, so it passes clean and misses the violation.
+        """
+        df = _make_clean_minute()
+        result = evaluate_custom_check(df, _get_rules()["T05"])
+        assert not result.any(), "clean minute batch must pass T05"
+        dirty = df.copy()
+        dirty.loc[0, "datetime"], dirty.loc[1, "datetime"] = (
+            dirty.loc[1, "datetime"],
+            dirty.loc[0, "datetime"],
+        )
+        result = evaluate_custom_check(dirty, _get_rules()["T05"])
+        assert result.any(), "out-of-order minute datetimes must fire T05"
+
+    def test_K06_suspended_stock_exempt(self):
+        """Suspended stock (suspend=True, volume=0, no minute bars) must not fail K06."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_close
+
+        daily = _make_clean_daily()
+        daily.loc[0, "suspend"] = True
+        daily.loc[0, "volume"] = 0
+        daily.loc[0, "amount"] = 0.0
+        daily.loc[0, "open"] = daily.loc[0, "close"]
+        daily.loc[0, "high"] = daily.loc[0, "close"]
+        daily.loc[0, "low"] = daily.loc[0, "close"]
+        minute = _make_clean_minute()
+        # Remove all minute bars for the suspended row
+        minute = minute[
+            ~(
+                (minute["ticker"] == daily.loc[0, "ticker"])
+                & (minute["trade_date"] == daily.loc[0, "trade_date"])
+            )
+        ]
+        result = check_daily_vs_minute_close(daily, minute, tolerance=0.01)
+        assert not result.loc[(daily.loc[0, "ticker"], daily.loc[0, "trade_date"])], (
+            "suspended stock with no minute bars must be exempt from K06"
+        )
+
+    def test_K07_suspended_stock_exempt(self):
+        """Suspended stock must not fail K07 volume check."""
+        from data.dqc.checks.cross_checks import check_daily_vs_minute_volume
+
+        daily = _make_clean_daily()
+        daily.loc[0, "suspend"] = True
+        daily.loc[0, "volume"] = 0
+        daily.loc[0, "amount"] = 0.0
+        minute = _make_clean_minute()
+        minute = minute[
+            ~(
+                (minute["ticker"] == daily.loc[0, "ticker"])
+                & (minute["trade_date"] == daily.loc[0, "trade_date"])
+            )
+        ]
+        result = check_daily_vs_minute_volume(daily, minute, max_rel_diff=0.001)
+        assert not result.loc[(daily.loc[0, "ticker"], daily.loc[0, "trade_date"])], (
+            "suspended stock with no minute bars must be exempt from K07"
+        )
+
+    def test_prev_close_derived_when_absent(self):
+        """L04 must derive prev_close from prior-day close when column is missing."""
+        df = _make_clean_daily()
+        del df["prev_close"]  # Remove to match real schema
+        # Row 1: prev_close derived from row 0's close = 10.2
+        df.loc[1, "close"] = 10.2 * 1.108  # 10.8% change > 10.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert result.iloc[1], "derived prev_close must catch 10.8% change"
+
+    def test_chinext_star_derived_from_ticker(self):
+        """L04 must apply 20% limit for 30xxxx.SZ tickers without flag columns."""
+        df = _make_clean_daily()
+        df.loc[0, "ticker"] = "300001.SZ"  # ChiNext
+        df.loc[0, "close"] = df.loc[0, "prev_close"] * 1.15  # 15% < 20.5%
+        rule = _get_rules()["L04"]
+        result = evaluate_custom_check(df, rule)
+        assert not result.iloc[0], "15% change on ChiNext must pass (20% limit)"
+
+    def test_column_names_match_storage_schema(self):
+        """Rules must reference columns that exist in data/storage_schema.py."""
+        import data.storage_schema as ss
+
+        def _schema_cols(schema):
+            return set(schema.columns.keys())
+
+        all_cols = set()
+        for attr_name in dir(ss):
+            obj = getattr(ss, attr_name)
+            if hasattr(obj, "columns") and hasattr(obj.columns, "keys"):
+                all_cols |= _schema_cols(obj)
+
+        # Columns the DQC frame contract adds or aliases beyond storage schemas
+        extra = {
+            "is_chinext_star",
+            "is_ipo_first_5d",
+            "arrival_date",
+            "prev_close",
+            "trade_date",  # DQC contract name (factor schema uses "date")
+        }
+        known = all_cols | extra
+
+        entries = _load_all_rules()
+        for fname, rule in entries:
+            if rule["type"] == "column_check":
+                for col in rule.get("columns", []):
+                    assert col in known, (
+                        f"{rule['id']} in {fname}: column '{col}' not in storage schemas"
+                    )
+            params = rule.get("params") or {}
+            for pcol in params.get("columns", []):
+                assert pcol in known, (
+                    f"{rule['id']} in {fname}: param column '{pcol}' not in storage schemas"
+                )
+            # filter expressions are schema-scoped to the owning file's asset
+            filt = rule.get("filter")
+            if filt:
+                file_cols = set()
+                for table in YAML_ASSET_TABLES[fname]:
+                    file_cols |= _schema_cols(ss.SCHEMA[table])
+                file_cols |= extra
+                for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(filt)):
+                    if name in {"True", "False", "None", "true", "false", "null"}:
+                        continue
+                    assert name in file_cols, (
+                        f"{rule['id']} in {fname}: filter names '{name}' "
+                        f"absent from the file's asset schema"
+                    )
+
+    def test_C04_L01_run_on_minute_frame(self):
+        """C04/L01 must evaluate on a schema-conformant minute frame.
+
+        Minute bars have no ``suspend`` column (BARS_MINUTE_SCHEMA), so the
+        bars_minute copies must not filter on it — ``df.eval`` would raise
+        UndefinedVariableError and two HARD rules could never run. The checks
+        must still flag a real bad close once the filter is gone.
+        """
+        df = _make_clean_minute()
+        minute_rules = {
+            rule["id"]: rule
+            for fname, rule in _load_all_rules()
+            if fname == "bars_minute.yaml"
+        }
+        for rid, bad_close in (("C04", np.nan), ("L01", 0.0)):
+            rule = minute_rules[rid]
+            assert not evaluate_column_check(df, rule).any(), (
+                f"{rid} must pass a clean minute frame"
+            )
+            dirty = df.copy()
+            dirty.loc[0, "close"] = bad_close
+            flagged = evaluate_column_check(dirty, rule)
+            assert flagged.iloc[0], f"{rid} must flag a bad minute close"

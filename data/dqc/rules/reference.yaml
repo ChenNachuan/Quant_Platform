@@ -1,0 +1,97 @@
+# DQC rules — reference (calendar / industry / contract specs)
+# Source: docs/design/data/dqc_rules.md
+# Multi-asset rules repeat per their applicability mark.
+
+rules:
+  # ---- Completeness ----
+  - id: C07
+    name: calendar_completeness
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_calendar_completeness"
+    params:
+      forward_days: 30
+    applicability: [reference]
+    threshold: "current year + next 30 trading days have no gaps"
+    threshold_source: fixed
+    boundary: "no gaps: any missing trading day in the forward window fails"
+    description: "Calendar must cover current year + 30 forward trading days"
+
+  - id: C10
+    name: industry_coverage
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_industry_coverage"
+    params:
+      min_ratio: 1.0
+    applicability: [reference]
+    threshold: "active ticker industry coverage 100%"
+    threshold_source: fixed
+    boundary: "eq 1.0: every active ticker must have an industry assignment; any missing fails"
+    description: "Industry classification coverage"
+
+  # ---- Legality ----
+  - id: L13
+    name: ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^[036]\\d{5}\\.(SH|SZ)$"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "regex ^[036]\\d{5}\\.(SH|SZ)$"
+    threshold_source: fixed
+    boundary: "full regex match: partial match or mismatch fails"
+    description: "Ticker format validation"
+
+  - id: L14
+    name: date_format
+    severity: HARD
+    type: column_check
+    columns: [trade_date]
+    condition: "date_format"
+    value: "ISO8601"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "ISO 8601 date format"
+    threshold_source: fixed
+    boundary: "valid ISO 8601 date: non-parseable dates fail"
+    description: "Date format must be ISO 8601"
+
+  # ---- Consistency ----
+  - id: K10
+    name: industry_universe_match
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_industry_universe_match"
+    params: {}
+    applicability: [reference]
+    threshold: "universe set == industry set"
+    threshold_source: fixed
+    boundary: "set equality: any ticker in universe but not industry (or vice versa) fails"
+    description: "Universe and industry sets must be identical"
+
+  # ---- Timeliness ----
+  - id: T03
+    name: no_future_dates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_dates"
+    params: {}
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "all trade_date <= today"
+    threshold_source: fixed
+    boundary: "le today: today PASSES, any future date FAILS"
+    description: "No future dates"
+
+  - id: T08
+    name: calendar_forward
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_calendar_forward"
+    params:
+      min_forward_days: 30
+    applicability: [reference]
+    threshold: "calendar extends >= 30 trading days"
+    threshold_source: fixed
+    boundary: "ge 30: exactly 30 forward trading days passes, 29 fails"
+    description: "Calendar forward coverage"

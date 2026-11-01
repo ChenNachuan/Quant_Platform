@@ -1,0 +1,202 @@
+# DQC rules — bars_minute (minute bars)
+# Source: docs/design/data/dqc_rules.md
+# Multi-asset rules repeat per their applicability mark.
+
+rules:
+  # ---- Completeness ----
+  - id: C03
+    name: minute_bar_count
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_minute_bar_count"
+    params:
+      expected_bars: 240
+    applicability: [minute]
+    threshold: "240 bars per ticker per day (A-shares) / per contract spec"
+    threshold_source: fixed
+    boundary: "eq 240: exactly 240 bars; 239 or 241 both fail"
+    description: "Minute bar count per ticker per day"
+
+  - id: C04
+    name: null_critical_fields
+    severity: HARD
+    type: column_check
+    columns: [open, high, low, close, volume]
+    condition: "notnull"
+    value: null
+    # No suspend filter on the minute copy: BARS_MINUTE_SCHEMA has no suspend
+    # column (a suspended session produces no minute bars, so every row is
+    # non-suspended and in scope). The bars_daily copy keeps the filter.
+    applicability: [daily, minute]
+    threshold: "non-suspended OHLCV has zero nulls"
+    threshold_source: fixed
+    boundary: "notnull: any null in OHLCV for a non-suspended row fails"
+    description: "Critical fields must not be null for non-suspended rows"
+
+  # ---- Legality ----
+  - id: L01
+    name: price_positive
+    severity: HARD
+    type: column_check
+    columns: [open, high, low, close]
+    condition: "gt"
+    value: 0
+    # No suspend filter on the minute copy — see C04 above.
+    applicability: [daily, minute]
+    threshold: "non-suspended OHLC > 0"
+    threshold_source: fixed
+    boundary: "gt 0: strictly greater than; 0 FAILS, 0.001 PASSES"
+    description: "Prices must be positive for non-suspended rows"
+
+  - id: L02
+    name: volume_non_negative
+    severity: HARD
+    type: column_check
+    columns: [volume, amount]
+    condition: "ge"
+    value: 0
+    applicability: [daily, minute]
+    threshold: "volume, amount >= 0"
+    threshold_source: fixed
+    boundary: "ge 0: greater than or equal; 0 PASSES, -1 FAILS"
+    description: "Volume and amount must be non-negative"
+
+  - id: L03
+    name: ohlc_relation
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_ohlc_relation"
+    params:
+      tolerance: 0.0
+    applicability: [daily, minute]
+    threshold: "low <= open,close <= high"
+    threshold_source: fixed
+    boundary: "inclusive: low <= min(open,close) AND max(open,close) <= high; equality at boundary PASSES"
+    description: "OHLC relation: low is the lower bound, high is the upper bound"
+
+  - id: L13
+    name: ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^[036]\\d{5}\\.(SH|SZ)$"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "regex ^[036]\\d{5}\\.(SH|SZ)$"
+    threshold_source: fixed
+    boundary: "full regex match: partial match or mismatch fails"
+    description: "Ticker format validation"
+
+  - id: L14
+    name: date_format
+    severity: HARD
+    type: column_check
+    columns: [trade_date]
+    condition: "date_format"
+    value: "ISO8601"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "ISO 8601 date format"
+    threshold_source: fixed
+    boundary: "valid ISO 8601 date: non-parseable dates fail"
+    description: "Date format must be ISO 8601"
+
+  # ---- Consistency ----
+  - id: K02
+    name: volume_amount_match
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_volume_amount_match"
+    params: {}
+    applicability: [daily, minute]
+    threshold: "volume > 0 iff amount > 0"
+    threshold_source: fixed
+    boundary: "bidirectional: both zero or both positive; one zero + one positive fails"
+    description: "Volume and amount must both be zero or both be positive"
+
+  - id: K06
+    name: daily_vs_minute_close
+    severity: HARD
+    type: custom_check
+    function: "checks.cross_checks.check_daily_vs_minute_close"
+    params:
+      tolerance: 0.01
+    applicability: [daily, minute]
+    threshold: "daily close == last minute close (+/- 0.01)"
+    threshold_source: fixed
+    boundary: "le 0.01: abs(daily_close - last_minute_close) at exactly 0.01 passes; above fails"
+    description: "Cross-table: daily close matches last minute close"
+
+  - id: K07
+    name: daily_vs_minute_volume
+    severity: HARD
+    type: custom_check
+    function: "checks.cross_checks.check_daily_vs_minute_volume"
+    params:
+      max_rel_diff: 0.001
+    applicability: [daily, minute]
+    threshold: "daily volume == sum of minute volumes (relative diff <= 0.1%)"
+    threshold_source: fixed
+    boundary: "le 0.001: relative difference at exactly 0.1% passes; above fails"
+    description: "Cross-table: daily volume matches minute volume sum"
+
+  - id: K08
+    name: daily_vs_minute_hl
+    severity: HARD
+    type: custom_check
+    function: "checks.cross_checks.check_daily_vs_minute_hl"
+    params: {}
+    applicability: [daily, minute]
+    threshold: "daily high/low contain minute extremes"
+    threshold_source: fixed
+    boundary: "ge/le: daily_high >= max(minute_high) AND daily_low <= min(minute_low); equality passes"
+    description: "Cross-table: daily high/low contain minute extremes"
+
+  # ---- Timeliness ----
+  - id: T02
+    name: minute_freshness
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_minute_freshness"
+    params:
+      max_stale_days: 1
+    applicability: [minute]
+    threshold: "latest trade_date within 1 trading day of now"
+    threshold_source: fixed
+    boundary: "le 1: exactly 1 trading day stale passes, 2 fails"
+    description: "Minute data freshness"
+
+  - id: T03
+    name: no_future_dates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_dates"
+    params: {}
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "all trade_date <= today"
+    threshold_source: fixed
+    boundary: "le today: today PASSES, any future date FAILS"
+    description: "No future dates"
+
+  - id: T04
+    name: date_ascending
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_ascending"
+    params: {}
+    applicability: [daily, minute, fund]
+    threshold: "strictly ascending with no duplicates within partition"
+    threshold_source: fixed
+    boundary: "strictly increasing: equal consecutive dates (duplicates) FAIL"
+    description: "Dates must be strictly ascending with no duplicates"
+
+  - id: T05
+    name: minute_timestamp_order
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_minute_timestamp_order"
+    params: {}
+    applicability: [minute]
+    threshold: "within ticker x date, minute datetimes strictly ascending and continuous (1min, lunch gap 88-92min)"
+    threshold_source: fixed
+    boundary: "strictly increasing + continuous: duplicates or gaps (except 88-92min lunch) FAIL"
+    description: "Minute datetime ordering and continuity"
