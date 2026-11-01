@@ -239,6 +239,54 @@ def test_build_continuous_adjustment_hand_calc(cont: pd.DataFrame) -> None:
     assert hfq.tolist() == pytest.approx([80.0, 82.0, 80.0, 84.0])
 
 
+def test_build_continuous_column_set_passthrough() -> None:
+    # Output columns mirror the input's passthrough set plus the derived
+    # adjfactor/close_adj — not CONTINUOUS_SCHEMA, whose full set is the
+    # storage layer's contract. Minimal input keeps only required close/
+    # volume; supplying every optional column passes them through from the
+    # dominant rows (BARS indices 0/2/5/6), unchanged.
+    minimal = build_continuous("RB", BARS)
+    assert list(minimal.columns) == [
+        "trade_date",
+        "dominant_contract",
+        "close",
+        "volume",
+        "adjfactor",
+        "close_adj",
+    ]
+    full = BARS.assign(
+        open=[81.0, 101.0, 83.0, 102.0, 79.0, 99.0, 104.0],
+        high=[82.0, 102.0, 84.0, 103.0, 81.0, 101.0, 106.0],
+        low=[79.0, 99.0, 81.0, 101.0, 78.0, 98.0, 103.0],
+        amount=[40000.0, 10000.0, 39360.0, 12000.0, 8000.0, 40000.0, 44100.0],
+        open_interest=[1000, 900, 950, 880, 700, 850, 870],
+        settle=[80.5, 100.5, 82.5, 100.5, 79.5, 100.5, 105.5],
+    )
+    out = build_continuous("RB", full)
+    # Full input -> CONTINUOUS_SCHEMA column order plus the derived close_adj.
+    assert list(out.columns) == [
+        "trade_date",
+        "dominant_contract",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "open_interest",
+        "settle",
+        "adjfactor",
+        "close_adj",
+    ]
+    # Passthrough is the dominant row's own values, not recomputed ones.
+    assert out["open"].tolist() == pytest.approx([81.0, 83.0, 99.0, 104.0])
+    assert out["settle"].tolist() == pytest.approx([80.5, 82.5, 100.5, 105.5])
+    assert out["open_interest"].tolist() == [1000, 950, 850, 870]
+    # Derived columns are input-independent: same roll math either way.
+    assert out["adjfactor"].tolist() == pytest.approx(minimal["adjfactor"].tolist())
+    assert out["close_adj"].tolist() == pytest.approx(minimal["close_adj"].tolist())
+
+
 def test_price_accessor_forward_adj_hand_calc(cont: pd.DataFrame) -> None:
     pa = PriceAccessor(cont)
     # qfq = raw × adj / adj_latest, adj_latest = 0.8 (AC4 hand calc).

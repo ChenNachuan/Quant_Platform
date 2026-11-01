@@ -204,9 +204,14 @@ def build_continuous(symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
         ratio denominator — missing data raises :class:`ValueError`, with no
         fallback to a stale close.
 
-    Returns one row per trade date, ascending, columns matching
-    ``CONTINUOUS_SCHEMA`` plus the derived ``close_adj``.  On a roll day a
-    non-positive dominant (new) close raises; a non-positive old close
+    Returns one row per trade date, ascending: ``trade_date``,
+    ``dominant_contract``, the input's passthrough columns
+    (``open``/``high``/``low``/``close``/``volume``/``amount``/
+    ``open_interest``/``settle`` — whichever are present), and the derived
+    ``adjfactor`` / ``close_adj``.  The output column set mirrors the input,
+    not ``CONTINUOUS_SCHEMA``: persisting to ``asset/continuous/`` requires
+    the full schema columns and is validated at the storage layer.  On a roll
+    day a non-positive dominant (new) close raises; a non-positive old close
     degrades the step to 1.0 (§42.4 guard).
     """
     required = [c for c in _REQUIRED_BARS if c not in bars.columns]
