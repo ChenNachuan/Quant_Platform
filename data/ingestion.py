@@ -47,7 +47,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from data.raw import raw_path
-from data.storage_ops import FileLock
+from data.storage_ops import DiskFullError, FileLock, check_capacity
 from data.storage_schema import PARTITION_PATHS
 
 __all__ = [
@@ -267,7 +267,7 @@ def tolerance_for(
     """
     cls = TOLERANCE_CLASS.get(field, "default")
     table = dict(tolerances) if tolerances is not None else load_tolerances()
-    value = float(table.get(cls, table["default"]))
+    value = float(table[cls] if cls in table else table["default"])
     mode = "absolute" if cls in _ABSOLUTE_CLASSES else "relative"
     return value, mode
 
@@ -442,8 +442,21 @@ def respond(result: CrossCheckResult) -> ResponseLevel:
 
     The worst per-field band wins.  An adjfactor mismatch is **always** at
     least ``WARNING`` — its effect on every downstream adjustment makes the
-    tiered bands' silent suppression inapplicable to it.
+    tiered bands' silent suppression inapplicable to it.  A result with zero
+    overlapping rows is inconclusive, not clean: it warns and returns
+    ``WARNING`` before the bands are consulted.
     """
+    if result.matched_rows == 0 and result.total_rows:
+        logger.warning(
+            "cross-check %s %s: no overlapping tickers between %s and %s "
+            "(%d rows unmatched) — comparison inconclusive, not clean",
+            result.asset_type,
+            result.trade_date,
+            result.primary_source,
+            result.secondary_source,
+            result.total_rows,
+        )
+        return "WARNING"
     level = response_level(result.mismatch_rate)
     adj = result.mismatched_fields.get("adjfactor")
     if adj is not None and adj.mismatch_count > 0 and level == "silent":
@@ -497,7 +510,8 @@ def write_asset(
     tagged landing step the fallback path runs after that gate, written
     atomically (``FileLock`` + tmp → fsync → ``os.replace`` → parent-dir
     fsync, the :mod:`data.raw` pattern; ``write_parquet_atomic`` cannot
-    carry schema metadata).
+    carry schema metadata) and refusing at the CRITICAL disk tier
+    (:func:`~data.storage_ops.check_capacity`, like the platform writer).
     """
     path = (
         Path(target_path)
@@ -510,6 +524,10 @@ def write_asset(
     meta[b"ingest_time"] = datetime.now().isoformat(timespec="seconds").encode("utf-8")
     table = table.replace_schema_metadata(meta)
 
+    if check_capacity(path.parent if path.parent.exists() else path) == "CRITICAL":
+        raise DiskFullError(
+            f"free space is at the CRITICAL tier; refusing to write {path}"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with FileLock(path):
@@ -585,9 +603,15 @@ def should_cross_check(
     Fires only when the **primary** source's ingest just completed (a backup
     ingest does not write the asset layer, so it never triggers) **and** every
     backup's raw batch has arrived (§41.4).  An asset type with no backup
-    never cross-checks.  *source* is the source whose ingest just finished.
+    never cross-checks, and one the YAML does not arbitrate (``factor``,
+    futures, per-table ``reference``) answers ``False`` instead of raising.
+    *source* is the source whose ingest just finished.
     """
-    priority = get_source_priority(asset_type)
+    try:
+        priority = get_source_priority(asset_type)
+    except (KeyError, ValueError):
+        # Asset type not arbitrated here (factor, futures, per-table reference)
+        return False
     if not priority or source != priority[0]:
         return False
     backups = priority[1:]

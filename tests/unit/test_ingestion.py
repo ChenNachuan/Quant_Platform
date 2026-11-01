@@ -31,6 +31,7 @@ from data.ingestion import (
     write_asset,
 )
 from data.raw import raw_path
+from data.storage_ops import DiskFullError
 
 TRADE_DATE = date(2024, 6, 14)
 
@@ -393,6 +394,65 @@ class TestShouldCrossCheckHook:
         assert not should_cross_check(
             "tushare", "bars_minute", TRADE_DATE, data_root=tmp_path
         )
+
+
+# ---------------------------------------------------------------------------
+# ocr findings 1/2/3/7 (task/ocr-report.json) — regression cases
+# ---------------------------------------------------------------------------
+class TestOcrRegressions:
+    def test_should_cross_check_unarbitrated_types_return_false(self, tmp_path):
+        # factor / futures / per-table reference are not arbitrated by the
+        # YAML — the hook answers False instead of raising (finding 1).
+        assert not should_cross_check(
+            "tushare", "factor", TRADE_DATE, data_root=tmp_path
+        )
+        assert not should_cross_check(
+            "tushare", "bars_daily_futures", TRADE_DATE, data_root=tmp_path
+        )
+        assert not should_cross_check(
+            "tushare", "reference", TRADE_DATE, data_root=tmp_path
+        )
+
+    def test_zero_matched_rows_is_inconclusive_not_clean(self, caplog):
+        # An empty backup compares nothing; "silent" would read as success
+        # (finding 2).
+        primary = _bars_frame(n=3)
+        result = cross_source_check(primary, _bars_frame(n=3).iloc[0:0], "bars_daily")
+        assert result.matched_rows == 0
+        assert result.total_rows == 3
+        with caplog.at_level(logging.INFO, logger="data.ingestion"):
+            assert respond(result) == "WARNING"
+        assert any(
+            r.levelname == "WARNING" and r.name == "data.ingestion"
+            for r in caplog.records
+        )
+
+    def test_zero_overlap_tickers_is_inconclusive_not_clean(self):
+        primary = _bars_frame(n=3)
+        secondary = _bars_frame(n=3)
+        secondary["ticker"] = ["999001", "999002", "999003"]
+        result = cross_source_check(primary, secondary, "bars_daily")
+        assert result.matched_rows == 0
+        assert result.total_rows == 6
+        assert respond(result) == "WARNING"
+
+    def test_partial_tolerances_mapping_without_default(self):
+        # table[cls] must be looked up lazily: a caller-supplied map with the
+        # class present but no "default" key used to raise KeyError (finding 3).
+        assert tolerance_for("close", {"price": 0.02}) == (0.02, "absolute")
+        assert tolerance_for("volume", {"volume": 0.005}) == (0.005, "relative")
+
+    def test_write_asset_refuses_critical_capacity(self, tmp_path, monkeypatch):
+        # the asset-layer write must honor the CRITICAL disk tier (finding 7)
+        monkeypatch.setattr("data.ingestion.check_capacity", lambda _p: "CRITICAL")
+        with pytest.raises(DiskFullError):
+            write_asset(
+                _bars_frame(n=3),
+                "bars_daily",
+                TRADE_DATE,
+                "tushare",
+                data_root=tmp_path,
+            )
 
 
 def test_numeric_fields_cover_the_multi_source_asset_types():
