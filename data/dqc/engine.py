@@ -18,9 +18,9 @@ escalation of §37.3 checked before the global valve (stricter first):
 6. soft alarm above ``soft_alarm_rate`` (never rejects)
 7. validate against the storage schema and write parquet
 
-The report dual tables (``_dqc_results`` / ``_dqc_batch_summary``) and the
-``python -m dqc.report`` CLI are iteration 2; the CheckResults produced here
-carry every column those tables need.
+Every disposition lands on the report dual tables under ``{data_root}/dqc/``
+(:mod:`data.dqc.report`), a refused batch included — the report is written
+before quarantine so the refusal is on record even though no data lands.
 
 Check evaluation matches the S9-T2 test harness semantics exactly (failure
 mask ``True = failure``; a missing column fails every row; the rule filter
@@ -33,16 +33,18 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import numpy as np
 import pandas as pd
 import yaml
 from pandera.pandas import DataFrameSchema
 
+from data.dqc import report
 from data.dqc.severity import (
     BatchRejectConfig,
     DQCBatchReject,
@@ -57,7 +59,9 @@ __all__ = [
     "RULES_DIR",
     "RULE_VERSION",
     "CheckResult",
+    "BatchEvaluation",
     "run_all_checks",
+    "evaluate_batch",
     "build_schema",
     "ingest_with_dqc",
 ]
@@ -118,6 +122,33 @@ class CheckResult:
     @property
     def failing_count(self) -> int:
         return int(self.failing_rows.sum())
+
+
+@dataclass
+class BatchEvaluation:
+    """Steps 2-3 and 5-6 of §37.6 over one batch — the fate before any write.
+
+    ``batch_status`` / ``reject_reason`` decide what ingest does next:
+    ``rejected`` quarantines the batch whole (nothing lands), anything else
+    drops ``rows_to_drop`` and writes.  ``quality_flag`` is computed once on
+    the full input frame (row-aligned); ingest slices it for the clean frame
+    and the summary accounting reads ``flagged_count`` (kept rows with a bit
+    set).  ``warnings`` records the alarms that fired (escalated flag-rule
+    alarm, soft alarm) — they never reject.
+    """
+
+    hard_results: list[CheckResult]
+    soft_results: list[CheckResult]
+    rows_to_drop: pd.Series  # bool, indexed like the input frame
+    quality_flag: pd.Series  # int64 bitmask, indexed like the input frame
+    warnings: list[str]
+    batch_status: str  # accepted | accepted_with_warnings | rejected
+    reject_reason: str | None
+    flagged_count: int
+
+    @property
+    def rows_would_drop(self) -> int:
+        return int(self.rows_to_drop.sum())
 
 
 # ── rule loading + evaluation (S9-T2 harness semantics) ────────────────
@@ -364,6 +395,107 @@ def _expand_to_partitions(df: pd.DataFrame, mask: pd.Series) -> pd.Series:
     return pd.Series(idx.isin(hit), index=df.index, dtype=bool)
 
 
+def evaluate_batch(
+    df: pd.DataFrame,
+    data_date: date,
+    asset_type: str,
+    *,
+    overrides: dict | None = None,
+    cross_df: pd.DataFrame | None = None,
+    batch_config: BatchRejectConfig | None = None,
+) -> BatchEvaluation:
+    """Run the asset's rules and judge the batch (§37.6 steps 2-3, 5-6).
+
+    Never raises: the caller reads ``batch_status`` / ``reject_reason`` and
+    decides.  Rule-level escalation is checked before the global valve
+    (stricter first) and the first rejecting escalation wins.  Flag-rule
+    escalations (K06-K08) and the soft alarm raise warnings only — SOFT
+    findings never reject (issue red line).
+    """
+    config = batch_config or BatchRejectConfig()
+    hard_results, soft_results = run_all_checks(
+        df, data_date, asset_type, overrides=overrides, cross_df=cross_df
+    )
+
+    # step 2 — collect row-level HARD drops (§37.3 granularity)
+    rows_to_drop = pd.Series(False, index=df.index)
+    for r in hard_results:
+        cfg = severity_config_for(r.rule_id)
+        if cfg.row_action != "drop":
+            continue
+        mask = r.failing_rows
+        if cfg.granularity == "partition":
+            mask = _expand_to_partitions(df, mask)
+        rows_to_drop = rows_to_drop | mask
+
+    # step 3a — rule-level escalation (double insurance with the valve).
+    # drop/pass rules above threshold reject the batch; flag rules (K06-K08)
+    # raise an escalated alarm and keep their rows.
+    reject_reason: str | None = None
+    warnings: list[str] = []
+    for r in hard_results + soft_results:
+        cfg = severity_config_for(r.rule_id)
+        thr = cfg.escalation_threshold
+        if thr is None or not r.failing_count or r.failing_rate <= thr:
+            continue
+        if cfg.row_action == "flag":
+            logger.error(
+                "DQC escalated alarm: %s failing rate %.4f > %.4f (%s %s); rows kept",
+                r.rule_id,
+                r.failing_rate,
+                thr,
+                data_date,
+                asset_type,
+            )
+            warnings.append(f"escalated_alarm:{r.rule_id}")
+            continue
+        reject_reason = f"rule_escalation:{r.rule_id}"
+        break
+
+    # step 3b — global batch safety valve (a rule reason is stricter)
+    drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
+    if reject_reason is None and drop_rate > config.max_hard_drop_rate:
+        reject_reason = (
+            f"global_valve:hard_drop_rate {drop_rate:.4f} > {config.max_hard_drop_rate}"
+        )
+
+    # step 5 — quality_flag bitmask (SOFT findings only), computed once
+    quality_flag = compute_quality_flag(df, soft_results)
+
+    # step 6 — soft alarm: never rejects
+    kept = ~rows_to_drop
+    kept_rows = int(kept.sum())
+    flagged_count = int((quality_flag[kept] != 0).sum()) if kept_rows else 0
+    flagged_rate = (flagged_count / kept_rows) if kept_rows else 0.0
+    if flagged_rate > config.soft_alarm_rate:
+        logger.warning(
+            "DQC soft alarm: flagged rate %.4f > %.4f (%s %s); batch accepted "
+            "(SOFT never rejects)",
+            flagged_rate,
+            config.soft_alarm_rate,
+            data_date,
+            asset_type,
+        )
+        warnings.append("soft_alarm")
+
+    if reject_reason is not None:
+        status = "rejected"
+    elif warnings:
+        status = "accepted_with_warnings"
+    else:
+        status = "accepted"
+    return BatchEvaluation(
+        hard_results=hard_results,
+        soft_results=soft_results,
+        rows_to_drop=rows_to_drop,
+        quality_flag=quality_flag,
+        warnings=warnings,
+        batch_status=status,
+        reject_reason=reject_reason,
+        flagged_count=flagged_count,
+    )
+
+
 def _reject_batch(
     df: pd.DataFrame,
     data_date: date,
@@ -373,7 +505,7 @@ def _reject_batch(
     *,
     reason: str,
     data_root: str | os.PathLike,
-) -> None:
+) -> NoReturn:
     """Quarantine the raw batch and raise DQCBatchReject (§37.6)."""
     drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
     triggered = [r.rule_id for r in hard_results if r.failing_count]
@@ -424,67 +556,61 @@ def ingest_with_dqc(
     ``max_hard_drop_rate=0.20`` / ``soft_alarm_rate=0.50``).  *target_path*
     overrides the ``PARTITION_PATHS`` landing spot for tables whose layout
     is not a plain date partition (factor / reference writers).
+
+    Every disposition also lands on the report dual tables under
+    ``{data_root}/dqc/`` (:mod:`data.dqc.report`): a refused batch is
+    recorded (``batch_status='rejected'`` / ``action_taken='reject_batch'``)
+    *before* it goes to quarantine, an accepted one after the parquet write.
     """
     config = batch_config or BatchRejectConfig()
     table = table or asset_type
-    hard_results, soft_results = run_all_checks(
-        df, data_date, asset_type, overrides=overrides, cross_df=cross_df
+    started = time.monotonic()
+    run_time = datetime.now(timezone.utc).replace(tzinfo=None)
+    evaluation = evaluate_batch(
+        df,
+        data_date,
+        asset_type,
+        overrides=overrides,
+        cross_df=cross_df,
+        batch_config=config,
+    )
+    hard_results, soft_results = evaluation.hard_results, evaluation.soft_results
+    rows_to_drop = evaluation.rows_to_drop
+    drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
+    rejected = evaluation.batch_status == "rejected"
+    detail_rows = report.build_detail_rows(
+        hard_results,
+        soft_results,
+        data_date=data_date,
+        asset_type=asset_type,
+        batch_rejected=rejected,
+        run_time=run_time,
+    )
+    summary_row = report.build_summary_row(
+        data_date,
+        asset_type,
+        total_rows=len(df),
+        rows_dropped=evaluation.rows_would_drop,
+        rows_flagged=evaluation.flagged_count,
+        batch_status=evaluation.batch_status,
+        hard_failed=[r.rule_id for r in hard_results if r.failing_count],
+        soft_failed=[r.rule_id for r in soft_results if r.failing_count],
+        elapsed_seconds=time.monotonic() - started,
+        run_time=run_time,
     )
 
-    # step 2 — collect row-level HARD drops (§37.3 granularity)
-    rows_to_drop = pd.Series(False, index=df.index)
-    for r in hard_results:
-        cfg = severity_config_for(r.rule_id)
-        if cfg.row_action != "drop":
-            continue
-        mask = r.failing_rows
-        if cfg.granularity == "partition":
-            mask = _expand_to_partitions(df, mask)
-        rows_to_drop = rows_to_drop | mask
-
-    # step 3a — rule-level escalation (double insurance with the valve).
-    # drop/pass rules above threshold reject the batch; flag rules (K06-K08)
-    # raise an escalated alarm and keep their rows.
-    for r in hard_results + soft_results:
-        cfg = severity_config_for(r.rule_id)
-        thr = cfg.escalation_threshold
-        if thr is None or not r.failing_count:
-            continue
-        if r.failing_rate > thr:
-            if cfg.row_action == "flag":
-                logger.error(
-                    "DQC escalated alarm: %s failing rate %.4f > %.4f "
-                    "(%s %s); rows kept",
-                    r.rule_id,
-                    r.failing_rate,
-                    thr,
-                    data_date,
-                    asset_type,
-                )
-                continue
-            _reject_batch(
-                df,
-                data_date,
-                asset_type,
-                rows_to_drop,
-                hard_results,
-                reason=f"rule_escalation:{r.rule_id}",
-                data_root=data_root,
-            )
-
-    # step 3b — global batch safety valve
-    drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
-    if drop_rate > config.max_hard_drop_rate:
+    if rejected:
+        # the refusal is a fact even though no data lands: report first,
+        # then quarantine + raise
+        report.append_detail(detail_rows, data_root=data_root)
+        report.append_summary(summary_row, data_root=data_root)
         _reject_batch(
             df,
             data_date,
             asset_type,
             rows_to_drop,
             hard_results,
-            reason=(
-                f"global_valve:hard_drop_rate {drop_rate:.4f} > "
-                f"{config.max_hard_drop_rate}"
-            ),
+            reason=evaluation.reject_reason,
             data_root=data_root,
         )
 
@@ -492,21 +618,9 @@ def ingest_with_dqc(
     df_clean = df.loc[~rows_to_drop].copy()
 
     # step 5 — quality_flag bitmask (SOFT findings only)
-    df_clean["quality_flag"] = compute_quality_flag(df_clean, soft_results)
+    df_clean["quality_flag"] = evaluation.quality_flag[~rows_to_drop]
 
-    # step 6 — soft alarm: never rejects
-    flagged_rate = (
-        float((df_clean["quality_flag"] != 0).mean()) if len(df_clean) else 0.0
-    )
-    if flagged_rate > config.soft_alarm_rate:
-        logger.warning(
-            "DQC soft alarm: flagged rate %.4f > %.4f (%s %s); batch accepted "
-            "(SOFT never rejects)",
-            flagged_rate,
-            config.soft_alarm_rate,
-            data_date,
-            asset_type,
-        )
+    # step 6 (soft alarm) was judged in evaluate_batch — it never rejects
 
     # step 7 — schema gate + atomic write
     schema = build_schema(table)
@@ -518,6 +632,12 @@ def ingest_with_dqc(
         else _landing_path(table, data_date, data_root)
     )
     write_parquet_atomic(validated, path, table=table)
+
+    flagged_rate = (
+        float((df_clean["quality_flag"] != 0).mean()) if len(df_clean) else 0.0
+    )
+    report.append_detail(detail_rows, data_root=data_root)
+    report.append_summary(summary_row, data_root=data_root)
     logger.info(
         "DQC ingest ok: %s %s rows %d -> %d, drop_rate %.4f, flagged_rate %.4f",
         asset_type,
