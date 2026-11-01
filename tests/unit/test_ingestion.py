@@ -232,6 +232,42 @@ class TestAdjfactorAlwaysWarns:
 
 
 # ---------------------------------------------------------------------------
+# One-sided-NaN comparison semantics (review finding 1): a value present on
+# one side only is a mismatch; both sides null matches.
+# ---------------------------------------------------------------------------
+class TestOneSidedNaNSemantics:
+    def test_one_sided_nan_is_mismatch_and_adjfactor_elevates(self, caplog):
+        # A backup NaN adjfactor cell must not pass as matched — dropping
+        # `bad | one_missing` would silently disable the suspend-adjfactor
+        # catch (§21.3).  1/2000 = 0.05% is below the silent band, so the
+        # WARNING can only come from the adjfactor rule.
+        primary = _bars_frame(n=2000)
+        secondary = _bars_frame(n=2000)
+        secondary.at[0, "adjfactor"] = float("nan")
+        result = cross_source_check(primary, secondary, "bars_daily")
+        detail = result.mismatched_fields["adjfactor"]
+        assert detail.mismatch_count == 1
+        assert detail.mismatch_rate == pytest.approx(0.0005)
+        assert detail.sample_tickers == ["000001"]
+        with caplog.at_level(logging.INFO, logger="data.ingestion"):
+            assert respond(result) == "WARNING"
+        assert any(
+            r.levelname == "WARNING" and "adjfactor" in r.message
+            for r in caplog.records
+        )
+
+    def test_both_null_matches(self):
+        primary = _bars_frame(n=3)
+        secondary = _bars_frame(n=3)
+        primary.at[0, "adjfactor"] = float("nan")
+        secondary.at[0, "adjfactor"] = float("nan")
+        result = cross_source_check(primary, secondary, "bars_daily")
+        assert result.mismatched_fields == {}
+        assert result.matched_rows == 3
+        assert result.mismatch_rate == 0.0
+
+
+# ---------------------------------------------------------------------------
 # AC3 — fallback backfill: source_tag in Parquet metadata, not data column
 # ---------------------------------------------------------------------------
 class TestFallbackSourceTag:

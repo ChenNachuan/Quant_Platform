@@ -495,9 +495,9 @@ def write_asset(
 
     Schema validation is DQC's step 7 (``ingest_with_dqc``) — this is the
     tagged landing step the fallback path runs after that gate, written
-    atomically (``FileLock`` + tmp → fsync → ``os.replace``, the
-    :mod:`data.raw` pattern; ``write_parquet_atomic`` cannot carry schema
-    metadata).
+    atomically (``FileLock`` + tmp → fsync → ``os.replace`` → parent-dir
+    fsync, the :mod:`data.raw` pattern; ``write_parquet_atomic`` cannot
+    carry schema metadata).
     """
     path = (
         Path(target_path)
@@ -527,6 +527,16 @@ def write_asset(
             except FileNotFoundError:
                 pass
             raise
+
+        # fsync parent dir for rename durability
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            logger.warning("wrote %s but could not fsync %s", path, path.parent)
     return path
 
 
