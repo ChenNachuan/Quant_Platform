@@ -58,8 +58,9 @@ class DQCSeverityConfig:
     """Per-rule disposition (§37.2/§37.3).
 
     ``row_action`` — what failing rows get: ``"drop"`` removes them,
-    ``"flag"`` marks ``quality_flag``, ``"pass"`` touches no row (batch-level
-    gates).  ``escalation_threshold`` — failing-row rate above which the rule
+    ``"flag"`` keeps rows and records the finding (``quality_flag`` is set
+    only for rules with a ``RULE_FLAG_BITS`` entry), ``"pass"`` touches no
+    row (batch-level gates).  ``escalation_threshold`` — failing-row rate above which the rule
     escalates: batch reject for ``drop``/``pass`` rules, an escalated alarm for
     ``flag`` rules (K06–K08 only; ``None`` = never escalate).  ``granularity``
     is the three-level hard-reject scale: ``"row"`` drops the failing rows,
