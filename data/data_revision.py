@@ -247,6 +247,68 @@ def _load_local(
     return pd.read_parquet(path)
 
 
+def _no_rows(frame: Any) -> bool:
+    """True when one side has nothing to compare: ``None`` or a 0-row frame.
+
+    The normalizers reindex to ``UNIFIED_COLUMNS``, so a source that returned
+    nothing comes back as a 0-row frame rather than ``None``.  An empty pull
+    is "no data" — the same call ``dqc.report.reingest`` makes — never
+    "every ticker was removed", which would page out false corrections for a
+    whole date.
+    """
+    return frame is None or len(frame) == 0
+
+
+def _post_dqc_baseline(
+    df: Any, asset_type: str, trade_date: date, data_root: str | os.PathLike[str]
+) -> Any:
+    """Shape the fresh pull the way the asset layer stores it — post-DQC.
+
+    ``ingest_with_dqc`` drops every HARD-failing row before its Parquet write
+    and refuses the whole batch when the valve trips, so a raw-vs-layer diff
+    would report rows our own DQC dropped as "backfill" corrections on every
+    scan (and ``apply_corrections`` would re-ingest them into the same
+    refusal).  :func:`data.dqc.engine.evaluate_batch` is the same judgement
+    the write path runs and writes nothing itself, so detection can drop
+    exactly ``rows_to_drop`` here.  ``None`` means the batch would have been
+    refused: none of it would land, so there is no like-for-like baseline to
+    diff against.
+
+    The boundary holds: detection stays read-only on ``data_lake/``.
+    """
+    from data.dqc.engine import evaluate_batch
+    from data.dqc.report import build_reference_overrides
+
+    evaluation = evaluate_batch(
+        df,
+        trade_date,
+        asset_type,
+        overrides=build_reference_overrides(data_root, asset_type, trade_date),
+    )
+    if evaluation.batch_status == "rejected":
+        return None
+    return df.loc[~evaluation.rows_to_drop]
+
+
+def _foreign_fields(asset_type: str) -> set[str]:
+    """Fields the asset layer takes from a source other than this pull.
+
+    ``source_priority.yaml``'s ``field_override`` pins a field to one source
+    whatever the row priority is.  When that source is not the one detection
+    pulls, the layer's values come from elsewhere and cannot be compared
+    against this pull's column — the difference would read as a correction on
+    every scan.  Such fields are dropped from the comparison instead.
+    """
+    from data.ingestion import get_field_overrides, get_primary_source
+
+    primary = get_primary_source(asset_type)
+    return {
+        field
+        for field, source in get_field_overrides(asset_type).items()
+        if source != primary
+    }
+
+
 def _rel_diff(old: float, new: float) -> float:
     """``abs_diff / |old|``, floored so a zero baseline is not a division blow-up."""
     return abs(new - old) / max(abs(old), 1e-9)
@@ -380,19 +442,35 @@ def detect_corrections(
     as :func:`apply_corrections` / :func:`assess_correction_impact` /
     :func:`mark_factors_stale` do, so a scan and a write can be pointed at the
     same non-default tree instead of detection silently reading another.
+
+    The diff is like-for-like with the asset layer, which is post-DQC: the
+    fresh pull is reduced to the rows that would survive the write
+    (:func:`_post_dqc_baseline`), fields owned by another source are dropped
+    (:func:`_foreign_fields`), and an empty side is "no data", not a removal.
     """
     from data.calendar_adjustment import TradingCalendar
 
     cal = TradingCalendar("sse", data_root=data_root)
     end = cal.prev(date.today())
     start = cal.prev(end, lookback)
+    drop_fields = _foreign_fields(asset_type)
     changes: list[FieldChange] = []
     for trade_date in cal.range(start, end):
         fresh = _fetch_normalized(asset_type, trade_date)
         local = _load_local(asset_type, trade_date, data_root)
-        if fresh is None or local is None:
+        if _no_rows(fresh) or _no_rows(local):
             continue
-        changes.extend(compare_frames(local, fresh, asset_type, trade_date))
+        fresh = _post_dqc_baseline(fresh, asset_type, trade_date, data_root)
+        if _no_rows(fresh):
+            continue
+        changes.extend(
+            compare_frames(
+                local.drop(columns=drop_fields, errors="ignore"),
+                fresh.drop(columns=drop_fields, errors="ignore"),
+                asset_type,
+                trade_date,
+            )
+        )
     return changes
 
 
@@ -605,7 +683,14 @@ def mark_factors_stale(
             continue
 
         name = str(meta.get("factor_name") or meta_path.parent.parent.name)
-        meta["stale_since"] = str(record.trade_date)
+        stale = str(record.trade_date)
+        prior = meta.get("stale_since")
+        # Keep the earliest pending staleness: a later correction must not
+        # window out an earlier one that has not been recomputed yet (ISO
+        # date strings sort lexicographically).
+        meta["stale_since"] = (
+            min(prior, stale) if isinstance(prior, str) and prior else stale
+        )
         meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )

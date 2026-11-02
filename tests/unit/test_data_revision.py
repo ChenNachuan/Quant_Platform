@@ -25,6 +25,7 @@ import pytest
 
 import data.adapters
 import data.calendar_adjustment
+import data.dqc.engine
 import data.ingestion
 import data.normalizers
 import data.data_revision as dr
@@ -771,3 +772,227 @@ class TestDetectDataRoot:
             assert (
                 inspect.signature(fn).parameters["data_root"].default == "data_platform"
             ), fn.__name__
+
+
+# ---------------------------------------------------------------------------
+# OCR round 2 — findings 1, 5, 6
+# ---------------------------------------------------------------------------
+
+
+def _stub_scan(monkeypatch, fresh, local, compare=None):
+    """One scan date with both I/O seams stubbed; compare recorded if given."""
+    seen: list = []
+
+    class _Cal:
+        def __init__(self, exchange, data_root="data_platform"):
+            pass
+
+        def prev(self, when, n=1):
+            return when - timedelta(days=n)
+
+        def range(self, start, end):
+            return [D]
+
+    def _record_compare(old, new, asset_type, trade_date):
+        seen.append((old, new))
+        return []
+
+    monkeypatch.setattr(data.calendar_adjustment, "TradingCalendar", _Cal)
+    monkeypatch.setattr(dr, "_fetch_normalized", lambda a, d: fresh)
+    monkeypatch.setattr(
+        dr, "_load_local", lambda a, d, data_root="data_platform": local
+    )
+    monkeypatch.setattr(dr, "compare_frames", compare or _record_compare)
+    return seen
+
+
+class TestEmptySideGuard:
+    """find.1 — an empty frame is "no data", never "everything was removed"."""
+
+    def test_empty_fresh_frame_is_not_a_removal_correction(self, monkeypatch, tmp_path):
+        local = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        fresh = local.iloc[0:0]  # 0 rows with columns — what reindex yields
+        seen = _stub_scan(monkeypatch, fresh, local)
+
+        assert dr.detect_corrections(ASSET, lookback=1, data_root=tmp_path) == []
+        assert seen == []
+
+    def test_empty_local_frame_is_skipped(self, monkeypatch, tmp_path):
+        fresh = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        local = fresh.iloc[0:0]
+        seen = _stub_scan(monkeypatch, fresh, local)
+
+        assert dr.detect_corrections(ASSET, lookback=1, data_root=tmp_path) == []
+        assert seen == []
+
+
+class TestPostDqcBaseline:
+    """find.5 — the fresh pull is reduced to what would actually land."""
+
+    def test_hard_dropped_rows_are_excluded(self, monkeypatch):
+        df = pd.DataFrame(
+            [
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0},
+                {"ticker": "600519.SH", "trade_date": str(D), "close": 20.0},
+            ]
+        )
+
+        class _Eval:
+            batch_status = "accepted"
+            rows_to_drop = pd.Series([False, True], index=df.index)
+
+        monkeypatch.setattr(data.dqc.engine, "evaluate_batch", lambda *a, **k: _Eval())
+
+        out = dr._post_dqc_baseline(df, ASSET, D, "data_platform")
+
+        assert list(out["ticker"]) == ["000001.SZ"]
+
+    def test_rejected_batch_has_no_like_for_like_baseline(self, monkeypatch):
+        df = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+
+        class _Eval:
+            batch_status = "rejected"
+            rows_to_drop = pd.Series([True], index=df.index)
+
+        monkeypatch.setattr(data.dqc.engine, "evaluate_batch", lambda *a, **k: _Eval())
+
+        assert dr._post_dqc_baseline(df, ASSET, D, "data_platform") is None
+
+    def test_dropped_rows_never_reach_the_comparison(self, monkeypatch, tmp_path):
+        """The must-fix loop: a DQC-rejected row must not read as a backfill.
+
+        The asset layer lacks the row (its ingest dropped it); the raw re-pull
+        returns it again.  Post-DQC the two sides match — no correction.
+        """
+        frame = pd.DataFrame(
+            [
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0},
+                {"ticker": "600519.SH", "trade_date": str(D), "close": 20.0},
+            ]
+        )
+
+        class _Eval:
+            batch_status = "accepted"
+            rows_to_drop = pd.Series([False, True], index=frame.index)
+
+        monkeypatch.setattr(data.dqc.engine, "evaluate_batch", lambda *a, **k: _Eval())
+        seen = _stub_scan(monkeypatch, frame.copy(), frame.iloc[:1].copy())
+
+        assert dr.detect_corrections(ASSET, lookback=1, data_root=tmp_path) == []
+        ((old, new),) = seen
+        assert list(new["ticker"]) == ["000001.SZ"]
+        assert list(old["ticker"]) == ["000001.SZ"]
+
+    def test_rejected_batch_skips_the_date(self, monkeypatch, tmp_path):
+        frame = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+
+        class _Eval:
+            batch_status = "rejected"
+            rows_to_drop = pd.Series([False], index=frame.index)
+
+        monkeypatch.setattr(data.dqc.engine, "evaluate_batch", lambda *a, **k: _Eval())
+        seen = _stub_scan(monkeypatch, frame.copy(), frame.copy())
+
+        assert dr.detect_corrections(ASSET, lookback=1, data_root=tmp_path) == []
+        assert seen == []
+
+
+class TestForeignOverrideFields:
+    """find.5 (fields) — only fields this pull owns are compared."""
+
+    def test_override_from_another_source_is_foreign(self, monkeypatch):
+        monkeypatch.setattr(
+            data.ingestion, "get_primary_source", lambda a, *x, **k: "tushare"
+        )
+        monkeypatch.setattr(
+            data.ingestion,
+            "get_field_overrides",
+            lambda a, *x, **k: {"adjfactor": "akshare"},
+        )
+
+        assert dr._foreign_fields(ASSET) == {"adjfactor"}
+
+    def test_override_from_the_pull_source_stays_comparable(self, monkeypatch):
+        monkeypatch.setattr(
+            data.ingestion, "get_primary_source", lambda a, *x, **k: "tushare"
+        )
+        monkeypatch.setattr(
+            data.ingestion,
+            "get_field_overrides",
+            lambda a, *x, **k: {"adjfactor": "tushare"},
+        )
+
+        assert dr._foreign_fields(ASSET) == set()
+
+    def test_foreign_fields_are_dropped_before_compare(self, monkeypatch, tmp_path):
+        frame = pd.DataFrame(
+            [
+                {
+                    "ticker": "000001.SZ",
+                    "trade_date": str(D),
+                    "close": 10.0,
+                    "adjfactor": 2.0,
+                }
+            ]
+        )
+        monkeypatch.setattr(
+            data.ingestion, "get_primary_source", lambda a, *x, **k: "tushare"
+        )
+        monkeypatch.setattr(
+            data.ingestion,
+            "get_field_overrides",
+            lambda a, *x, **k: {"adjfactor": "akshare"},
+        )
+        monkeypatch.setattr(dr, "_post_dqc_baseline", lambda df, a, d, r: df)
+        seen = _stub_scan(monkeypatch, frame.copy(), frame.copy())
+
+        dr.detect_corrections(ASSET, lookback=1, data_root=tmp_path)
+
+        ((old, new),) = seen
+        assert "adjfactor" not in old.columns
+        assert "adjfactor" not in new.columns
+        assert "close" in new.columns
+
+
+class TestStaleSinceKeepsEarliest:
+    """find.6 — a later correction must not window out an earlier staleness."""
+
+    def _mark(self, root: Path, stale_since, record) -> str:
+        out = root / "factors" / "mom_20d" / "v1.0"
+        out.mkdir(parents=True)
+        meta = {"factor_name": "mom_20d", "depends_on": ["bars_daily"]}
+        if stale_since is not None:
+            meta["stale_since"] = stale_since
+        path = out / "metadata.json"
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        dr.mark_factors_stale(record, data_root=root)
+        return json.loads(path.read_text(encoding="utf-8"))["stale_since"]
+
+    @staticmethod
+    def _record_on(day: date) -> dr.CorrectionRecord:
+        return dr.CorrectionRecord(
+            asset_type=ASSET,
+            trade_date=day,
+            detected_at=datetime(2024, 10, 1, 2, 0, 0),
+            changes=(_change(),),
+        )
+
+    def test_later_correction_keeps_the_earlier_date(self, tmp_path):
+        kept = self._mark(tmp_path, "2024-06-18", self._record_on(date(2024, 9, 20)))
+        assert kept == "2024-06-18"
+
+    def test_earlier_correction_moves_the_marker_back(self, tmp_path):
+        moved = self._mark(tmp_path, "2024-09-20", self._record_on(date(2024, 6, 14)))
+        assert moved == "2024-06-14"
+
+    def test_no_prior_marker_is_set_from_the_record(self, tmp_path):
+        fresh = self._mark(tmp_path, None, self._record_on(date(2024, 6, 14)))
+        assert fresh == "2024-06-14"
