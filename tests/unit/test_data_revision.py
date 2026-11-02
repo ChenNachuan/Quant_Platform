@@ -13,16 +13,20 @@ Run: ``uv run pytest tests/unit/test_data_revision.py -q``
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import data.adapters
+import data.calendar_adjustment
 import data.ingestion
+import data.normalizers
 import data.data_revision as dr
 
 D = date(2024, 6, 14)
@@ -619,3 +623,151 @@ class TestDailyIngestGuard:
             dr.apply_corrections([_change()], data_root=tmp_path)
 
         assert dr.correction_log_path(ASSET, D, tmp_path).is_file()
+
+
+# ---------------------------------------------------------------------------
+# OCR round 1 — findings 1, 2, 8
+# ---------------------------------------------------------------------------
+
+
+class TestSourceAssetDomain:
+    """find.1 — the storage table name is not the adapter/normalizer domain."""
+
+    def test_bars_daily_translates_to_stock(self):
+        assert dr.STORAGE_TO_SOURCE_ASSET["bars_daily"] == "stock"
+
+    def test_fetch_and_normalize_receive_the_translated_type(self, monkeypatch):
+        seen: dict[str, str] = {}
+
+        class _Result:
+            df = pd.DataFrame([{"ticker": "000001.SZ"}])
+
+        class _Adapter:
+            def fetch(self, asset_type, trade_date):
+                seen["fetch"] = asset_type
+                return _Result()
+
+            def close(self):
+                seen["closed"] = "yes"
+
+        def _primary(table):
+            seen["primary"] = table
+            return "tushare"
+
+        def _normalize(source):
+            def normalize(asset_type, raw_df):
+                seen["normalize"] = asset_type
+                return raw_df
+
+            return normalize
+
+        monkeypatch.setattr(data.ingestion, "get_primary_source", _primary)
+        monkeypatch.setattr(data.adapters, "get_adapter", lambda source: _Adapter())
+        monkeypatch.setattr(data.normalizers, "get_normalizer", _normalize)
+
+        dr._fetch_normalized(ASSET, D)
+
+        assert seen["primary"] == "bars_daily"  # storage domain
+        assert seen["fetch"] == "stock"  # adapter domain
+        assert seen["normalize"] == "stock"
+        assert seen["closed"] == "yes"
+
+    def test_unmapped_table_is_refused_before_a_fetch(self, monkeypatch):
+        def _no_adapter(source):
+            raise AssertionError("adapter must not open for an unmapped table")
+
+        monkeypatch.setattr(
+            data.ingestion, "get_primary_source", lambda table: "tushare"
+        )
+        monkeypatch.setattr(data.adapters, "get_adapter", _no_adapter)
+
+        with pytest.raises(ValueError, match="fundamental"):
+            dr._fetch_normalized("fundamental", D)
+
+
+class TestCompareDuplicateKeys:
+    """find.8 — a duplicated key fans the outer merge out; refuse it."""
+
+    def test_duplicate_keys_in_the_new_frame_are_refused(self):
+        old = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        new = pd.DataFrame(
+            [
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0},
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 11.0},
+            ]
+        )
+        with pytest.raises(ValueError, match="duplicate join keys"):
+            dr.compare_frames(old, new, ASSET, D)
+
+    def test_duplicate_keys_in_the_old_frame_are_refused(self):
+        old = pd.DataFrame(
+            [
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0},
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 11.0},
+            ]
+        )
+        new = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        with pytest.raises(ValueError, match="duplicate join keys"):
+            dr.compare_frames(old, new, ASSET, D)
+
+
+class TestDetectDataRoot:
+    """find.2 — detection reads the tree it is told to, like the other stages."""
+
+    def test_local_read_accepts_a_custom_data_root(self, tmp_path):
+        day_dir = tmp_path / "asset" / "bars_daily"
+        day_dir.mkdir(parents=True)
+        pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        ).to_parquet(day_dir / f"{D.isoformat()}.parquet")
+
+        frame = dr._load_local(ASSET, D, data_root=tmp_path)
+
+        assert frame is not None
+        assert float(frame.iloc[0]["close"]) == 10.0
+
+    def test_missing_batch_in_the_custom_root_reads_as_none(self, tmp_path):
+        assert dr._load_local(ASSET, D, data_root=tmp_path) is None
+
+    def test_detect_threads_data_root_to_calendar_and_local(
+        self, monkeypatch, tmp_path
+    ):
+        seen: dict[str, object] = {}
+
+        class _Cal:
+            def __init__(self, exchange, data_root="data_platform"):
+                seen["cal_root"] = data_root
+
+            def prev(self, when, n=1):
+                return when - timedelta(days=n)
+
+            def range(self, start, end):
+                return [end]
+
+        def _local(asset_type, trade_date, data_root="data_platform"):
+            seen["local_root"] = data_root
+            return None
+
+        monkeypatch.setattr(data.calendar_adjustment, "TradingCalendar", _Cal)
+        monkeypatch.setattr(dr, "_fetch_normalized", lambda a, d: None)
+        monkeypatch.setattr(dr, "_load_local", _local)
+
+        dr.detect_corrections(ASSET, lookback=1, data_root=tmp_path)
+
+        assert seen["cal_root"] == tmp_path
+        assert seen["local_root"] == tmp_path
+
+    def test_data_root_defaults_match_across_the_four_stages(self):
+        for fn in (
+            dr.detect_corrections,
+            dr.apply_corrections,
+            dr.assess_correction_impact,
+            dr.mark_factors_stale,
+        ):
+            assert (
+                inspect.signature(fn).parameters["data_root"].default == "data_platform"
+            ), fn.__name__

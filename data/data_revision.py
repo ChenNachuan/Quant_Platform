@@ -49,6 +49,7 @@ __all__ = [
     "SEVERITY_LOW",
     "SEVERITY_MEDIUM",
     "SEVERITY_HIGH",
+    "STORAGE_TO_SOURCE_ASSET",
     "FieldChange",
     "CorrectionRecord",
     "detect_corrections",
@@ -96,6 +97,18 @@ SEVERITY_HIGH = "HIGH"
 #: Alerting floor.  Only MEDIUM and above raise a warning — a LOW correction is
 #: noise, and alerting on all of them drowns the real ones (§45.4).
 ALERT_SEVERITIES = frozenset({SEVERITY_MEDIUM, SEVERITY_HIGH})
+
+#: Storage table name (``PARTITION_PATHS`` key) → the source-domain asset type
+#: the adapters and normalizers accept (``TushareAdapter._ASSET_TYPES`` and
+#: friends — ``"stock"``, ``"option"``).  The two domains are not
+#: interchangeable: ``get_primary_source`` and the asset layer are keyed by
+#: table name (``bars_daily``), while ``adapter.fetch`` / ``normalize`` reject
+#: anything outside the source domain.  Today's fetch + normalize pair serves
+#: the unified bars_daily schema only; extend this map when another table gets
+#: a source mapping.
+STORAGE_TO_SOURCE_ASSET: dict[str, str] = {
+    "bars_daily": "stock",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +181,31 @@ def _now() -> datetime:
     return datetime.now()
 
 
+def _source_asset_type(asset_type: str) -> str:
+    """Translate a storage table name into the adapter/normalizer domain.
+
+    ``detect_corrections`` speaks storage tables (``bars_daily``) because
+    ``get_primary_source``, the asset layer and ``depends_on`` all do, while
+    ``adapter.fetch`` / ``normalize`` validate against their source-domain
+    ``_ASSET_TYPES`` (``"stock"``, ``"option"``).  No single input satisfies
+    both without this translation.
+    """
+    try:
+        return STORAGE_TO_SOURCE_ASSET[asset_type]
+    except KeyError:
+        raise ValueError(
+            f"no source asset type for storage table {asset_type!r} "
+            f"(mapped: {sorted(STORAGE_TO_SOURCE_ASSET)}); add its entry to "
+            "STORAGE_TO_SOURCE_ASSET before scanning it"
+        ) from None
+
+
 def _fetch_normalized(asset_type: str, trade_date: date) -> Any:
     """Re-pull one trade date from the primary source, post-Normalizer.
+
+    *asset_type* is the storage table name; the adapter and normalizer are
+    handed its source-domain translation (:data:`STORAGE_TO_SOURCE_ASSET`)
+    because passing the table name through is rejected by both.
 
     I/O seam: the source layer lands with the ingest pipeline, and a unit test
     stands in a frame here rather than opening a connection.
@@ -178,16 +214,23 @@ def _fetch_normalized(asset_type: str, trade_date: date) -> Any:
     from data.ingestion import get_primary_source
     from data.normalizers import get_normalizer
 
-    source = get_primary_source(asset_type)
+    source = get_primary_source(asset_type)  # storage domain
+    source_asset_type = _source_asset_type(asset_type)  # adapter domain
     adapter = get_adapter(source)
     try:
-        result = adapter.fetch(asset_type, trade_date)
-        return get_normalizer(source).normalize(asset_type, result.df)
+        result = adapter.fetch(source_asset_type, trade_date)
+        # get_normalizer() returns the normalize function itself (see
+        # data/normalizers/__init__.py and the sibling call in dqc/report.py).
+        return get_normalizer(source)(source_asset_type, result.df)
     finally:
         adapter.close()
 
 
-def _load_local(asset_type: str, trade_date: date) -> Any:
+def _load_local(
+    asset_type: str,
+    trade_date: date,
+    data_root: str | os.PathLike[str] = "data_platform",
+) -> Any:
     """Read the asset layer's existing batch for one trade date."""
     import pandas as pd
 
@@ -198,7 +241,7 @@ def _load_local(asset_type: str, trade_date: date) -> Any:
         raise NotImplementedError(
             f"no date-partitioned layout for {asset_type!r} ({PARTITION_PATHS})"
         )
-    path = Path("data_platform") / template.format(date=trade_date.strftime("%Y-%m-%d"))
+    path = Path(data_root) / template.format(date=trade_date.strftime("%Y-%m-%d"))
     if not path.exists():
         return None
     return pd.read_parquet(path)
@@ -243,7 +286,9 @@ def compare_frames(
     (:data:`TOTAL_CHANGE_REL_DIFF`).  Two populated values are compared against
     the field's tolerance as usual.  Only the four tolerance fields are
     compared; a field either frame does not carry is skipped rather than
-    treated as a zero.
+    treated as a zero.  Duplicated ``(ticker, trade_date)`` keys are refused
+    before the merge — one row per key on both sides, as in
+    ``data.ingestion.cross_source_check``.
     """
     import pandas as pd
 
@@ -255,6 +300,12 @@ def compare_frames(
     key = ["ticker", "trade_date"]
     if any(c not in old.columns or c not in new.columns for c in key):
         raise ValueError(f"frames must carry {key} to be compared")
+    # One row per key on each side, refused like the sibling comparison
+    # (data.ingestion.cross_source_check): a duplicated key fans the outer
+    # merge out into a cross product and would record several FieldChanges
+    # for the same ticker/field.
+    if old.duplicated(key).any() or new.duplicated(key).any():
+        raise ValueError(f"duplicate join keys {key} in input frames")
 
     # `indicator=` (not `indicator=True`) names the column explicitly: the
     # default `_merge` is invisible to `itertuples`, which renames `_`-prefixed
@@ -313,22 +364,32 @@ def compare_frames(
     return changes
 
 
-def detect_corrections(asset_type: str, lookback: int = 30) -> list[FieldChange]:
+def detect_corrections(
+    asset_type: str,
+    lookback: int = 30,
+    *,
+    data_root: str | os.PathLike[str] = "data_platform",
+) -> list[FieldChange]:
     """Re-pull the last *lookback* trade dates and diff against the asset layer.
 
     The weekly scan uses ``lookback=DEFAULT_LOOKBACK`` (30 trade dates); the
     quarterly fallback passes ``lookback=QUARTERLY_LOOKBACK`` (250).  Dates
     missing on either side are skipped — a gap is not a correction.
+
+    ``data_root`` names the tree to read (asset layer and calendar), defaulting
+    as :func:`apply_corrections` / :func:`assess_correction_impact` /
+    :func:`mark_factors_stale` do, so a scan and a write can be pointed at the
+    same non-default tree instead of detection silently reading another.
     """
     from data.calendar_adjustment import TradingCalendar
 
-    cal = TradingCalendar("sse")
+    cal = TradingCalendar("sse", data_root=data_root)
     end = cal.prev(date.today())
     start = cal.prev(end, lookback)
     changes: list[FieldChange] = []
     for trade_date in cal.range(start, end):
         fresh = _fetch_normalized(asset_type, trade_date)
-        local = _load_local(asset_type, trade_date)
+        local = _load_local(asset_type, trade_date, data_root)
         if fresh is None or local is None:
             continue
         changes.extend(compare_frames(local, fresh, asset_type, trade_date))
