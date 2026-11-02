@@ -29,6 +29,7 @@ from research.factor_evaluation import (
     GATE_IC_MIN,
     GATE_IR_MIN,
     GATE_T_BASE,
+    _load_attempts,
     check_exit,
     factor_family,
 )
@@ -383,6 +384,19 @@ class TestComputePreprocess:
             with pytest.raises(ValueError):
                 pipeline.compute(bad, TICKERS, "2023-01-02", "2024-12-31")
 
+    def test_compute_rejects_negative_and_fractional_periods(self, pipeline):
+        for bad in (
+            "delta(close, -1)",  # negative shift reads the next bar
+            "pct_change(close, -2)",  # same lookahead through returns
+            "delta(close, 1.9)",  # int() would silently truncate to 1
+        ):
+            with pytest.raises(ValueError, match="positive int"):
+                pipeline.compute(bad, TICKERS, "2023-01-02", "2024-12-31")
+        # a bool constant never reaches the operator guard: the expression
+        # layer rejects it as a non-numeric constant first
+        with pytest.raises(ValueError, match="unsupported expression element"):
+            pipeline.compute("delta(close, True)", TICKERS, "2023-01-02", "2024-12-31")
+
     def test_compute_rejects_empty_universe(self, pipeline):
         with pytest.raises(ValueError, match="universe"):
             pipeline.compute(MOMENTUM_EXPR, [], "2023-01-02", "2024-12-31")
@@ -497,6 +511,17 @@ class TestEvaluate:
         assert [e["name"] for e in entries] == ["probe_alpha", "probe_beta"]
         assert factor_family("probe_alpha") == "probe"
 
+    def test_corrupt_attempt_log_raises_instead_of_resetting_n(self, pipeline, bars):
+        """A corrupt log must not silently reset N to 1 (which would loosen the
+        admission gate the attempt count exists to tighten)."""
+        factor = make_factor_frame(bars, kind="random")
+        log_path = pipeline._base_dir / "factor_eval" / "attempt_log" / "probe.json"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        for payload in ("{not json", '{"not": "a list"}'):
+            log_path.write_text(payload, encoding="utf-8")
+            with pytest.raises(RuntimeError, match="attempt log"):
+                pipeline.evaluate(factor, name="probe_alpha")
+
 
 # ---------------------------------------------------------------------------
 # ac-4: three-layer persistence
@@ -540,6 +565,11 @@ class TestThreeLayerPersistence:
         assert list(ic_back.columns) == PERIOD_COLS
         assert ic_back.index.name == "date"
         pd.testing.assert_frame_equal(ic_back, result.ic_series, check_freq=False)
+        # turnover column labels are quantile codes cast to str — Parquet
+        # column names must be strings on every engine
+        turnover_back = pd.read_parquet(eval_dir / "turnover.parquet")
+        assert all(isinstance(c, str) for c in turnover_back.columns)
+        pd.testing.assert_frame_equal(turnover_back, result.turnover, check_freq=False)
 
         # Layer 3 — HTML tearsheet
         assert result.report_path is not None
@@ -599,3 +629,63 @@ class TestThreeLayerPersistence:
         )
         assert meta["attempts"] == len(family_log)
         assert meta["attempt_log"] == family_log
+
+    def test_register_persists_raw_values_not_processed(self, pipeline, bars):
+        """factor_storage stores compute() output: NaN is suspension/missing
+        and is kept, never filled — the processed frame stays for evaluation."""
+        raw = pipeline.compute(
+            "rolling_mean(close, 20)", TICKERS, "2023-01-02", "2024-12-31"
+        ).copy()
+        # sparse suspension-shape gaps: one name missing where its peers quote
+        sparse = raw.index[raw["ticker"] == "000001.SZ"][100:105]
+        raw.loc[sparse, "factor"] = np.nan
+        n_raw_nan = int(raw["factor"].isna().sum())
+        assert n_raw_nan > 5  # warm-up NaN plus the sparse gaps
+
+        processed = pipeline.preprocess(raw)
+        # the cross-section fill covers the sparse gaps (their dates have a
+        # median); the all-name warm-up dates have none and stay NaN
+        assert int(processed["factor"].isna().sum()) < n_raw_nan
+        assert not processed["factor"].equals(raw["factor"])
+
+        result = pipeline.evaluate(processed, name="roll20_1d")
+        pipeline.register("roll20_1d", "rolling_mean(close, 20)", result)
+
+        stored = load_factor(
+            "roll20_1d",
+            bars["date"].min(),
+            bars["date"].max(),
+            base_dir=str(pipeline._base_dir / "factors"),
+        )
+        assert len(stored) == len(raw)
+        expect = raw.rename(columns={"factor": "roll20_1d"}).sort_values(
+            ["ticker", "date"]
+        )
+        got = stored.sort_values(["ticker", "date"])
+        assert list(got["ticker"]) == list(expect["ticker"])
+        assert int(got["roll20_1d"].isna().sum()) == n_raw_nan  # raw NaN kept
+        assert (
+            got["roll20_1d"]
+            .isna()
+            .reset_index(drop=True)
+            .equals(expect["roll20_1d"].isna().reset_index(drop=True))
+        )
+        np.testing.assert_allclose(
+            got["roll20_1d"].to_numpy(),
+            expect["roll20_1d"].to_numpy(),
+            rtol=1e-12,
+            equal_nan=True,
+        )
+
+    def test_rejects_path_traversal_in_names(self, pipeline, bars):
+        factor = make_factor_frame(bars, kind="next_return", noise=5e-4)
+        result = pipeline.evaluate(factor, name="knownic_1d")
+
+        for bad in ("..", "a/b", "a\\b", ""):
+            with pytest.raises(ValueError, match="invalid factor name"):
+                pipeline.register(bad, "close - 1", result)
+        with pytest.raises(ValueError, match="invalid factor name"):
+            pipeline.evaluate(factor, name="evil/../../x")
+        # the attempt-log path validates its family component directly
+        with pytest.raises(ValueError, match="invalid factor family"):
+            _load_attempts(pipeline._base_dir, "evil/../../x")

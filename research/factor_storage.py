@@ -70,7 +70,11 @@ DEFAULT_BASE_DIR: str = "data_platform/factors"
 COMPRESSION: str = "zstd"
 COMPRESSION_LEVEL: int = 3
 
-#: metadata.json field names, in write order (factor_storage.md §61).
+#: Identity fields of metadata.json, in write order (factor_storage.md §61).
+#: This is not the full key set: the optional evaluation blocks (``eval`` /
+#: ``attempts`` / ``attempt_log``) are written after them and carried across
+#: rewrites by :func:`write_metadata`'s ``previous`` loop.  They cannot appear
+#: here — a bare save never writes them, so they are not always-present fields.
 METADATA_FIELDS: tuple[str, ...] = (
     "factor_name",
     "version",

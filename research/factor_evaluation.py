@@ -41,7 +41,7 @@ from typing import Any, Callable, Sequence
 
 import pandas as pd
 
-from research.factor_storage import save_factor_full
+from research.factor_storage import _safe_component, save_factor_full
 from research.post_processor import PIPELINE_STOCK_EVAL, PostProcessor, neutralize
 
 __all__ = [
@@ -119,12 +119,23 @@ _EXPR_FUNCS: dict[str, Callable[..., Any]] = {
 }
 
 
+def _positive_periods(periods: int) -> int:
+    """Guard the shift operators like ``_rolling_apply`` guards windows.
+
+    A negative period shifts the other way — ``delta(close, -1)`` reads the
+    next bar — and ``int()`` would silently truncate a float such as 1.9.
+    """
+    if not isinstance(periods, int) or isinstance(periods, bool) or periods < 1:
+        raise ValueError(f"periods must be a positive int, got {periods!r}")
+    return periods
+
+
 def _expr_delta(series: pd.Series, periods: int = 1) -> pd.Series:
-    return series.diff(int(periods))
+    return series.diff(_positive_periods(periods))
 
 
 def _expr_pct_change(series: pd.Series, periods: int = 1) -> pd.Series:
-    return series.pct_change(int(periods))
+    return series.pct_change(_positive_periods(periods))
 
 
 _EXPR_FUNCS["delta"] = _expr_delta
@@ -217,7 +228,8 @@ def factor_family(name: str) -> str:
 
 
 def _attempt_path(base_dir: Path, family: str) -> Path:
-    return Path(base_dir) / "factor_eval" / "attempt_log" / f"{family}.json"
+    safe = _safe_component(family, "factor family")
+    return Path(base_dir) / "factor_eval" / "attempt_log" / f"{safe}.json"
 
 
 def _load_attempts(base_dir: Path, family: str) -> list[dict]:
@@ -226,9 +238,17 @@ def _load_attempts(base_dir: Path, family: str) -> list[dict]:
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
-    return list(data) if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError) as exc:
+        # A corrupt log must not silently reset N to 1 — that would relax the
+        # admission gate the attempt count exists to tighten.
+        raise RuntimeError(
+            f"attempt log {path} is unreadable; refusing to reset N"
+        ) from exc
+    if not isinstance(data, list):
+        raise RuntimeError(
+            f"attempt log {path} is corrupt (expected a JSON list); refusing to reset N"
+        )
+    return list(data)
 
 
 def _record_attempt(base_dir: Path, family: str, entry: dict) -> int:
@@ -236,9 +256,11 @@ def _record_attempt(base_dir: Path, family: str, entry: dict) -> int:
     entries.append(entry)
     path = _attempt_path(base_dir, family)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
         json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    tmp.replace(path)  # atomic: a crash mid-write cannot truncate the log
     return len(entries)
 
 
@@ -465,7 +487,11 @@ class FactorPipeline:
         self._data_api = data_api
         self._base_dir = Path(base_dir)
         self._reports_dir = Path(reports_dir)
-        self._last_processed: pd.DataFrame | None = None
+        #: raw frame paired with the last ``evaluate()`` — what ``register()``
+        #: persists (factor_storage stores raw values, NaN kept, never filled).
+        self._last_raw: pd.DataFrame | None = None
+        #: raw frame from ``compute()``/``preprocess()``, paired at ``evaluate()``.
+        self._pending_raw: pd.DataFrame | None = None
 
     # -- stage 1: compute --------------------------------------------------
 
@@ -506,10 +532,13 @@ class FactorPipeline:
                     }
                 )
             )
-        raw = pd.concat(parts, ignore_index=True)
-        return raw.sort_values(["date", "ticker"], kind="mergesort").reset_index(
-            drop=True
+        raw = (
+            pd.concat(parts, ignore_index=True)
+            .sort_values(["date", "ticker"], kind="mergesort")
+            .reset_index(drop=True)
         )
+        self._pending_raw = raw
+        return raw
 
     # -- stage 2: preprocess ----------------------------------------------
 
@@ -530,7 +559,7 @@ class FactorPipeline:
         if {"industry", "log_market_cap"} <= set(processed.columns):
             processed = neutralize(processed, factor_col=col)
         processed = processed[["date", "ticker", col]]
-        self._last_processed = processed
+        self._pending_raw = raw
         return processed
 
     # -- stage 3: evaluate -------------------------------------------------
@@ -556,8 +585,16 @@ class FactorPipeline:
         if processed.empty:
             raise ValueError("processed frame is empty")
         col = _value_col(processed)
+        if name is not None:
+            name = _safe_component(name, "factor name")
         eval_name = name or col
-        self._last_processed = processed
+        # Pair the raw frame with this evaluation for register(): the input of
+        # the compute()/preprocess() run that produced *processed*, or *processed*
+        # itself when the caller supplied the factor frame directly.
+        self._last_raw = (
+            self._pending_raw if self._pending_raw is not None else processed
+        )
+        self._pending_raw = None
 
         wide = processed.pivot(index="date", columns="ticker", values=col)
         factor = AlphalensAdapter.to_al_factor(wide)
@@ -581,9 +618,11 @@ class FactorPipeline:
         mean_quant_ret, _ = al_perf.mean_return_by_quantile(factor_data, by_date=False)
 
         quantile_levels = sorted(factor_data["factor_quantile"].dropna().unique())
+        # str column labels: Parquet column names must be strings on every
+        # engine, and the quantile codes are numeric (numpy int64/float64).
         turnover = pd.DataFrame(
             {
-                q: al_perf.quantile_turnover(
+                str(q): al_perf.quantile_turnover(
                     factor_data["factor_quantile"], q, period=1
                 )
                 for q in quantile_levels
@@ -634,23 +673,24 @@ class FactorPipeline:
     # -- stage 4: register -------------------------------------------------
 
     def register(self, name: str, expr: str, result: EvalResult) -> None:
-        """Land all three artifact layers for the last processed frame.
+        """Land all three artifact layers for the last evaluated frame.
 
         Layer 1 writes the ``eval`` block (plus ``attempts`` / ``attempt_log``)
         into the factor version's ``metadata.json``; layer 2 writes the series
         Parquets under ``factor_eval/{name}/``; layer 3 is the tearsheet
         ``evaluate`` already wrote.  Factor values are persisted through
-        ``factor_storage.save_factor_full``.
+        ``factor_storage.save_factor_full`` as the **raw** frame — NaN is
+        suspension/missing and is kept, never filled, so consumers applying
+        their own preprocessing do not double-process.
         """
-        if self._last_processed is None:
+        name = _safe_component(name, "factor name")
+        if self._last_raw is None:
             raise RuntimeError(
-                "register() needs a processed frame from this pipeline "
-                "(run preprocess()/evaluate() first)"
+                "register() needs a factor frame from this pipeline "
+                "(run compute()/preprocess()/evaluate() first)"
             )
-        col = _value_col(self._last_processed)
-        frame = self._last_processed[["date", "ticker", col]].rename(
-            columns={col: name}
-        )
+        col = _value_col(self._last_raw)
+        frame = self._last_raw[["date", "ticker", col]].rename(columns={col: name})
 
         # Semantic version "1.0" is what Factor.version and the factor_storage
         # readers default to — landing under any other string makes the
@@ -717,6 +757,7 @@ class FactorPipeline:
         summary: dict,
         gate_passed: bool,
     ) -> str | None:
+        eval_name = _safe_component(eval_name, "factor name")
         try:
             figures = self._capture_tearsheet(factor_data)
         except Exception as exc:  # plotting must not kill the evaluation
