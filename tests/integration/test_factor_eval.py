@@ -32,7 +32,7 @@ from research.factor_evaluation import (
     check_exit,
     factor_family,
 )
-from research.factor_storage import save_factor_append
+from research.factor_storage import load_factor, save_factor_append
 
 pytestmark = pytest.mark.integration
 
@@ -513,7 +513,7 @@ class TestThreeLayerPersistence:
 
         # Layer 1 — metadata.json eval block (plus attempts siblings)
         meta_path = (
-            pipeline._base_dir / "factors" / "knownic_1d" / "v1" / "metadata.json"
+            pipeline._base_dir / "factors" / "knownic_1d" / "v1.0" / "metadata.json"
         )
         assert meta_path.exists()
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -548,23 +548,32 @@ class TestThreeLayerPersistence:
         assert "gate PASS" in html
         assert "<img" in html
 
-        # Factor values persisted alongside (register's storage obligation)
-        value_files = sorted(
-            (pipeline._base_dir / "factors" / "knownic_1d" / "v1").glob("*.parquet")
-        )
+        # Factor values landed under the semantic version directory the
+        # ecosystem reads (v1.0) and round-trip through load_factor's *default*
+        # version — the reader seam DataAPI.get_factor() wraps.
+        version_dir = pipeline._base_dir / "factors" / "knownic_1d" / "v1.0"
+        value_files = sorted(version_dir.glob("*.parquet"))
         assert value_files
         stored = pd.concat([pd.read_parquet(p) for p in value_files], ignore_index=True)
         assert set(stored.columns) == {"date", "ticker", "knownic_1d"}
+        read_back = load_factor(
+            "knownic_1d",
+            bars["date"].min(),
+            bars["date"].max(),
+            base_dir=str(pipeline._base_dir / "factors"),
+        )
+        assert set(read_back.columns) == {"date", "ticker", "knownic_1d"}
+        assert len(read_back) == len(stored)
 
     def test_eval_block_survives_metadata_rewrite(self, pipeline, bars):
         factor = make_factor_frame(bars, kind="next_return", noise=5e-4)
         result = pipeline.evaluate(factor, name="knownic_1d")
         pipeline.register("knownic_1d", "close - 1", result)
 
-        out_dir = pipeline._base_dir / "factors" / "knownic_1d" / "v1"
+        out_dir = pipeline._base_dir / "factors" / "knownic_1d" / "v1.0"
         record = SimpleNamespace(
             name="knownic_1d",
-            version="1",
+            version="1.0",
             description="",
             category="",
             frequency="daily",

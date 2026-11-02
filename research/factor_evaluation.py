@@ -652,7 +652,10 @@ class FactorPipeline:
             columns={col: name}
         )
 
-        record = _FactorRecord(name, version="1", depends_on=_expr_columns(expr))
+        # Semantic version "1.0" is what Factor.version and the factor_storage
+        # readers default to — landing under any other string makes the
+        # registered factor invisible to load_factor()/DataAPI.get_factor().
+        record = _FactorRecord(name, version="1.0", depends_on=_expr_columns(expr))
         factors_dir = self._base_dir / "factors"
         save_factor_full(record, frame, base_dir=str(factors_dir))
 
@@ -675,7 +678,7 @@ class FactorPipeline:
                 },
             )
             attempts = _load_attempts(self._base_dir, family)
-        meta_path = factors_dir / name / "v1" / "metadata.json"
+        meta_path = factors_dir / name / f"v{record.version}" / "metadata.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["eval"] = {
             **result.summary,
@@ -749,7 +752,7 @@ class FactorPipeline:
                 factor_data, long_short=True, group_neutral=False, by_group=False
             )
             pngs: list[str] = []
-            for num in plt.get_fignums():
+            for num in sorted(set(plt.get_fignums()) - preexisting):
                 buffer = io.BytesIO()
                 plt.figure(num).savefig(
                     buffer, format="png", dpi=_TEARSHEET_DPI, bbox_inches="tight"
