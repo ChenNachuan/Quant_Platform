@@ -217,6 +217,16 @@ def _factor_column(df: pd.DataFrame) -> str:
     return cols[0]
 
 
+def _quantile_label(q: Any) -> str:
+    """Stable column label for a quantile code: 1 and 1.0 both become ``"1"``.
+
+    The code dtype flips with NaN presence (int64 vs float64), and the label
+    must not flip with it.
+    """
+    value = float(q)
+    return str(int(value)) if value.is_integer() else str(q)
+
+
 # ---------------------------------------------------------------------------
 # Attempt bookkeeping (per-factor-family N, §27.9)
 # ---------------------------------------------------------------------------
@@ -590,11 +600,12 @@ class FactorPipeline:
         eval_name = name or col
         # Pair the raw frame with this evaluation for register(): the input of
         # the compute()/preprocess() run that produced *processed*, or *processed*
-        # itself when the caller supplied the factor frame directly.
+        # itself when the caller supplied the factor frame directly.  The
+        # pending raw is kept — a second evaluate() over the same pipeline raw
+        # must not silently re-pair register() to the processed frame.
         self._last_raw = (
             self._pending_raw if self._pending_raw is not None else processed
         )
-        self._pending_raw = None
 
         wide = processed.pivot(index="date", columns="ticker", values=col)
         factor = AlphalensAdapter.to_al_factor(wide)
@@ -618,11 +629,12 @@ class FactorPipeline:
         mean_quant_ret, _ = al_perf.mean_return_by_quantile(factor_data, by_date=False)
 
         quantile_levels = sorted(factor_data["factor_quantile"].dropna().unique())
-        # str column labels: Parquet column names must be strings on every
-        # engine, and the quantile codes are numeric (numpy int64/float64).
+        # String column labels, pinned integral ("1", not "1.0"): Parquet
+        # column names must be strings on every engine, and the code dtype
+        # flips with NaN presence (int64 vs float64).
         turnover = pd.DataFrame(
             {
-                str(q): al_perf.quantile_turnover(
+                _quantile_label(q): al_perf.quantile_turnover(
                     factor_data["factor_quantile"], q, period=1
                 )
                 for q in quantile_levels
@@ -689,7 +701,9 @@ class FactorPipeline:
                 "register() needs a factor frame from this pipeline "
                 "(run compute()/preprocess()/evaluate() first)"
             )
-        col = _value_col(self._last_raw)
+        # The raw frame may carry the neutralize metadata (preprocess's input
+        # shape); the slice keeps only the factor column.
+        col = _factor_column(self._last_raw)
         frame = self._last_raw[["date", "ticker", col]].rename(columns={col: name})
 
         # Semantic version "1.0" is what Factor.version and the factor_storage

@@ -568,7 +568,8 @@ class TestThreeLayerPersistence:
         # turnover column labels are quantile codes cast to str — Parquet
         # column names must be strings on every engine
         turnover_back = pd.read_parquet(eval_dir / "turnover.parquet")
-        assert all(isinstance(c, str) for c in turnover_back.columns)
+        # labels pinned integral and dtype-independent: "1", not "1.0"
+        assert list(turnover_back.columns) == ["1", "2", "3", "4", "5"]
         pd.testing.assert_frame_equal(turnover_back, result.turnover, check_freq=False)
 
         # Layer 3 — HTML tearsheet
@@ -649,6 +650,9 @@ class TestThreeLayerPersistence:
         assert not processed["factor"].equals(raw["factor"])
 
         result = pipeline.evaluate(processed, name="roll20_1d")
+        # re-evaluate the same pipeline raw: register() must still pair the
+        # raw frame, not fall back to the processed one
+        result = pipeline.evaluate(processed, name="roll20_1d")
         pipeline.register("roll20_1d", "rolling_mean(close, 20)", result)
 
         stored = load_factor(
@@ -676,6 +680,28 @@ class TestThreeLayerPersistence:
             rtol=1e-12,
             equal_nan=True,
         )
+
+    def test_register_after_neutralise_keeps_raw(self, pipeline, bars):
+        """preprocess()'s input may carry industry/log_market_cap (its
+        documented shape); register() must persist the factor column and drop
+        the metadata instead of dying on a strict value-column check."""
+        raw = make_factor_frame(bars, kind="random")
+        raw.loc[raw.index[:5], "factor"] = np.nan  # sparse suspension gaps
+        raw["industry"] = np.where(raw["ticker"] < "600000.SH", "tech", "finance")
+        raw["log_market_cap"] = 22.0
+        processed = pipeline.preprocess(raw)
+
+        result = pipeline.evaluate(processed, name="neut_1d")
+        pipeline.register("neut_1d", "close - 1", result)
+
+        stored = load_factor(
+            "neut_1d",
+            bars["date"].min(),
+            bars["date"].max(),
+            base_dir=str(pipeline._base_dir / "factors"),
+        )
+        assert set(stored.columns) == {"date", "ticker", "neut_1d"}
+        assert int(stored["neut_1d"].isna().sum()) == 5  # raw NaN kept
 
     def test_rejects_path_traversal_in_names(self, pipeline, bars):
         factor = make_factor_frame(bars, kind="next_return", noise=5e-4)
