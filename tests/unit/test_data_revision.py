@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 import data.ingestion
 import data.data_revision as dr
@@ -406,3 +408,214 @@ class TestMarkFactorsStale:
 
     def test_no_factors_directory_yields_empty_list(self, tmp_path):
         assert dr.mark_factors_stale(_record(_change()), data_root=tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# Review finding 2 — outer merge must see one-sided rows and NaN ↔ value
+# ---------------------------------------------------------------------------
+
+
+class TestCompareFramesCoverage:
+    """An inner merge + dropna hides two real classes of correction.
+
+    A source backfill that adds a ticker, or a field that was missing and got
+    filled in, is a correction.  Both must land in the change list.
+    """
+
+    def test_row_only_in_new_is_a_change(self):
+        old = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        new = pd.DataFrame(
+            [
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0},
+                {"ticker": "600519.SH", "trade_date": str(D), "close": 20.0},
+            ]
+        )
+        changes = dr.compare_frames(old, new, ASSET, D)
+
+        assert [c.ticker for c in changes] == ["600519.SH"]
+        change = changes[0]
+        assert change.field == "close"
+        assert math.isnan(change.old_value)
+        assert change.new_value == 20.0
+        assert change.rel_diff == dr.TOTAL_CHANGE_REL_DIFF
+
+    def test_row_only_in_old_is_a_change(self):
+        old = pd.DataFrame(
+            [
+                {"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0},
+                {"ticker": "600519.SH", "trade_date": str(D), "close": 20.0},
+            ]
+        )
+        new = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        changes = dr.compare_frames(old, new, ASSET, D)
+
+        assert [c.ticker for c in changes] == ["600519.SH"]
+        change = changes[0]
+        assert change.old_value == 20.0
+        assert math.isnan(change.new_value)
+        assert change.abs_diff == 20.0
+        assert change.rel_diff == dr.TOTAL_CHANGE_REL_DIFF
+
+    def test_nan_to_value_is_a_change(self):
+        old = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": float("nan")}]
+        )
+        new = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        changes = dr.compare_frames(old, new, ASSET, D)
+
+        assert len(changes) == 1
+        assert changes[0].field == "close"
+        assert math.isnan(changes[0].old_value)
+        assert changes[0].new_value == 10.0
+        assert changes[0].rel_diff == dr.TOTAL_CHANGE_REL_DIFF
+
+    def test_value_to_nan_is_a_change(self):
+        old = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        new = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": float("nan")}]
+        )
+        changes = dr.compare_frames(old, new, ASSET, D)
+
+        assert len(changes) == 1
+        assert changes[0].old_value == 10.0
+        assert math.isnan(changes[0].new_value)
+
+    def test_both_sides_missing_is_not_a_change(self):
+        old = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": float("nan")}]
+        )
+        new = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": float("nan")}]
+        )
+        assert dr.compare_frames(old, new, ASSET, D) == []
+
+    def test_empty_old_reports_every_new_row(self):
+        """Local has nothing for the date; the source has a batch."""
+        old = pd.DataFrame(columns=["ticker", "trade_date", "close"])
+        new = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        changes = dr.compare_frames(old, new, ASSET, D)
+
+        assert len(changes) == 1
+        assert changes[0].new_value == 10.0
+
+    def test_both_empty_reports_nothing(self):
+        old = pd.DataFrame(columns=["ticker", "trade_date", "close"])
+        assert dr.compare_frames(old, old.copy(), ASSET, D) == []
+
+    def test_populated_pair_within_tolerance_still_not_a_change(self):
+        """The outer-merge fix must not turn ordinary noise into corrections."""
+        tol = dr.CORRECTION_TOLERANCES["close"]
+        old, new = _frames("close", 10.0, 10.0 + tol)
+        assert dr.compare_frames(old, new, ASSET, D) == []
+
+    def test_presence_change_is_medium_not_low(self, tmp_path):
+        """A value that appeared from nothing is not a minor correction."""
+        record = _record(
+            _change(
+                field="close",
+                old_value=float("nan"),
+                new_value=10.0,
+                abs_diff=10.0,
+                rel_diff=dr.TOTAL_CHANGE_REL_DIFF,
+            )
+        )
+        assert (
+            dr.assess_correction_impact(record, data_root=tmp_path)
+            == dr.SEVERITY_MEDIUM
+        )
+
+    def test_presence_change_on_adjfactor_is_high(self, tmp_path):
+        record = _record(
+            _change(
+                field="adjfactor",
+                old_value=float("nan"),
+                new_value=1.05,
+                abs_diff=1.05,
+                rel_diff=dr.TOTAL_CHANGE_REL_DIFF,
+            )
+        )
+        assert (
+            dr.assess_correction_impact(record, data_root=tmp_path) == dr.SEVERITY_HIGH
+        )
+
+    def test_correction_log_is_strict_json_for_missing_sides(
+        self, monkeypatch, tmp_path
+    ):
+        """NaN must land as ``null``, not the bare ``NaN`` token."""
+        monkeypatch.setattr(dr, "_daily_ingest", lambda *a, **k: None)
+        monkeypatch.setattr(
+            data.ingestion,
+            "get_primary_source",
+            lambda asset_type, *a, **k: "amazingdata",
+        )
+
+        old = pd.DataFrame(
+            [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]
+        )
+        new = pd.DataFrame(
+            [{"ticker": "600519.SH", "trade_date": str(D), "close": 20.0}]
+        )
+        changes = dr.compare_frames(old, new, ASSET, D)
+        assert len(changes) == 2  # 000001 removed, 600519 added
+        dr.apply_corrections(changes, data_root=tmp_path)
+
+        raw = dr.correction_log_path(ASSET, D, tmp_path).read_text(encoding="utf-8")
+        assert "NaN" not in raw
+        assert "Infinity" not in raw
+        payloads = [json.loads(line) for line in raw.splitlines()]
+        assert len(payloads) == 2
+
+        by_ticker = {p["ticker"]: p for p in payloads}
+        assert by_ticker["600519.SH"]["old"] is None
+        assert by_ticker["600519.SH"]["new"] == 20.0
+        assert by_ticker["000001.SZ"]["old"] == 10.0
+        assert by_ticker["000001.SZ"]["new"] is None
+        for payload in payloads:
+            assert payload["rel_diff"] == dr.TOTAL_CHANGE_REL_DIFF
+
+
+# ---------------------------------------------------------------------------
+# Review finding 1 — a missing daily_ingest is a named failure, not ImportError
+# ---------------------------------------------------------------------------
+
+
+class TestDailyIngestGuard:
+    """The overwrite must go through ``daily_ingest`` or refuse loudly."""
+
+    def test_missing_daily_ingest_raises_named_runtime_error(self, monkeypatch):
+        monkeypatch.delattr(data.ingestion, "daily_ingest", raising=False)
+
+        with pytest.raises(RuntimeError, match="daily_ingest") as excinfo:
+            dr._daily_ingest("amazingdata", ASSET, D)
+
+        message = str(excinfo.value)
+        assert "data.ingestion.daily_ingest" in message
+        assert "QUANT-40" in message
+        # The original ImportError stays attached for diagnosis.
+        assert isinstance(excinfo.value.__cause__, ImportError)
+
+    def test_guarded_failure_does_not_write_the_asset_layer(
+        self, monkeypatch, tmp_path
+    ):
+        """Log-first stays true: the log lands, the overwrite refuses."""
+        monkeypatch.delattr(data.ingestion, "daily_ingest", raising=False)
+        monkeypatch.setattr(
+            data.ingestion,
+            "get_primary_source",
+            lambda asset_type, *a, **k: "amazingdata",
+        )
+
+        with pytest.raises(RuntimeError, match="daily_ingest"):
+            dr.apply_corrections([_change()], data_root=tmp_path)
+
+        assert dr.correction_log_path(ASSET, D, tmp_path).is_file()

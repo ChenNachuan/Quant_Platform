@@ -22,13 +22,15 @@ detection / logging / marking code path only.
 ``data.ingestion.daily_ingest`` resolves at call time (:func:`_daily_ingest`)
 so this module stays importable on a tree where the ingest pipeline has not
 landed yet, and so a unit test can stand in a double without patching an
-import graph.
+import graph.  When it is genuinely absent the call raises a :class:`RuntimeError`
+that names it, rather than an opaque :class:`ImportError` from mid-write.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -42,6 +44,7 @@ __all__ = [
     "DEFAULT_LOOKBACK",
     "QUARTERLY_LOOKBACK",
     "MEDIUM_REL_DIFF",
+    "TOTAL_CHANGE_REL_DIFF",
     "ALERT_SEVERITIES",
     "SEVERITY_LOW",
     "SEVERITY_MEDIUM",
@@ -76,6 +79,12 @@ DEFAULT_LOOKBACK = 30
 #: Quarterly full-scan window, in trade dates — the long-tail fallback for
 #: revisions that arrive after the weekly window has moved on (§45.2).
 QUARTERLY_LOOKBACK = 250
+
+#: ``rel_diff`` recorded when one side of a comparison is absent — a value that
+#: appears from nothing, or vanishes, is a total change of that field.  Finite
+#: on purpose so the correction log stays strict JSON, and always clears
+#: ``MEDIUM_REL_DIFF`` (100% is not a minor correction).
+TOTAL_CHANGE_REL_DIFF = 1.0
 
 #: Relative difference above which a correction is MEDIUM (§45.4).
 MEDIUM_REL_DIFF = 0.01
@@ -200,6 +209,21 @@ def _rel_diff(old: float, new: float) -> float:
     return abs(new - old) / max(abs(old), 1e-9)
 
 
+def _is_missing(value: Any) -> bool:
+    """True for NaN / None / NaT — a side that has no value to compare."""
+    import pandas as pd
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _jsonable(value: float) -> float | None:
+    """NaN / Inf → ``null`` so the JSONL logs stay strict JSON."""
+    return value if math.isfinite(value) else None
+
+
 def compare_frames(
     df_old: Any,
     df_new: Any,
@@ -208,31 +232,69 @@ def compare_frames(
 ) -> list[FieldChange]:
     """Row-diff two normalised frames against :data:`CORRECTION_TOLERANCES`.
 
-    Only the four tolerance fields are compared; a field either frame does
-    not carry is skipped rather than treated as a zero.
+    An **outer** merge on ``(ticker, trade_date)`` with an indicator, so two
+    classes of real correction are not silently dropped:
+
+    * **one-sided rows** — a ticker the source backfilled (``right_only``) or
+      removed (``left_only``);
+    * **NaN ↔ value** — a field that was missing and got filled in, or cleared.
+
+    Both are recorded as a total change of that field
+    (:data:`TOTAL_CHANGE_REL_DIFF`).  Two populated values are compared against
+    the field's tolerance as usual.  Only the four tolerance fields are
+    compared; a field either frame does not carry is skipped rather than
+    treated as a zero.
     """
     import pandas as pd
 
     old = pd.DataFrame(df_old)
     new = pd.DataFrame(df_new)
-    if old.empty or new.empty:
+    if old.empty and new.empty:
         return []
 
     key = ["ticker", "trade_date"]
     if any(c not in old.columns or c not in new.columns for c in key):
         raise ValueError(f"frames must carry {key} to be compared")
 
-    merged = old.merge(new, on=key, suffixes=("_old", "_new"), how="inner")
+    # `indicator=` (not `indicator=True`) names the column explicitly: the
+    # default `_merge` is invisible to `itertuples`, which renames `_`-prefixed
+    # fields.  Outer is the point — inner would drop exactly the rows below.
+    merged = old.merge(
+        new, on=key, suffixes=("_old", "_new"), how="outer", indicator="merge_state"
+    )
     changes: list[FieldChange] = []
 
     for field_name, tol in CORRECTION_TOLERANCES.items():
         old_col, new_col = f"{field_name}_old", f"{field_name}_new"
         if old_col not in merged.columns or new_col not in merged.columns:
             continue
-        pair = merged[key + [old_col, new_col]].dropna()
-        for row in pair.itertuples(index=False):
-            old_value = float(getattr(row, old_col))
-            new_value = float(getattr(row, new_col))
+        for row in merged.itertuples(index=False):
+            old_raw = getattr(row, old_col)
+            new_raw = getattr(row, new_col)
+            old_missing = _is_missing(old_raw)
+            new_missing = _is_missing(new_raw)
+            if old_missing and new_missing:
+                continue
+
+            if old_missing or new_missing:
+                # One side has no value: a backfill, a removal, or a fill.
+                present = new_raw if old_missing else old_raw
+                changes.append(
+                    FieldChange(
+                        ticker=str(row.ticker),
+                        field=field_name,
+                        old_value=float("nan") if old_missing else float(old_raw),
+                        new_value=float("nan") if new_missing else float(new_raw),
+                        abs_diff=abs(float(present)),
+                        rel_diff=TOTAL_CHANGE_REL_DIFF,
+                        asset_type=asset_type,
+                        trade_date=trade_date,
+                    )
+                )
+                continue
+
+            old_value = float(old_raw)
+            new_value = float(new_raw)
             abs_diff = abs(new_value - old_value)
             if abs_diff <= tol:
                 continue
@@ -316,10 +378,10 @@ def _append_correction_log(
                         "trade_date": str(record.trade_date),
                         "ticker": change.ticker,
                         "field": change.field,
-                        "old": change.old_value,
-                        "new": change.new_value,
-                        "abs_diff": change.abs_diff,
-                        "rel_diff": change.rel_diff,
+                        "old": _jsonable(change.old_value),
+                        "new": _jsonable(change.new_value),
+                        "abs_diff": _jsonable(change.abs_diff),
+                        "rel_diff": _jsonable(change.rel_diff),
                     },
                     ensure_ascii=False,
                 )
@@ -336,8 +398,22 @@ def _daily_ingest(source: str, asset_type: str, trade_date: date) -> None:
     unimportable on a tree where it is absent.  The order guarantee in
     :func:`apply_corrections` is that this runs *after* the correction log is
     on disk.
+
+    When the pipeline is not on the tree this raises :class:`RuntimeError`
+    naming the missing function — never a bare :class:`ImportError` from
+    inside a write sequence, and never a silent skip.  A correction must
+    overwrite through ``daily_ingest`` (DQC, raw and watermark all have to see
+    the corrected batch); a direct Parquet write is not a fallback.
     """
-    from data.ingestion import daily_ingest
+    try:
+        from data.ingestion import daily_ingest
+    except ImportError as exc:
+        raise RuntimeError(
+            "data.ingestion.daily_ingest is not available on this tree; "
+            "apply_corrections must overwrite through the full ingest pipeline "
+            "and will not write the asset layer directly. Land the ingest "
+            "pipeline (QUANT-40 daily_ingest) before applying corrections."
+        ) from exc
 
     daily_ingest(source=source, asset_type=asset_type, trade_date=trade_date)
 
