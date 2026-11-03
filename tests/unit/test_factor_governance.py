@@ -16,11 +16,13 @@ import pytest
 from research.factor_governance import (
     CORR_MAX,
     EXIT_IC_THRESHOLD,
+    EXIT_RATIO,
     EXIT_T_THRESHOLD,
     GATE_IC_MIN,
     GATE_IR_MIN,
     GATE_T_BASE,
     META_FIELDS,
+    WINDOW_12M,
     check_admission,
     check_factor_health,
     evaluate_factor,
@@ -114,10 +116,25 @@ class TestExitLine:
         assert check_factor_health(ic) == "healthy"
 
     def test_rolling_t_below_threshold_exits(self):
-        """trailing-36m t < 1.5 fires exit even when mean IC is fine."""
-        # 100 obs at 1.0 (inflates full mean above 0.03), then 756
-        # alternating ±0.1 (mean 0, std 0.1 → t = 0 < 1.5).
-        ic = pd.Series([1.0] * 100 + [0.1, -0.1] * 378)
+        """trailing-36m t < 1.5 fires exit even when mean IC is fine.
+
+        The series must not also trip the relative-decay exit — otherwise
+        the case passes with the t trigger disabled and the ac-2 rolling-t
+        line is unpinned.  Decay is held off: recent_6m == recent_12m ==
+        mean, so the t trigger is the only exit route.
+        """
+        # 756 obs of (0.97, -0.87) pairs: mean 0.05, std ~0.92
+        # → t = mean/std*sqrt(756) ≈ 1.493 < 1.5.
+        ic = pd.Series([0.97, -0.87] * 378)
+        window = ic.tail(756)
+        w_mean, w_std = float(window.mean()), float(window.std())
+        t_val = w_mean / w_std * math.sqrt(len(window))
+        mean = float(ic.mean())
+        assert mean >= EXIT_IC_THRESHOLD  # IC line does not fire
+        assert 1.4 < t_val < EXIT_T_THRESHOLD  # t line fires, near boundary
+        assert (
+            float(ic.tail(WINDOW_12M).mean()) >= EXIT_RATIO * mean
+        )  # decay line cannot fire
         assert check_factor_health(ic) == "exit"
 
     def test_zero_std_window_does_not_fire_t(self):
