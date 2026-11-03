@@ -374,11 +374,12 @@ class TestDetectRedundantFactors:
 
     @staticmethod
     def _make_matrix():
-        """3 dates × 4 tickers, 3 factors with controlled correlations.
+        """3 dates × 4 tickers, 4 factors with controlled correlations.
 
         f1 and f2: rank order identical → Spearman = 1.0 each date.
-        f1 and f3: slight permutation → Spearman ≈ 0.8 each date.
-        f2 and f3: different rank → Spearman ≈ 0.8 each date.
+        f1 and f3: fully reversed (f3 = 5 - f1) → Spearman = -1.0 each date.
+        f1 and f4: slight permutation → Spearman ≈ 0.8 each date.
+        f2 and f4: different rank → Spearman ≈ 0.8 each date.
         """
         rows = []
         for d in ["2024-01-01", "2024-01-02", "2024-01-03"]:
@@ -389,7 +390,8 @@ class TestDetectRedundantFactors:
                         "ticker": t,
                         "f1": float(i + 1),
                         "f2": float(i + 1),
-                        "f3": float([1, 2, 4, 3][i]),
+                        "f3": float(5 - (i + 1)),
+                        "f4": float([1, 2, 4, 3][i]),
                     }
                 )
         return pd.DataFrame(rows)
@@ -401,11 +403,19 @@ class TestDetectRedundantFactors:
         assert ("f1", "f2") in pairs
 
     def test_sorted_by_abs_corr_descending(self):
+        """Sort key is |corr|, not signed corr."""
         fm = self._make_matrix()
         result = detect_redundant_factors(fm, threshold=0.7)
         assert len(result) >= 2
         abs_corrs = [abs(c) for _, _, c in result]
         assert abs_corrs == sorted(abs_corrs, reverse=True)
+        # The -1.0 pairs (f1,f3)/(f2,f3) must outrank every +0.8 pair: a
+        # signed sort key drops them to the back and would survive every
+        # assertion above on all-positive data.
+        neg_idx = [i for i, x in enumerate(result) if x[2] < 0 and abs(x[2]) == 1.0]
+        low_idx = [i for i, x in enumerate(result) if abs(x[2]) < 0.9]
+        assert neg_idx and low_idx  # both a -1.0 pair and a +0.8 pair exist
+        assert max(neg_idx) < min(low_idx)
 
     def test_threshold_strict(self):
         """abs(mean) == threshold must NOT be included (strict >)."""
@@ -433,6 +443,7 @@ class TestDetectRedundantFactors:
             "f1": float("nan"),
             "f2": float("nan"),
             "f3": float("nan"),
+            "f4": float("nan"),
         }
         fm2 = pd.concat([fm, pd.DataFrame([nan_row])], ignore_index=True)
         r1 = detect_redundant_factors(fm, threshold=0.7)
