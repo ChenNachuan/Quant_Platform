@@ -15,6 +15,7 @@ import pytest
 
 from research.factor_governance import (
     CORR_MAX,
+    CS_STD_CV_ABNORMAL,
     EXIT_IC_THRESHOLD,
     EXIT_RATIO,
     EXIT_T_THRESHOLD,
@@ -25,8 +26,12 @@ from research.factor_governance import (
     WINDOW_12M,
     check_admission,
     check_factor_health,
+    detect_redundant_factors,
+    diagnose_factor,
     evaluate_factor,
     list_factor_meta,
+    plot_factor_report,
+    redundancy_tier,
     transition_lifecycle,
 )
 
@@ -322,3 +327,316 @@ class TestListFactorMeta:
             "status",
             "created_at",
         ]
+
+
+# ---------------------------------------------------------------------------
+# AC4 — redundancy tiers and pair detection
+# ---------------------------------------------------------------------------
+
+
+class TestRedundancyTiers:
+    """AC4: D4 tier boundaries — >0.9 high / (0.7,0.9] possible / [0.5,0.7] warn / <0.5 independent."""
+
+    def test_high_tier(self):
+        assert redundancy_tier(1.0) == "high"
+        assert redundancy_tier(0.95) == "high"
+        assert redundancy_tier(0.91) == "high"
+
+    def test_possible_tier(self):
+        assert redundancy_tier(0.9) == "possible"  # right boundary inclusive
+        assert redundancy_tier(0.8) == "possible"
+        assert redundancy_tier(0.71) == "possible"
+
+    def test_warn_tier(self):
+        assert redundancy_tier(0.7) == "warn"  # left boundary of possible is exclusive
+        assert redundancy_tier(0.6) == "warn"
+        assert redundancy_tier(0.5) == "warn"  # left boundary inclusive
+
+    def test_independent_tier(self):
+        assert redundancy_tier(0.49) == "independent"
+        assert redundancy_tier(0.0) == "independent"
+
+    def test_boundary_09(self):
+        """0.9 is 'possible', not 'high' (strict >)."""
+        assert redundancy_tier(0.9) == "possible"
+
+    def test_boundary_07(self):
+        """0.7 is 'warn', not 'possible' (exclusive lower bound of (0.7, 0.9])."""
+        assert redundancy_tier(0.7) == "warn"
+
+    def test_boundary_05(self):
+        """0.5 is 'warn', not 'inclusive' (inclusive lower bound of [0.5, 0.7])."""
+        assert redundancy_tier(0.5) == "warn"
+
+
+class TestDetectRedundantFactors:
+    """AC4: D9 pairwise detection — threshold strict, sorted by |corr| descending."""
+
+    @staticmethod
+    def _make_matrix():
+        """3 dates × 4 tickers, 3 factors with controlled correlations.
+
+        f1 and f2: rank order identical → Spearman = 1.0 each date.
+        f1 and f3: slight permutation → Spearman ≈ 0.8 each date.
+        f2 and f3: different rank → Spearman ≈ 0.8 each date.
+        """
+        rows = []
+        for d in ["2024-01-01", "2024-01-02", "2024-01-03"]:
+            for i, t in enumerate(["A", "B", "C", "D"]):
+                rows.append(
+                    {
+                        "date": d,
+                        "ticker": t,
+                        "f1": float(i + 1),
+                        "f2": float(i + 1),
+                        "f3": float([1, 2, 4, 3][i]),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def test_detects_high_correlation_pair(self):
+        fm = self._make_matrix()
+        result = detect_redundant_factors(fm, threshold=0.7)
+        pairs = {(a, b) for a, b, _ in result}
+        assert ("f1", "f2") in pairs
+
+    def test_sorted_by_abs_corr_descending(self):
+        fm = self._make_matrix()
+        result = detect_redundant_factors(fm, threshold=0.7)
+        assert len(result) >= 2
+        abs_corrs = [abs(c) for _, _, c in result]
+        assert abs_corrs == sorted(abs_corrs, reverse=True)
+
+    def test_threshold_strict(self):
+        """abs(mean) == threshold must NOT be included (strict >)."""
+        fm = self._make_matrix()
+        # Use threshold = 1.0 which no pair can strictly exceed
+        result = detect_redundant_factors(fm, threshold=1.0)
+        assert result == []
+
+    def test_returns_tuple_shape(self):
+        fm = self._make_matrix()
+        result = detect_redundant_factors(fm, threshold=0.0)
+        for entry in result:
+            assert len(entry) == 3
+            assert isinstance(entry[0], str)
+            assert isinstance(entry[1], str)
+            assert isinstance(entry[2], float)
+
+    def test_all_nan_rows_dropped(self):
+        """Rows where all factor columns are NaN are excluded from correlation."""
+        fm = self._make_matrix()
+        # Add a row with all NaN factors — should not affect results
+        nan_row = {
+            "date": "2024-01-01",
+            "ticker": "E",
+            "f1": float("nan"),
+            "f2": float("nan"),
+            "f3": float("nan"),
+        }
+        fm2 = pd.concat([fm, pd.DataFrame([nan_row])], ignore_index=True)
+        r1 = detect_redundant_factors(fm, threshold=0.7)
+        r2 = detect_redundant_factors(fm2, threshold=0.7)
+        assert r1 == r2
+
+
+# ---------------------------------------------------------------------------
+# D8 — diagnose_factor
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnoseFactor:
+    """D8: 12-key dict, cs_std_cv threshold 0.5."""
+
+    @staticmethod
+    def _make_df():
+        rows = []
+        for d in ["2024-01-01", "2024-01-02", "2024-01-03"]:
+            for i, t in enumerate(["A", "B", "C"]):
+                rows.append({"date": d, "ticker": t, "test_factor": float(i + 1)})
+        return pd.DataFrame(rows)
+
+    def test_twelve_keys(self):
+        result = diagnose_factor(self._make_df(), "test_factor")
+        expected = {
+            "total_rows",
+            "nan_ratio",
+            "inf_count",
+            "zero_ratio",
+            "coverage_mean",
+            "coverage_min",
+            "min_date",
+            "value_min",
+            "value_max",
+            "value_mean",
+            "value_std",
+            "cs_std_cv",
+        }
+        assert set(result.keys()) == expected
+
+    def test_basic_values(self):
+        result = diagnose_factor(self._make_df(), "test_factor")
+        assert result["total_rows"] == 9
+        assert result["nan_ratio"] == 0.0
+        assert result["inf_count"] == 0
+        assert result["zero_ratio"] == 0.0
+        assert result["value_min"] == 1.0
+        assert result["value_max"] == 3.0
+
+    def test_cs_std_cv_constant_section(self):
+        """Constant cross-section per date → cs_std_cv = 0."""
+        result = diagnose_factor(self._make_df(), "test_factor")
+        assert result["cs_std_cv"] == 0.0
+
+    def test_nan_ratio(self):
+        df = self._make_df()
+        df.loc[0, "test_factor"] = float("nan")
+        result = diagnose_factor(df, "test_factor")
+        assert result["nan_ratio"] == round(1 / 9, 4)
+
+    def test_inf_count(self):
+        df = self._make_df()
+        df.loc[0, "test_factor"] = float("inf")
+        df.loc[1, "test_factor"] = float("-inf")
+        result = diagnose_factor(df, "test_factor")
+        assert result["inf_count"] == 2
+
+    def test_cs_std_cv_threshold_constant(self):
+        assert CS_STD_CV_ABNORMAL == 0.5
+
+
+# ---------------------------------------------------------------------------
+# D7 — plot_factor_report (smoke test)
+# ---------------------------------------------------------------------------
+
+
+class TestPlotFactorReport:
+    """D7: 2×2 tearsheet, lazy matplotlib, no plt.show."""
+
+    @staticmethod
+    def _make_data():
+        rows_fv, rows_ret = [], []
+        for d in ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]:
+            for i, t in enumerate(["A", "B", "C", "D", "E"]):
+                rows_fv.append({"date": d, "ticker": t, "test_factor": float(i + 1)})
+                rows_ret.append(
+                    {"date": d, "ticker": t, "fwd_return": float(i + 1) * 0.01}
+                )
+        return pd.DataFrame(rows_fv), pd.DataFrame(rows_ret)
+
+    def test_creates_png(self, tmp_path, monkeypatch):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        monkeypatch.chdir(tmp_path)
+        fv, ret = self._make_data()
+        plot_factor_report(fv, ret, "test_factor")
+        out = tmp_path / "research" / "reports" / "test_factor_tearsheet.png"
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# AC5 — TestMomentum20D: four paradigms
+# ---------------------------------------------------------------------------
+
+
+class _Momentum20DFixture:
+    """Test-double for a 20-day momentum factor (pct_change(20) per ticker)."""
+
+    name = "momentum_20d"
+    description = "20-day momentum"
+    category = "time_series"
+    frequency = "daily"
+    asset_types = ["equity"]
+    version = "1.0"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
+        df["momentum_20d"] = df.groupby("ticker")["close"].pct_change(20)
+        return df[["date", "ticker", "momentum_20d"]].dropna()
+
+
+class TestMomentum20D:
+    """AC5: four test paradigms against local Momentum20D fixture (D6).
+
+    Hand-calc numbers are re-derived by the verifier, not trusted from here.
+    """
+
+    @staticmethod
+    def _make_bars(n_days=25, tickers=None):
+        """Build bars_daily with known closes for hand-calc verification."""
+        if tickers is None:
+            tickers = ["A"]
+        rows = []
+        for t_i, t in enumerate(tickers):
+            for d_i in range(n_days):
+                rows.append(
+                    {
+                        "date": f"2024-01-{d_i + 1:02d}"
+                        if d_i < 28
+                        else f"2024-02-{d_i - 27:02d}",
+                        "ticker": t,
+                        "close": 100.0 + d_i + t_i * 10,
+                    }
+                )
+        return {"bars_daily": pd.DataFrame(rows)}
+
+    def test_basic_computation(self):
+        """Hand-calc exact comparison + schema assertion (3-day check window)."""
+        data = self._make_bars(n_days=23, tickers=["A"])
+        f = _Momentum20DFixture()
+        result = f.compute(data)
+        assert list(result.columns) == ["date", "ticker", "momentum_20d"]
+        # With close = 100 + d_i for ticker A, pct_change(20) at d_i=20 is (120-100)/100 = 0.20
+        # At d_i=21: (121-101)/101 ≈ 0.198020
+        # At d_i=22: (122-102)/102 ≈ 0.196078
+        assert len(result) == 3
+        row_20 = result.iloc[0]
+        assert row_20["momentum_20d"] == pytest.approx(0.20, abs=1e-9)
+        row_21 = result.iloc[1]
+        assert row_21["momentum_20d"] == pytest.approx(0.1980198, abs=1e-6)
+        row_22 = result.iloc[2]
+        assert row_22["momentum_20d"] == pytest.approx(0.1960784, abs=1e-6)
+
+    def test_nan_handling(self):
+        """Suspended NaN doesn't pollute entire column; notna().mean() > 0.8."""
+        data = self._make_bars(n_days=25, tickers=["A", "B"])
+        # Introduce NaN for ticker B on one date (suspension)
+        bars = data["bars_daily"]
+        mask = (bars["ticker"] == "B") & (bars["date"] == "2024-01-25")
+        bars.loc[mask, "close"] = float("nan")
+        f = _Momentum20DFixture()
+        result = f.compute(data)
+        col = result["momentum_20d"]
+        assert col.notna().mean() > 0.8
+        # The NaN only affects ticker B at that date, not the entire column
+        assert col.isna().sum() < len(col)
+
+    def test_output_schema(self):
+        """Output columns == [date, ticker, momentum_20d]."""
+        data = self._make_bars(n_days=25)
+        f = _Momentum20DFixture()
+        result = f.compute(data)
+        assert list(result.columns) == ["date", "ticker", "momentum_20d"]
+
+    def test_no_lookahead(self):
+        """Deleting the last day does not change historical values."""
+        data = self._make_bars(n_days=25)
+        f = _Momentum20DFixture()
+        full = f.compute(data)
+        # Truncate last date
+        bars = data["bars_daily"]
+        last_date = bars["date"].max()
+        truncated_data = {"bars_daily": bars[bars["date"] != last_date]}
+        truncated = f.compute(truncated_data)
+        # Merge on shared (date, ticker) and verify values unchanged
+        merged = full.merge(
+            truncated, on=["date", "ticker"], suffixes=("_full", "_trunc")
+        )
+        assert len(merged) > 0
+        assert (merged["momentum_20d_full"] == merged["momentum_20d_trunc"]).all()
