@@ -270,6 +270,29 @@ class TestEvaluateFactor:
         assert result["ic_ir"] == 0.0
         assert result["ic_t"] == 0.0
 
+    def test_n_periods_excludes_nan_ic(self):
+        """Dates that produce NaN IC must not inflate n_periods.
+
+        Date 1: 3 tickers → well-defined Spearman IC.  Date 2: 1 ticker
+        → Spearman undefined (NaN).  n_periods must be 1, not 2.
+        """
+        rows_fv = [
+            {"date": "2024-01-01", "ticker": "A", "test_factor": 1.0},
+            {"date": "2024-01-01", "ticker": "B", "test_factor": 2.0},
+            {"date": "2024-01-01", "ticker": "C", "test_factor": 3.0},
+            {"date": "2024-01-02", "ticker": "A", "test_factor": 1.0},
+        ]
+        rows_ret = [
+            {"date": "2024-01-01", "ticker": "A", "fwd_return": 0.01},
+            {"date": "2024-01-01", "ticker": "B", "fwd_return": 0.02},
+            {"date": "2024-01-01", "ticker": "C", "fwd_return": 0.03},
+            {"date": "2024-01-02", "ticker": "A", "fwd_return": 0.01},
+        ]
+        fv = pd.DataFrame(rows_fv)
+        ret = pd.DataFrame(rows_ret)
+        result = evaluate_factor(fv, ret, "test_factor")
+        assert result["n_periods"] == 1, "NaN-IC date must not count toward n_periods"
+
 
 # ---------------------------------------------------------------------------
 # list_factor_meta

@@ -144,7 +144,7 @@ def evaluate_factor(
         lambda g: g[factor_name].corr(g["fwd_return"], method="spearman"),
         include_groups=False,
     )
-    n_periods = len(ic_series)
+    n_periods = int(ic_series.notna().sum())
     ic_mean = float(ic_series.mean())
     ic_std = float(ic_series.std())
     ic_ir = ic_mean / ic_std if ic_std > 0 else 0.0
