@@ -5,6 +5,8 @@ ac-2: every ``logs/runs/jobs.jsonl`` row carries the nine schema fields.
 ac-3: ``SUCCESS | FAILED | RETRY | SKIPPED`` are all reachable and recorded.
 ac-4: data-job failure -> later jobs ``SKIPPED`` + exactly one HIGH alert;
       signal-job failure -> hold the previous portfolio, never a liquidation.
+ac-6 (QUANT-49 T2): after the pipeline, ``data/ops/metrics.jsonl`` holds the
+      day's 12-row snapshot — the real ``health_check`` body inside the chain.
 
 Seam 1: a returned ``{"status": "HOLD"}`` maps to ``FAILED`` with no re-retry.
 Seam 3: a ``SKIPPED`` signal job also holds. Review gap (T1): the hold path
@@ -14,10 +16,14 @@ also writes the downstream ``SKIPPED`` rows.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 
+import ops.alerting as alerting
+import ops.monitoring as monitoring
 import ops.scheduler as scheduler
+from ops.monitoring import STRATEGY_METRICS, SYSTEM_METRICS
 from ops.scheduler import JOB_ORDER, RUN_RECORD_FIELDS, RUN_STATUSES, daily_pipeline
 
 HOLD_MARKER = {
@@ -270,3 +276,82 @@ class TestFailurePropagation:
         ]
         assert markers == []  # signal succeeded -> no hold
         assert len(sent_alerts) == 1  # health_check's own failure alert
+
+
+class TestMetricsSnapshot:
+    """ac-6: ``daily_pipeline`` leaves the day's metrics snapshot on disk.
+
+    The chain runs the REAL ``health_check`` body (the only registry entry not
+    faked). The monitoring sources point at tmp: the run records this run
+    writes are the day's job rows (so the system metrics come from the chain
+    itself) and the lake is unreachable, which is the seam-6 fallback.
+    """
+
+    def test_daily_pipeline_lands_the_day_metrics_snapshot(
+        self, monkeypatch, tmp_path, jobs_log
+    ):
+        monkeypatch.setattr(
+            monitoring, "METRICS_JSONL", tmp_path / "ops" / "metrics.jsonl"
+        )
+        monkeypatch.setattr(monitoring, "JOURNAL_DIR", tmp_path / "journal")
+        monkeypatch.setattr(monitoring, "SIGNALS_DIR", tmp_path / "signals")
+        monkeypatch.setattr(monitoring, "JOBS_JSONL", jobs_log)  # this run's rows
+        monkeypatch.setattr(
+            monitoring, "RISK_AUDIT_JSONL", tmp_path / "risk_audit.jsonl"
+        )
+        monkeypatch.setattr(monitoring, "DATA_ROOT", str(tmp_path / "asset"))
+        alert_calls: list[tuple] = []
+        monkeypatch.setattr(
+            alerting,
+            "send_alert",
+            lambda level, msg, **kw: alert_calls.append((level, kw)),
+        )
+        _install(
+            monkeypatch,
+            fetch_stock_daily=lambda: "fetched",
+            compute_all=lambda: "45 factors",
+            run_daily_signal=lambda: {"status": "OK", "portfolio": "new"},
+            write_daily_report=lambda: "daily report written",
+        )
+        daily_pipeline()
+
+        metrics_path = monitoring.METRICS_JSONL
+        rows = [
+            json.loads(line)
+            for line in metrics_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(rows) == 12
+        assert {r["date"] for r in rows} == {date.today().isoformat()}
+        assert [r["name"] for r in rows] == list(STRATEGY_METRICS) + list(
+            SYSTEM_METRICS
+        )
+        by_name = {r["name"]: r for r in rows}
+        # This run's three earlier jobs succeeded before health_check read the
+        # records — its own row lands after the body returns.
+        assert by_name["job_success_rate_7d"]["value"] == 1.0
+        assert by_name["job_success_rate_7d"]["status"] == "ok"
+        assert by_name["pipeline_duration_min"]["status"] == "ok"
+        assert by_name["pipeline_duration_min"]["value"] is not None
+        # No lake at the tmp root -> seam-6 fallback for both data metrics.
+        assert by_name["data_delay_days"] == {
+            "date": by_name["data_delay_days"]["date"],
+            "ts": by_name["data_delay_days"]["ts"],
+            "scope": "system",
+            "name": "data_delay_days",
+            "value": None,
+            "status": "MEDIUM",
+        }
+        assert by_name["data_count_deviation"]["value"] is None
+        assert by_name["data_count_deviation"]["status"] == "MEDIUM"
+        # No journal / eval sources -> the 8 strategy metrics fall back too.
+        for name in STRATEGY_METRICS:
+            assert by_name[name]["value"] is None
+            assert by_name[name]["status"] == "warning"
+        # A quiet day sends nothing; the health_check run record carries the
+        # summary the body returned.
+        assert alert_calls == []
+        run_rows = _read_rows()
+        assert [r["job_name"] for r in run_rows] == list(JOB_ORDER)
+        assert all(r["status"] == "SUCCESS" for r in run_rows)
+        health_row = run_rows[JOB_ORDER.index("health_check")]
+        assert "12 rows" in health_row["output_summary"]
