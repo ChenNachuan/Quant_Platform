@@ -374,6 +374,86 @@ class TestBuildFeatureMatrix:
         with pytest.raises(ValueError, match="unknown source"):
             build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
 
+    def test_factor_source_with_mock(self, monkeypatch):
+        """source=factor reads from load_factor and applies transform."""
+        import datetime
+
+        factor_df = pd.DataFrame(
+            {
+                "date": [
+                    datetime.date(2024, 1, 2),
+                    datetime.date(2024, 1, 3),
+                    datetime.date(2024, 1, 4),
+                ],
+                "ticker": ["A", "A", "A"],
+                "momentum": [0.1, 0.2, 0.3],
+            }
+        )
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir=""):
+            assert name == "momentum"
+            return factor_df.copy()
+
+        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        specs = [{"source": "factor", "name": "momentum", "transform": "zscore_cs"}]
+        result = build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+        assert "feat_0" in result.columns
+        assert len(result) == 3
+
+    def test_mixed_sources_date_normalisation(self, monkeypatch):
+        """source=factor (datetime.date) + source=raw (str dates) join correctly.
+
+        Regression test for Review finding 1: mixed date types silently
+        doubled rows before the fix.
+        """
+        import datetime
+
+        factor_df = pd.DataFrame(
+            {
+                "date": [
+                    datetime.date(2024, 1, 2),
+                    datetime.date(2024, 1, 3),
+                    datetime.date(2024, 1, 4),
+                ],
+                "ticker": ["A", "A", "A"],
+                "momentum": [0.1, 0.2, 0.3],
+            }
+        )
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir=""):
+            return factor_df.copy()
+
+        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+                "ticker": ["A", "A", "A"],
+                "close": [10.0, 11.0, 12.0],
+            }
+        )
+        specs = [
+            {"source": "factor", "name": "momentum", "transform": "none"},
+            {"source": "raw", "field": "close", "transform": "zscore_cs"},
+        ]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-04", bars=bars
+        )
+        # Must be 3 rows (one per date), not 6 (doubled by type mismatch).
+        assert len(result) == 3
+        assert "feat_0" in result.columns
+        assert "feat_1" in result.columns
+
+    def test_factor_empty_raises(self, monkeypatch):
+        """source=factor with no data raises ValueError."""
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir=""):
+            return pd.DataFrame(columns=["date", "ticker", name])
+
+        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        specs = [{"source": "factor", "name": "momentum", "transform": "none"}]
+        with pytest.raises(ValueError, match="no data"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
 
 # ---------------------------------------------------------------------------
 # transform_bars (ac-2)

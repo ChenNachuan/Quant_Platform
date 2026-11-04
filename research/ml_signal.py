@@ -308,6 +308,11 @@ def build_feature_matrix(
         else:
             raise ValueError(f"spec[{i}] has unknown source: {source!r}")
 
+    # Normalise date to pd.Timestamp before joining — load_factor returns
+    # datetime.date (date32) while bars may carry str or Timestamp.  Mixed
+    # types silently double rows or raise on merge.
+    frames = [f.assign(date=pd.to_datetime(f["date"])) for f in frames]
+
     # Outer-join on (date, ticker).
     merged = frames[0]
     for f in frames[1:]:
