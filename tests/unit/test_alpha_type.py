@@ -241,6 +241,13 @@ class TestLifecycleTransitions:
         with pytest.raises(ValueError, match="unknown lifecycle state"):
             transition_alpha_type(alpha, "active", registry_dir=registry_dir)
 
+    def test_publish_revalidates_recipe(self, registry_dir):
+        """Review fix 4: draft→published re-checks recipe completeness."""
+        alpha = self._make_alpha(registry_dir, "draft")
+        del alpha["signal_source"]  # break the recipe after creation
+        with pytest.raises(ValueError, match="missing required recipe field"):
+            transition_alpha_type(alpha, "published", registry_dir=registry_dir)
+
 
 # ---------------------------------------------------------------------------
 # AC4 — audit_log.jsonl append-only
@@ -328,13 +335,24 @@ class TestAuditLog:
         transition_alpha_type(alpha, "published", registry_dir=registry_dir)
         path = registry_dir / "audit_log.jsonl"
         lines = path.read_text(encoding="utf-8").strip().split("\n")
-        # create_alpha_type does not write audit (only transition does).
-        # transition writes one entry.
-        assert len(lines) >= 1
+        # create_alpha_type writes one entry; transition writes one more.
+        assert len(lines) == 2
         last = json.loads(lines[-1])
         assert last["action"] == "transition"
         assert last["from"] == "draft"
         assert last["to"] == "published"
+
+    def test_create_writes_audit(self, registry_dir):
+        """Review fix 3: creation is a state change and must be recorded."""
+        create_alpha_type(_VALID_RECIPE, registry_dir=registry_dir)
+        path = registry_dir / "audit_log.jsonl"
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["action"] == "create"
+        assert entry["alpha_type_id"] == "mom_20d"
+        assert entry["from"] is None
+        assert entry["to"] == "draft"
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +576,24 @@ class TestBuildPortfolio:
         weights = build_portfolio(signal, alpha)
         assert not weights.empty
         assert abs(weights["target_weight"].sum() - 1.0) < 1e-9  # 1/N * 4 = 1.0
+
+    def test_empty_result_triggers_fallback(self, monkeypatch):
+        """Review fix 1: solver succeeds but yields no rows → fallback."""
+        monkeypatch.setattr("research.alpha_type.send_alert", lambda *a, **kw: None)
+        alpha = {
+            "alpha_type_id": "bp_empty_res",
+            "params": {"weight_method": "top_k", "total_position": 1.0},
+            "rules": [],
+        }
+        signal = _make_signal(n=3)
+        # Solver returns empty (e.g. all scores NaN under proportional).
+        monkeypatch.setattr(
+            "research.alpha_type.signal_to_weights",
+            lambda *a, **kw: pd.DataFrame(columns=["date", "ticker", "target_weight"]),
+        )
+        weights = build_portfolio(signal, alpha)
+        assert not weights.empty
+        assert abs(weights["target_weight"].sum() - 1.0) < 1e-9
 
     def test_empty_signal_raises(self):
         alpha = {"alpha_type_id": "bp_empty", "params": {}}

@@ -275,11 +275,11 @@ def create_alpha_type(
     if any(r["alpha_type_id"] == alpha_id for r in records):
         raise ValueError(f"duplicate alpha_type_id: {alpha_id!r}")
 
-    # Build the 15-field meta-info record.
+    # Build the 15-field meta-info record (§65.2, field order from _META_FIELDS).
     now = _now_iso()
     tags = dict(alpha["tags"])
     tags["status"] = "draft"  # auto-seed status
-    record = {
+    _defaults = {
         "alpha_type_id": alpha_id,
         "name": alpha.get("name", alpha_id),
         "description": alpha.get("description", ""),
@@ -296,9 +296,25 @@ def create_alpha_type(
         "status": "draft",
         "config_snapshot": alpha.get("config_snapshot", ""),
     }
+    record = {f: _defaults[f] for f in _META_FIELDS}
 
     records.append(record)
     _save_alpha_types(d, records)
+
+    # Audit entry (D3): creation is a state change and must be recorded.
+    log_audit(
+        {
+            "action": "create",
+            "alpha_type_id": alpha_id,
+            "from": None,
+            "to": "draft",
+            "metrics": None,
+            "ts": now,
+            "actor": alpha.get("author", "system"),
+            "reason": "initial registration",
+        },
+        registry_dir=d,
+    )
     return record
 
 
@@ -378,6 +394,13 @@ def transition_alpha_type(
             f"legal: draft->published, published->production, "
             f"production->deprecated, deprecated->archived, x->draft"
         )
+
+    # draft→published precondition: recipe complete + tags full (D1).
+    if current == "draft" and target == "published":
+        for field in ("signal_source", "rules", "params"):
+            if field not in alpha:
+                raise ValueError(f"missing required recipe field: {field!r}")
+        _validate_tags(alpha.get("tags", {}), require_all=True)
 
     now = _now_iso()
 
@@ -648,13 +671,16 @@ def compute_turnover(
     new_weights: pd.DataFrame,
     old_weights: pd.DataFrame,
 ) -> float:
-    """Turnover = Σ|Δw| / 2 over the outer join (D9).
+    """Turnover = Σ|Δw| / 2 over the outer join on ticker (D9).
 
-    Frames are ``[date, ticker, target_weight]``.  Missing rows treated as 0.
+    Joins on ``ticker`` alone (not ``[date, ticker]``) so cross-date
+    comparisons work: the turnover question is "how much did the book
+    change", which compares weights per ticker across the two frames
+    regardless of their date labels.  Missing rows treated as 0.
     """
     merged = new_weights.merge(
         old_weights,
-        on=["date", "ticker"],
+        on=["ticker"],
         how="outer",
         suffixes=("_new", "_old"),
     )
@@ -711,7 +737,10 @@ def build_portfolio(
     try:
         weights = signal_to_weights(signal, method=method, k=k)
     except Exception:
-        # Equal-weight fallback: 1/N per date over signal's tickers.
+        weights = _equal_weight_fallback(signal)
+    # Never an empty book: solver may succeed but yield no rows (e.g. all
+    # scores NaN or non-positive under proportional).
+    if weights.empty:
         weights = _equal_weight_fallback(signal)
 
     # Scale by total_position.
