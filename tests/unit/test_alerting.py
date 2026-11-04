@@ -11,6 +11,7 @@ table's level + type (nulls never fire).
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -403,6 +404,18 @@ class TestConditions:
             )
             == []
         )
+        # NaN is pandas' missing marker and float() accepts it; every NaN
+        # comparison is False, so left unguarded each threshold check falls
+        # through to its breach branch and a gap fires all 7 numeric
+        # conditions. NaN must read as "no computable source", like None.
+        nan = float("nan")
+        assert evaluate_alerts({"data_delay_days": nan}) == []
+        assert evaluate_alerts({"mdd": nan, "backtest_mdd": 0.10}) == []
+        assert evaluate_alerts({"sharpe_6m": nan}) == []
+        assert evaluate_alerts({"excess_negative_months": nan}) == []
+        assert evaluate_alerts({"nav_daily_return": nan}) == []
+        assert evaluate_alerts({"turnover": nan}) == []
+        assert evaluate_alerts({"risk_reject_count": nan}) == []
 
     def test_partial_sources_do_not_fire(self):
         assert evaluate_alerts({"mdd": 0.9, "backtest_mdd": None}) == []
@@ -411,3 +424,44 @@ class TestConditions:
     def test_non_mapping_facts_are_rejected(self):
         with pytest.raises(TypeError):
             evaluate_alerts([1, 2, 3])
+
+
+# ---------------------------------------------------------------------------
+# Regression: a corrupt alerts.jsonl line must neither kill an escalation nor
+# be able to cost the day's history (review findings on _replace_row).
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptLogRobustness:
+    def test_corrupt_line_does_not_kill_an_upgrade(self):
+        send_alert("MEDIUM", "low", alert_type="nav_drop", alpha_type_id="alpha-x")
+        send_alert("HIGH", "other", alert_type="risk_reject", alpha_type_id="alpha-y")
+        with alerting.ALERTS_JSONL.open("a", encoding="utf-8") as fh:
+            fh.write('{"date": "2026-11-04", "lev')  # crash mid-append
+        reset_state()  # restart: the day reseeds from whatever parses
+        send_alert("CRITICAL", "up", alert_type="nav_drop", alpha_type_id="alpha-x")
+        rows = _rows()
+        assert len(rows) == 2  # the corrupt fragment is skipped, not carried
+        assert rows[0]["alert_type"] == "nav_drop"
+        assert rows[0]["level"] == "CRITICAL"
+        assert rows[0]["msg"] == "up"
+        assert rows[1]["alert_type"] == "risk_reject"
+        assert rows[1]["msg"] == "other"
+
+    def test_interrupted_rewrite_leaves_history_intact(self, monkeypatch):
+        send_alert("MEDIUM", "low", alert_type="nav_drop", alpha_type_id="alpha-x")
+        send_alert("HIGH", "other", alert_type="risk_reject", alpha_type_id="alpha-y")
+        before = alerting.ALERTS_JSONL.read_text(encoding="utf-8")
+
+        real_write_text = pathlib.Path.write_text
+
+        def crash_mid_write(self, data, **kwargs):
+            # Simulate dying halfway through the rewrite: the target this
+            # write touches is left truncated behind us.
+            real_write_text(self, data[: len(data) // 2], **kwargs)
+            raise OSError("simulated crash")
+
+        monkeypatch.setattr(pathlib.Path, "write_text", crash_mid_write)
+        with pytest.raises(OSError):
+            send_alert("CRITICAL", "up", alert_type="nav_drop", alpha_type_id="alpha-x")
+        assert alerting.ALERTS_JSONL.read_text(encoding="utf-8") == before

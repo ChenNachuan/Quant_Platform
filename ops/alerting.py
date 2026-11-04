@@ -18,8 +18,9 @@ evaluates and then sends each firing; the scheduler's direct job-failure
 alert converges on the same dedup key via ``alert_type="job_failure"`` and
 ``alpha_type_id=<job name>``.
 
-``evaluate_alerts`` facts contract — ``None`` or missing means "no computable
-source" and never fires (a non-numeric value is a caller bug and raises)::
+``evaluate_alerts`` facts contract — ``None``, NaN, or missing means "no
+computable source" and never fires (a non-numeric value is a caller bug and
+raises)::
 
     alpha_type_id           strategy scope for conditions 3-7
     failed_jobs             [{"job_name": str, "error": str | None}] -> cond 1
@@ -39,6 +40,7 @@ Alert row schema (pinned here per the issue's open items): ``date`` (ISO day),
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -73,11 +75,18 @@ RULE_TREND = "trend"
 
 
 def _num(facts: Mapping[str, Any], key: str) -> float | None:
-    """``facts[key]`` as a float; ``None`` means "no computable source"."""
+    """``facts[key]`` as a float; ``None`` means "no computable source".
+
+    NaN — pandas' missing marker, which ``float()`` accepts — is a missing
+    value, not a number, and maps to ``None`` too: every comparison against
+    NaN is False, so an unguarded NaN would fall through each threshold check
+    into its breach branch and fire the condition.
+    """
     raw = facts.get(key)
     if raw is None:
         return None
-    return float(raw)  # a non-numeric value is a caller contract violation
+    val = float(raw)  # a non-numeric value is a caller contract violation
+    return None if val != val else val  # NaN is the only value not equal to itself
 
 
 def _scope(facts: Mapping[str, Any]) -> str:
@@ -339,13 +348,24 @@ def log_alert(payload: dict) -> None:
 
 
 def _replace_row(key: str, payload: dict) -> None:
-    """Rewrite the key's single row in place (the severity-upgrade path)."""
+    """Rewrite the key's single row in place (the severity-upgrade path).
+
+    Corrupt lines are skipped the way ``_seed_state`` skips them — a partial
+    append must not kill the escalation — and the rewrite lands through
+    ``os.replace`` so an interrupted write can never truncate the day's
+    history.
+    """
     path = ALERTS_JSONL
-    rows = [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
     out: list[dict] = []
     replaced = False
     for row in rows:
@@ -357,7 +377,9 @@ def _replace_row(key: str, payload: dict) -> None:
     if not replaced:
         out.append(payload)
     text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in out)
-    path.write_text(text, encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _normalize_level(level: str | AlertLevel) -> AlertLevel:
