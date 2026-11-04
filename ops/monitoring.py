@@ -531,6 +531,28 @@ def _job_records() -> list[dict]:
     return rows
 
 
+def _run_day(started_at: Any) -> str | None:
+    """The reporting-day key for one run row's ``started_at`` stamp.
+
+    Run records carry UTC instants (``ops/scheduler.py`` stamps
+    ``datetime.now(timezone.utc).isoformat()``) while ``end_day`` is the local
+    reporting day (``health_check``'s ``date.today()``). Slicing the stamp's
+    date part compared a UTC date against a local one and dropped every row of
+    the day whenever the two calendars disagree (local 00:00-08:00 at UTC+8) —
+    so the instant is parsed and keyed to the reporting calendar instead.
+
+    A naive stamp is already reporting-local and keeps its date part; an
+    unparseable one falls back to the raw slice so the reader stays null-safe.
+    """
+    text = str(started_at or "")
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).astimezone().date().isoformat()
+    except ValueError:
+        return text[:10] or None
+
+
 def _job_metrics(records: list[dict], end_day: str) -> dict[str, Any]:
     """{success rate 7d, pipeline minutes, failed jobs} from the run records.
 
@@ -543,7 +565,7 @@ def _job_metrics(records: list[dict], end_day: str) -> dict[str, Any]:
     day_rows: list[dict] = []
     failed: list[tuple[str, str | None]] = []
     for row in records:
-        started = str(row.get("started_at") or "")[:10]
+        started = _run_day(row.get("started_at"))
         if not started:
             continue
         status = str(row.get("status") or "")

@@ -13,7 +13,9 @@ scheduler run records, risk_audit.jsonl, DataAPI bars_daily); the
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+import os
+import time
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -562,6 +564,79 @@ class TestSourceReaders:
         cell = collect_metrics(DAY)["strategy"]["mdd"]
         assert cell["value"] == pytest.approx(0.16)
         assert cell["status"] == "exit"
+
+
+# ---------------------------------------------------------------------------
+# Regression (QUANT-49): run rows are UTC instants — bucket them on the local
+# reporting day
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shanghai_tz():
+    """Pin the process clock to Asia/Shanghai (UTC+8) — the divergence window.
+
+    The bug needs a wall clock whose local date disagrees with the UTC date
+    (00:00-08:00 at UTC+8); pinning the TZ makes the case reproduce at any
+    hour on any runner. ``time.tzset`` is POSIX (macOS/Linux — this project's
+    runners); the previous TZ is restored in-process afterwards.
+    """
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Shanghai"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+class TestRunRowDayBucketing:
+    """A UTC-stamped run row buckets under the reporting day it ran in.
+
+    ``ops/scheduler.py`` stamps ``started_at`` with
+    ``datetime.now(timezone.utc)`` while ``health_check`` derives ``end_day``
+    from local ``date.today()``. ``_job_metrics`` used to slice the stamp's
+    UTC date part (``started_at[:10]``) and compare it to that local day, so
+    every row missed the bucket whenever the two calendars disagree
+    (00:00-08:00 at UTC+8) — ``pipeline_duration_min`` came back null and the
+    metric sank to MEDIUM while the ac-6 integration case demands ok.
+    """
+
+    def test_run_after_local_midnight_lands_in_the_reporting_day(
+        self, sources, shanghai_tz
+    ):
+        day = date.today().isoformat()  # the local reporting day
+        # 00:30 local at UTC+8 = 16:30Z on the PREVIOUS UTC date — a row whose
+        # UTC date part disagrees with the reporting day (the bug's trigger).
+        started = datetime.fromisoformat(f"{day}T00:30:00").astimezone(timezone.utc)
+        assert started.isoformat()[:10] != day  # the case really diverges
+        row = _job(day, "SUCCESS", job_name="fetch_stock_daily", duration_s=1800.0)
+        row["started_at"] = started.isoformat()
+        row["finished_at"] = started.isoformat()
+        _jobs(sources, [row])
+        system = collect_metrics(day)["system"]
+        assert system["pipeline_duration_min"]["value"] == pytest.approx(30.0)
+        assert system["pipeline_duration_min"]["status"] == "ok"
+        assert system["job_success_rate_7d"]["value"] == pytest.approx(1.0)
+        assert system["job_success_rate_7d"]["status"] == "ok"
+
+    def test_run_before_local_midnight_stays_on_its_own_day(self, sources, shanghai_tz):
+        day = date.today().isoformat()
+        # 23:30 local is 15:30Z on the SAME UTC date — the other side of the
+        # boundary: it must stay on today's bucket, never leak into tomorrow.
+        started = datetime.fromisoformat(f"{day}T23:30:00").astimezone(timezone.utc)
+        assert started.isoformat()[:10] == day
+        row = _job(day, "SUCCESS", job_name="compute_all", duration_s=600.0)
+        row["started_at"] = started.isoformat()
+        row["finished_at"] = started.isoformat()
+        _jobs(sources, [row])
+        system = collect_metrics(day)["system"]
+        assert system["pipeline_duration_min"]["value"] == pytest.approx(10.0)
+        assert system["pipeline_duration_min"]["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
