@@ -1,13 +1,18 @@
-"""Tests for research.ml_signal — MLSignalAdapter and smooth_signal.
+"""Tests for research.ml_signal — MLSignalAdapter, smooth_signal, feature versioning.
 
-Covers acceptance criteria ac-3 and ac-4 of QUANT-46:
+Covers acceptance criteria ac-2, ac-3, ac-4 of QUANT-46:
 
 * ``from_scores`` does per-date cross-sectional z-score; zero-std → 0.0
 * ``from_probabilities`` clips to [1e-6, 1-1e-6] → logit → cs z-score
 * ``smooth_signal`` does per-ticker EWM with halflife default 5
+* ``features_hash`` change → ``model_id`` different; sha256 over sorted specs + depends_hash
+* ``metadata.json`` carries ``model_id`` / ``features_hash``
 """
 
 from __future__ import annotations
+
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -18,7 +23,13 @@ from research.ml_signal import (
     PROB_CLIP_HIGH,
     PROB_CLIP_LOW,
     MLSignalAdapter,
+    build_feature_matrix,
+    features_hash,
+    model_id,
     smooth_signal,
+    transform_bars,
+    write_experiment,
+    write_model,
 )
 
 
@@ -316,3 +327,295 @@ class TestSmoothSignal:
         original = frame.copy()
         smooth_signal(frame)
         pd.testing.assert_frame_equal(frame, original)
+
+
+# ---------------------------------------------------------------------------
+# build_feature_matrix (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFeatureMatrix:
+    def test_raw_features(self, tmp_path):
+        """source=raw features with pct_change and zscore_cs transforms."""
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03", "2024-01-04"] * 2,
+                "ticker": ["A", "A", "A", "B", "B", "B"],
+                "close": [10.0, 11.0, 12.0, 20.0, 22.0, 24.0],
+            }
+        )
+        specs = [
+            {"source": "raw", "field": "close", "transform": "pct_change_1"},
+            {"source": "raw", "field": "close", "transform": "zscore_cs"},
+        ]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-04", bars=bars
+        )
+        assert "feat_0" in result.columns
+        assert "feat_1" in result.columns
+        assert len(result) == 6
+
+    def test_empty_specs_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            build_feature_matrix([], start="2024-01-02", end="2024-01-04")
+
+    def test_raw_requires_bars(self):
+        specs = [{"source": "raw", "field": "close", "transform": "zscore_cs"}]
+        with pytest.raises(ValueError, match="bars"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+    def test_factor_requires_name(self):
+        specs = [{"source": "factor", "transform": "zscore_cs"}]
+        with pytest.raises(ValueError, match="name"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+    def test_unknown_source_raises(self):
+        specs = [{"source": "bogus", "field": "close", "transform": "zscore_cs"}]
+        with pytest.raises(ValueError, match="unknown source"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+
+# ---------------------------------------------------------------------------
+# transform_bars (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestTransformBars:
+    def _bars(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03", "2024-01-04"] * 2,
+                "ticker": ["A", "A", "A", "B", "B", "B"],
+                "close": [10.0, 11.0, 12.0, 20.0, 22.0, 24.0],
+            }
+        )
+
+    def test_pct_change(self):
+        bars = self._bars()
+        result = transform_bars(bars, "close", "pct_change_1")
+        # Ticker A: [NaN, 0.1, 0.0909...]; Ticker B: [NaN, 0.1, 0.0909...]
+        assert pd.isna(result.iloc[0])
+        assert result.iloc[1] == pytest.approx(0.1)
+        assert result.iloc[2] == pytest.approx(1 / 11)
+
+    def test_zscore_cs(self):
+        bars = self._bars()
+        result = transform_bars(bars, "close", "zscore_cs")
+        # Date 1: [10, 20] → mean=15, std=7.071 → z=[-0.707, 0.707]
+        assert result.iloc[0] == pytest.approx(-0.7071067811865476)
+        assert result.iloc[3] == pytest.approx(0.7071067811865476)
+
+    def test_unknown_transform_raises(self):
+        bars = self._bars()
+        with pytest.raises(ValueError, match="unknown transform"):
+            transform_bars(bars, "close", "bogus")
+
+    def test_missing_field_raises(self):
+        bars = self._bars()
+        with pytest.raises(ValueError, match="missing column"):
+            transform_bars(bars, "open", "pct_change_1")
+
+    def test_bad_pct_change_period_raises(self):
+        bars = self._bars()
+        with pytest.raises(ValueError, match="pct_change"):
+            transform_bars(bars, "close", "pct_change_abc")
+
+
+# ---------------------------------------------------------------------------
+# features_hash (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestFeaturesHash:
+    def _spec(self, **kw) -> dict:
+        base = {"source": "raw", "field": "close", "transform": "pct_change_5"}
+        base.update(kw)
+        return base
+
+    def test_deterministic(self):
+        s = [self._spec()]
+        assert features_hash(s, []) == features_hash(s, [])
+
+    def test_spec_change_changes_hash(self):
+        h1 = features_hash([self._spec()], [])
+        h2 = features_hash([self._spec(transform="zscore_cs")], [])
+        assert h1 != h2
+
+    def test_dep_hash_change_changes_hash(self):
+        s = [self._spec(source="factor", name="momentum")]
+        h1 = features_hash(s, ["abc123"])
+        h2 = features_hash(s, ["def456"])
+        assert h1 != h2
+
+    def test_dep_hash_order_irrelevant(self):
+        s = [self._spec(source="factor", name="momentum")]
+        assert features_hash(s, ["abc", "def"]) == features_hash(s, ["def", "abc"])
+
+    def test_dep_hash_dedup(self):
+        s = [self._spec(source="factor", name="momentum")]
+        assert features_hash(s, ["abc", "abc"]) == features_hash(s, ["abc"])
+
+    def test_spec_order_irrelevant(self):
+        s1 = [self._spec(), self._spec(field="volume")]
+        s2 = [self._spec(field="volume"), self._spec()]
+        assert features_hash(s1, []) == features_hash(s2, [])
+
+    def test_sha256_format(self):
+        h = features_hash([self._spec()], [])
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_matches_manual_sha256(self):
+        """Verify the hash is exactly sha256(canonical_json + "|" + "|".join(sorted(deps)))."""
+        spec = {"source": "raw", "field": "close", "transform": "pct_change_5"}
+        specs = [spec]
+        deps = ["abc123", "def456"]
+        canonical = json.dumps(specs, sort_keys=True, separators=(",", ":"))
+        raw = canonical + "|" + "|".join(sorted(deps))
+        expected = hashlib.sha256(raw.encode()).hexdigest()
+        assert features_hash(specs, deps) == expected
+
+
+# ---------------------------------------------------------------------------
+# model_id (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestModelId:
+    def test_format(self):
+        mid = model_id("alpha", 1, 2, "2023-01-01", "2023-12-31", "abc")
+        assert mid == "alpha+v1.2(2023-01-01)+2023-12-31+abc"
+
+    def test_features_hash_change_changes_model_id(self):
+        m1 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", "hash1")
+        m2 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", "hash2")
+        assert m1 != m2
+
+    def test_full_pipeline_hash_change(self):
+        """specs change → features_hash change → model_id change (ac-2 assertion)."""
+        spec1 = [{"source": "raw", "field": "close", "transform": "pct_change_5"}]
+        spec2 = [{"source": "raw", "field": "close", "transform": "zscore_cs"}]
+        h1 = features_hash(spec1, [])
+        h2 = features_hash(spec2, [])
+        m1 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", h1)
+        m2 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", h2)
+        assert m1 != m2
+
+
+# ---------------------------------------------------------------------------
+# write_model (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteModel:
+    def _metadata(self, mid: str, feat_hash: str) -> dict:
+        return {
+            "model_id": mid,
+            "train_end": "2023-12-31",
+            "features_hash": feat_hash,
+            "metrics": {"sharpe": 1.5},
+            "random_seed": 42,
+            "deps": ["numpy==1.24"],
+            "features": ["feat_0", "feat_1"],
+            "date_range": ["2023-01-01", "2023-12-31"],
+            "hyperparams": {"lr": 0.01},
+        }
+
+    def test_writes_three_files(self, tmp_path):
+        spec = [{"source": "raw", "field": "close", "transform": "pct_change_5"}]
+        fh = features_hash(spec, [])
+        mid = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", fh)
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="fake_model",
+            config={"lr": 0.01},
+            metadata=self._metadata(mid, fh),
+            base_dir=str(tmp_path),
+        )
+        assert (out / "model.pkl").exists()
+        assert (out / "config.json").exists()
+        assert (out / "metadata.json").exists()
+
+    def test_metadata_carries_model_id_and_features_hash(self, tmp_path):
+        spec = [{"source": "raw", "field": "close", "transform": "pct_change_5"}]
+        fh = features_hash(spec, [])
+        mid = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", fh)
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="fake",
+            config={},
+            metadata=self._metadata(mid, fh),
+            base_dir=str(tmp_path),
+        )
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["model_id"] == mid
+        assert meta["features_hash"] == fh
+
+    def test_refuses_reject(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="fake",
+                config={},
+                metadata={},
+                verdict="REJECT",
+                base_dir=str(tmp_path),
+            )
+        assert not (tmp_path / "alpha").exists()
+
+    def test_pass_writes(self, tmp_path):
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="fake",
+            config={},
+            metadata={},
+            verdict="PASS",
+            base_dir=str(tmp_path),
+        )
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# write_experiment (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteExperiment:
+    def test_writes_two_files(self, tmp_path):
+        out = write_experiment(
+            "exp_001",
+            metrics={"sharpe": 1.5},
+            config={"lr": 0.01},
+            base_dir=str(tmp_path),
+        )
+        assert (out / "metrics.json").exists()
+        assert (out / "config.json").exists()
+
+    def test_metrics_carries_created_at(self, tmp_path):
+        out = write_experiment(
+            "exp_001",
+            metrics={"sharpe": 1.5},
+            config={},
+            base_dir=str(tmp_path),
+        )
+        m = json.loads((out / "metrics.json").read_text())
+        assert "created_at" in m
+        assert m["sharpe"] == 1.5
+
+    def test_config_carried(self, tmp_path):
+        out = write_experiment(
+            "exp_001",
+            metrics={},
+            config={"lr": 0.01},
+            base_dir=str(tmp_path),
+        )
+        c = json.loads((out / "config.json").read_text())
+        assert c["lr"] == 0.01
