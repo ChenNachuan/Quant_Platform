@@ -1,0 +1,1154 @@
+"""Tests for research.ml_signal — MLSignalAdapter, smooth_signal, feature versioning.
+
+Covers acceptance criteria ac-2, ac-3, ac-4 of QUANT-46:
+
+* ``from_scores`` does per-date cross-sectional z-score; zero-std → 0.0
+* ``from_probabilities`` clips to [1e-6, 1-1e-6] → logit → cs z-score
+* ``smooth_signal`` does per-ticker EWM with halflife default 5
+* ``features_hash`` change → ``model_id`` different; sha256 over sorted specs + depends_hash
+* ``metadata.json`` carries ``model_id`` / ``features_hash``
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from research.ml_signal import (
+    DEFAULT_HALFLIFE,
+    PROB_CLIP_HIGH,
+    PROB_CLIP_LOW,
+    MLSignalAdapter,
+    build_feature_matrix,
+    ensemble_models,
+    features_hash,
+    model_id,
+    sanity_check_ml_model,
+    smooth_signal,
+    transform_bars,
+    write_experiment,
+    write_model,
+)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _score_frame(
+    dates: list[str],
+    tickers: list[str],
+    scores: list[float],
+) -> pd.DataFrame:
+    """Build a ``[date, ticker, score]`` frame from parallel lists."""
+    return pd.DataFrame(
+        {"date": dates, "ticker": tickers, "score": [float(s) for s in scores]}
+    )
+
+
+def _prob_frame(
+    dates: list[str],
+    tickers: list[str],
+    probs: list[float],
+) -> pd.DataFrame:
+    """Build a ``[date, ticker, prob]`` frame from parallel lists."""
+    return pd.DataFrame(
+        {"date": dates, "ticker": tickers, "prob": [float(p) for p in probs]}
+    )
+
+
+# ---------------------------------------------------------------------------
+# from_scores (ac-3)
+# ---------------------------------------------------------------------------
+
+
+class TestFromScores:
+    def test_basic_zscore(self):
+        """Known input → known z-score output."""
+        frame = _score_frame(
+            ["2024-01-02"] * 4,
+            ["A", "B", "C", "D"],
+            [1.0, 2.0, 3.0, 4.0],
+        )
+        result = MLSignalAdapter.from_scores(frame)
+        # mean=2.5, std(ddof=1)=1.291..., z = (x-2.5)/1.291...
+        expected = np.array(
+            [
+                -1.161895003862225,
+                -0.3872983346207417,
+                0.3872983346207417,
+                1.161895003862225,
+            ]
+        )
+        np.testing.assert_allclose(result["score"].values, expected, rtol=1e-8)
+
+    def test_zero_std_returns_zeros(self):
+        """A date with zero cross-sectional std → all-zero scores, not NaN/inf."""
+        frame = _score_frame(
+            ["2024-01-02"] * 3,
+            ["A", "B", "C"],
+            [2.0, 2.0, 2.0],
+        )
+        result = MLSignalAdapter.from_scores(frame)
+        assert (result["score"] == 0.0).all()
+        assert not result["score"].isna().any()
+
+    def test_single_ticker_zero_std(self):
+        """Single ticker per date → zero score (no cross-sectional dispersion)."""
+        frame = _score_frame(["2024-01-02"], ["A"], [5.0])
+        result = MLSignalAdapter.from_scores(frame)
+        assert result["score"].iloc[0] == 0.0
+
+    def test_multiple_dates_independent(self):
+        """Each date is z-scored independently."""
+        frame = _score_frame(
+            ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"],
+            ["A", "B", "A", "B"],
+            [1.0, 3.0, 10.0, 20.0],
+        )
+        result = MLSignalAdapter.from_scores(frame)
+        # Date 1: mean=2, std=1.414..., z = [-0.707, 0.707]
+        # Date 2: mean=15, std=7.071..., z = [-0.707, 0.707]
+        d1 = result[result["date"] == "2024-01-02"]["score"].values
+        d2 = result[result["date"] == "2024-01-03"]["score"].values
+        np.testing.assert_allclose(
+            d1, [-0.7071067811865476, 0.7071067811865476], rtol=1e-8
+        )
+        np.testing.assert_allclose(
+            d2, [-0.7071067811865476, 0.7071067811865476], rtol=1e-8
+        )
+
+    def test_output_columns(self):
+        """Output has [date, ticker, score] columns."""
+        frame = _score_frame(["2024-01-02"] * 2, ["A", "B"], [1.0, 2.0])
+        result = MLSignalAdapter.from_scores(frame)
+        assert list(result.columns) == ["date", "ticker", "score"]
+
+    def test_missing_columns_raises(self):
+        """Missing required columns → ValueError."""
+        frame = pd.DataFrame({"date": ["2024-01-02"], "value": [1.0]})
+        with pytest.raises(ValueError, match="missing columns"):
+            MLSignalAdapter.from_scores(frame)
+
+    def test_duplicate_rows_raises(self):
+        """Duplicate (date, ticker) → ValueError."""
+        frame = _score_frame(
+            ["2024-01-02", "2024-01-02"],
+            ["A", "A"],
+            [1.0, 2.0],
+        )
+        with pytest.raises(ValueError, match="duplicate"):
+            MLSignalAdapter.from_scores(frame)
+
+    def test_does_not_mutate_input(self):
+        """Input DataFrame is not modified."""
+        frame = _score_frame(["2024-01-02"] * 2, ["A", "B"], [1.0, 2.0])
+        original = frame.copy()
+        MLSignalAdapter.from_scores(frame)
+        pd.testing.assert_frame_equal(frame, original)
+
+
+# ---------------------------------------------------------------------------
+# from_probabilities (ac-3)
+# ---------------------------------------------------------------------------
+
+
+class TestFromProbabilities:
+    def test_basic_pipeline(self):
+        """prob=0.5 → logit(0.5)=0 → z-score of [0, 0] is [0, 0] (zero std)."""
+        frame = _prob_frame(["2024-01-02"] * 2, ["A", "B"], [0.5, 0.5])
+        result = MLSignalAdapter.from_probabilities(frame)
+        assert (result["score"] == 0.0).all()
+
+    def test_logit_then_zscore(self):
+        """prob values → logit → cs z-score.  Check the full pipeline."""
+        # probs: 0.1, 0.5, 0.9 → logits: -2.197, 0.0, 2.197
+        # mean = 0, std = 2.197... → z-scores ≈ [-1.0, 0.0, 1.0] (symmetric)
+        frame = _prob_frame(
+            ["2024-01-02"] * 3,
+            ["A", "B", "C"],
+            [0.1, 0.5, 0.9],
+        )
+        result = MLSignalAdapter.from_probabilities(frame)
+        expected = np.array([-1.0, 0.0, 1.0])
+        np.testing.assert_allclose(result["score"].values, expected, atol=1e-10)
+
+    def test_clip_extreme_probs(self):
+        """prob=0 and prob=1 are clipped to [1e-6, 1-1e-6], no inf/NaN."""
+        frame = _prob_frame(
+            ["2024-01-02"] * 4,
+            ["A", "B", "C", "D"],
+            [0.0, 1e-8, 1.0, 0.9999999],
+        )
+        result = MLSignalAdapter.from_probabilities(frame)
+        assert result["score"].notna().all()
+        assert np.isfinite(result["score"]).all()
+
+    def test_clip_bounds(self):
+        """PROB_CLIP_LOW=1e-6, PROB_CLIP_HIGH=1-1e-6."""
+        assert PROB_CLIP_LOW == pytest.approx(1e-6)
+        assert PROB_CLIP_HIGH == pytest.approx(1.0 - 1e-6)
+
+    def test_extreme_probs_clipped_to_same_logit(self):
+        """prob=0 and prob=1e-8 both clip to 1e-6 → same logit → same z-score."""
+        frame = _prob_frame(
+            ["2024-01-02"] * 2,
+            ["A", "B"],
+            [0.0, 1e-8],
+        )
+        result = MLSignalAdapter.from_probabilities(frame)
+        # Both clip to 1e-6 → same logit → zero std → both 0
+        assert (result["score"] == 0.0).all()
+
+    def test_zero_std_after_logit(self):
+        """All same probability → zero std after logit → all-zero scores."""
+        frame = _prob_frame(
+            ["2024-01-02"] * 3,
+            ["A", "B", "C"],
+            [0.3, 0.3, 0.3],
+        )
+        result = MLSignalAdapter.from_probabilities(frame)
+        assert (result["score"] == 0.0).all()
+
+    def test_output_columns(self):
+        """Output has [date, ticker, score] (not prob)."""
+        frame = _prob_frame(["2024-01-02"] * 2, ["A", "B"], [0.3, 0.7])
+        result = MLSignalAdapter.from_probabilities(frame)
+        assert list(result.columns) == ["date", "ticker", "score"]
+
+    def test_missing_prob_column_raises(self):
+        """Missing 'prob' column → ValueError."""
+        frame = pd.DataFrame({"date": ["2024-01-02"], "ticker": ["A"], "p": [0.5]})
+        with pytest.raises(ValueError, match="missing columns"):
+            MLSignalAdapter.from_probabilities(frame)
+
+    def test_does_not_mutate_input(self):
+        """Input DataFrame is not modified."""
+        frame = _prob_frame(["2024-01-02"] * 2, ["A", "B"], [0.3, 0.7])
+        original = frame.copy()
+        MLSignalAdapter.from_probabilities(frame)
+        pd.testing.assert_frame_equal(frame, original)
+
+
+# ---------------------------------------------------------------------------
+# smooth_signal (ac-4)
+# ---------------------------------------------------------------------------
+
+
+class TestSmoothSignal:
+    def test_default_halflife(self):
+        """Default halflife is 5."""
+        assert DEFAULT_HALFLIFE == 5
+
+    def test_single_observation_unchanged(self):
+        """EWM of a single point returns that point."""
+        frame = _score_frame(["2024-01-02"], ["A"], [3.0])
+        result = smooth_signal(frame)
+        assert result["score"].iloc[0] == pytest.approx(3.0)
+
+    def test_per_ticker_independent(self):
+        """Each ticker is smoothed independently."""
+        # Ticker A: [1, 2, 3], Ticker B: [10, 20, 30]
+        frame = _score_frame(
+            ["2024-01-02", "2024-01-03", "2024-01-04"] * 2,
+            ["A", "A", "A", "B", "B", "B"],
+            [1.0, 2.0, 3.0, 10.0, 20.0, 30.0],
+        )
+        result = smooth_signal(frame, halflife=2)
+        a_scores = result[result["ticker"] == "A"]["score"].values
+        b_scores = result[result["ticker"] == "B"]["score"].values
+        # EWM of [1,2,3] with halflife=2: first=1, then ewm mean
+        assert a_scores[0] == pytest.approx(1.0)
+        assert b_scores[0] == pytest.approx(10.0)
+        # Values should be between min and max of each ticker
+        assert 1.0 <= a_scores[-1] <= 3.0
+        assert 10.0 <= b_scores[-1] <= 30.0
+
+    def test_output_shape_matches_input(self):
+        """Output has same shape as input."""
+        frame = _score_frame(
+            ["2024-01-02", "2024-01-03", "2024-01-04"],
+            ["A", "A", "A"],
+            [1.0, 2.0, 3.0],
+        )
+        result = smooth_signal(frame)
+        assert result.shape == frame.shape
+        assert list(result.columns) == list(frame.columns)
+
+    def test_date_order_preserved(self):
+        """Output preserves original date order."""
+        frame = _score_frame(
+            ["2024-01-03", "2024-01-01", "2024-01-02"],
+            ["A", "A", "A"],
+            [3.0, 1.0, 2.0],
+        )
+        result = smooth_signal(frame)
+        # Same date order as input
+        assert list(result["date"]) == list(frame["date"])
+
+    def test_halflife_one_recency_weighted(self):
+        """halflife=1 gives more weight to recent observations."""
+        frame = _score_frame(
+            ["2024-01-01", "2024-01-02", "2024-01-03"],
+            ["A", "A", "A"],
+            [0.0, 0.0, 10.0],
+        )
+        result = smooth_signal(frame, halflife=1)
+        # The last value should be pulled toward 10 but not equal to it
+        assert result["score"].iloc[-1] > 0.0
+        assert result["score"].iloc[-1] < 10.0
+
+    def test_halflife_must_be_positive(self):
+        """halflife=0 → ValueError."""
+        frame = _score_frame(["2024-01-02"], ["A"], [1.0])
+        with pytest.raises(ValueError, match="halflife"):
+            smooth_signal(frame, halflife=0)
+
+    def test_constant_series_unchanged(self):
+        """A constant score series remains constant after smoothing."""
+        frame = _score_frame(
+            ["2024-01-01", "2024-01-02", "2024-01-03"],
+            ["A", "A", "A"],
+            [5.0, 5.0, 5.0],
+        )
+        result = smooth_signal(frame)
+        assert all(v == pytest.approx(5.0) for v in result["score"])
+
+    def test_does_not_mutate_input(self):
+        """Input DataFrame is not modified."""
+        frame = _score_frame(
+            ["2024-01-02", "2024-01-03"],
+            ["A", "A"],
+            [1.0, 2.0],
+        )
+        original = frame.copy()
+        smooth_signal(frame)
+        pd.testing.assert_frame_equal(frame, original)
+
+
+# ---------------------------------------------------------------------------
+# build_feature_matrix (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFeatureMatrix:
+    def test_raw_features(self, tmp_path):
+        """source=raw features with pct_change and zscore_cs transforms."""
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03", "2024-01-04"] * 2,
+                "ticker": ["A", "A", "A", "B", "B", "B"],
+                "close": [10.0, 11.0, 12.0, 20.0, 22.0, 24.0],
+            }
+        )
+        specs = [
+            {"source": "raw", "field": "close", "transform": "pct_change_1"},
+            {"source": "raw", "field": "close", "transform": "zscore_cs"},
+        ]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-04", bars=bars
+        )
+        assert "feat_0" in result.columns
+        assert "feat_1" in result.columns
+        assert len(result) == 6
+
+    def test_empty_specs_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            build_feature_matrix([], start="2024-01-02", end="2024-01-04")
+
+    def test_raw_requires_bars(self):
+        specs = [{"source": "raw", "field": "close", "transform": "zscore_cs"}]
+        with pytest.raises(ValueError, match="bars"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+    def test_factor_requires_name(self):
+        specs = [{"source": "factor", "transform": "zscore_cs"}]
+        with pytest.raises(ValueError, match="name"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+    def test_unknown_source_raises(self):
+        specs = [{"source": "bogus", "field": "close", "transform": "zscore_cs"}]
+        with pytest.raises(ValueError, match="unknown source"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+    def test_factor_source_with_mock(self, monkeypatch):
+        """source=factor reads from load_factor and applies transform."""
+        import datetime
+
+        factor_df = pd.DataFrame(
+            {
+                "date": [
+                    datetime.date(2024, 1, 2),
+                    datetime.date(2024, 1, 3),
+                    datetime.date(2024, 1, 4),
+                ],
+                "ticker": ["A", "A", "A"],
+                "momentum": [0.1, 0.2, 0.3],
+            }
+        )
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir=""):
+            assert name == "momentum"
+            return factor_df.copy()
+
+        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        specs = [{"source": "factor", "name": "momentum", "transform": "zscore_cs"}]
+        result = build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+        assert "feat_0" in result.columns
+        assert len(result) == 3
+
+    def test_mixed_sources_date_normalisation(self, monkeypatch):
+        """source=factor (datetime.date) + source=raw (str dates) join correctly.
+
+        Regression test for Review finding 1: mixed date types silently
+        doubled rows before the fix.
+        """
+        import datetime
+
+        factor_df = pd.DataFrame(
+            {
+                "date": [
+                    datetime.date(2024, 1, 2),
+                    datetime.date(2024, 1, 3),
+                    datetime.date(2024, 1, 4),
+                ],
+                "ticker": ["A", "A", "A"],
+                "momentum": [0.1, 0.2, 0.3],
+            }
+        )
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir=""):
+            return factor_df.copy()
+
+        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+                "ticker": ["A", "A", "A"],
+                "close": [10.0, 11.0, 12.0],
+            }
+        )
+        specs = [
+            {"source": "factor", "name": "momentum", "transform": "none"},
+            {"source": "raw", "field": "close", "transform": "zscore_cs"},
+        ]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-04", bars=bars
+        )
+        # Must be 3 rows (one per date), not 6 (doubled by type mismatch).
+        assert len(result) == 3
+        assert "feat_0" in result.columns
+        assert "feat_1" in result.columns
+
+    def test_factor_empty_raises(self, monkeypatch):
+        """source=factor with no data raises ValueError."""
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir=""):
+            return pd.DataFrame(columns=["date", "ticker", name])
+
+        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        specs = [{"source": "factor", "name": "momentum", "transform": "none"}]
+        with pytest.raises(ValueError, match="no data"):
+            build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
+
+
+# ---------------------------------------------------------------------------
+# transform_bars (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestTransformBars:
+    def _bars(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03", "2024-01-04"] * 2,
+                "ticker": ["A", "A", "A", "B", "B", "B"],
+                "close": [10.0, 11.0, 12.0, 20.0, 22.0, 24.0],
+            }
+        )
+
+    def test_pct_change(self):
+        bars = self._bars()
+        result = transform_bars(bars, "close", "pct_change_1")
+        # Ticker A: [NaN, 0.1, 0.0909...]; Ticker B: [NaN, 0.1, 0.0909...]
+        assert pd.isna(result.iloc[0])
+        assert result.iloc[1] == pytest.approx(0.1)
+        assert result.iloc[2] == pytest.approx(1 / 11)
+
+    def test_zscore_cs(self):
+        bars = self._bars()
+        result = transform_bars(bars, "close", "zscore_cs")
+        # Date 1: [10, 20] → mean=15, std=7.071 → z=[-0.707, 0.707]
+        assert result.iloc[0] == pytest.approx(-0.7071067811865476)
+        assert result.iloc[3] == pytest.approx(0.7071067811865476)
+
+    def test_unknown_transform_raises(self):
+        bars = self._bars()
+        with pytest.raises(ValueError, match="unknown transform"):
+            transform_bars(bars, "close", "bogus")
+
+    def test_missing_field_raises(self):
+        bars = self._bars()
+        with pytest.raises(ValueError, match="missing column"):
+            transform_bars(bars, "open", "pct_change_1")
+
+    def test_bad_pct_change_period_raises(self):
+        bars = self._bars()
+        with pytest.raises(ValueError, match="pct_change"):
+            transform_bars(bars, "close", "pct_change_abc")
+
+
+# ---------------------------------------------------------------------------
+# features_hash (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestFeaturesHash:
+    def _spec(self, **kw) -> dict:
+        base = {"source": "raw", "field": "close", "transform": "pct_change_5"}
+        base.update(kw)
+        return base
+
+    def test_deterministic(self):
+        s = [self._spec()]
+        assert features_hash(s, []) == features_hash(s, [])
+
+    def test_spec_change_changes_hash(self):
+        h1 = features_hash([self._spec()], [])
+        h2 = features_hash([self._spec(transform="zscore_cs")], [])
+        assert h1 != h2
+
+    def test_dep_hash_change_changes_hash(self):
+        s = [self._spec(source="factor", name="momentum")]
+        h1 = features_hash(s, ["abc123"])
+        h2 = features_hash(s, ["def456"])
+        assert h1 != h2
+
+    def test_dep_hash_order_irrelevant(self):
+        s = [self._spec(source="factor", name="momentum")]
+        assert features_hash(s, ["abc", "def"]) == features_hash(s, ["def", "abc"])
+
+    def test_dep_hash_dedup(self):
+        s = [self._spec(source="factor", name="momentum")]
+        assert features_hash(s, ["abc", "abc"]) == features_hash(s, ["abc"])
+
+    def test_spec_order_irrelevant(self):
+        s1 = [self._spec(), self._spec(field="volume")]
+        s2 = [self._spec(field="volume"), self._spec()]
+        assert features_hash(s1, []) == features_hash(s2, [])
+
+    def test_sha256_format(self):
+        h = features_hash([self._spec()], [])
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_matches_manual_sha256(self):
+        """Verify the hash is exactly sha256(canonical_json + "|" + "|".join(sorted(deps)))."""
+        spec = {"source": "raw", "field": "close", "transform": "pct_change_5"}
+        specs = [spec]
+        deps = ["abc123", "def456"]
+        canonical = json.dumps(specs, sort_keys=True, separators=(",", ":"))
+        raw = canonical + "|" + "|".join(sorted(deps))
+        expected = hashlib.sha256(raw.encode()).hexdigest()
+        assert features_hash(specs, deps) == expected
+
+
+# ---------------------------------------------------------------------------
+# model_id (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestModelId:
+    def test_format(self):
+        mid = model_id("alpha", 1, 2, "2023-01-01", "2023-12-31", "abc")
+        assert mid == "alpha+v1.2(2023-01-01)+2023-12-31+abc"
+
+    def test_features_hash_change_changes_model_id(self):
+        m1 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", "hash1")
+        m2 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", "hash2")
+        assert m1 != m2
+
+    def test_full_pipeline_hash_change(self):
+        """specs change → features_hash change → model_id change (ac-2 assertion)."""
+        spec1 = [{"source": "raw", "field": "close", "transform": "pct_change_5"}]
+        spec2 = [{"source": "raw", "field": "close", "transform": "zscore_cs"}]
+        h1 = features_hash(spec1, [])
+        h2 = features_hash(spec2, [])
+        m1 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", h1)
+        m2 = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", h2)
+        assert m1 != m2
+
+
+# ---------------------------------------------------------------------------
+# write_model (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteModel:
+    def _metadata(self, mid: str, feat_hash: str) -> dict:
+        return {
+            "model_id": mid,
+            "train_end": "2023-12-31",
+            "features_hash": feat_hash,
+            "metrics": {"sharpe": 1.5},
+            "random_seed": 42,
+            "deps": ["numpy==1.24"],
+            "features": ["feat_0", "feat_1"],
+            "date_range": ["2023-01-01", "2023-12-31"],
+            "hyperparams": {"lr": 0.01},
+        }
+
+    def test_writes_three_files(self, tmp_path):
+        spec = [{"source": "raw", "field": "close", "transform": "pct_change_5"}]
+        fh = features_hash(spec, [])
+        mid = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", fh)
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="fake_model",
+            config={"lr": 0.01},
+            metadata=self._metadata(mid, fh),
+            base_dir=str(tmp_path),
+        )
+        assert (out / "model.pkl").exists()
+        assert (out / "config.json").exists()
+        assert (out / "metadata.json").exists()
+
+    def test_metadata_carries_model_id_and_features_hash(self, tmp_path):
+        spec = [{"source": "raw", "field": "close", "transform": "pct_change_5"}]
+        fh = features_hash(spec, [])
+        mid = model_id("alpha", 1, 0, "2023-01-01", "2023-12-31", fh)
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="fake",
+            config={},
+            metadata=self._metadata(mid, fh),
+            base_dir=str(tmp_path),
+        )
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["model_id"] == mid
+        assert meta["features_hash"] == fh
+
+    def test_refuses_reject(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="fake",
+                config={},
+                metadata={},
+                verdict="REJECT",
+                base_dir=str(tmp_path),
+            )
+        assert not (tmp_path / "alpha").exists()
+
+    def test_pass_writes(self, tmp_path):
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="fake",
+            config={},
+            metadata={},
+            verdict="PASS",
+            base_dir=str(tmp_path),
+        )
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# write_experiment (ac-2)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteExperiment:
+    def test_writes_two_files(self, tmp_path):
+        out = write_experiment(
+            "exp_001",
+            metrics={"sharpe": 1.5},
+            config={"lr": 0.01},
+            base_dir=str(tmp_path),
+        )
+        assert (out / "metrics.json").exists()
+        assert (out / "config.json").exists()
+
+    def test_metrics_carries_created_at(self, tmp_path):
+        out = write_experiment(
+            "exp_001",
+            metrics={"sharpe": 1.5},
+            config={},
+            base_dir=str(tmp_path),
+        )
+        m = json.loads((out / "metrics.json").read_text())
+        assert "created_at" in m
+        assert m["sharpe"] == 1.5
+
+    def test_config_carried(self, tmp_path):
+        out = write_experiment(
+            "exp_001",
+            metrics={},
+            config={"lr": 0.01},
+            base_dir=str(tmp_path),
+        )
+        c = json.loads((out / "config.json").read_text())
+        assert c["lr"] == 0.01
+
+
+# ---------------------------------------------------------------------------
+# ensemble_models (ac-5)
+# ---------------------------------------------------------------------------
+
+
+def _make_model(scores: dict) -> callable:
+    """Build a model callable returning a fixed [date, ticker, score] frame."""
+
+    def f(X=None):
+        return pd.DataFrame(
+            {
+                "date": list(scores.keys()),
+                "ticker": list(scores.keys()),
+                "score": list(scores.values()),
+            }
+        )
+
+    return f
+
+
+class TestEnsembleModels:
+    @staticmethod
+    def _m1(X=None):
+        return pd.DataFrame(
+            {"date": ["2024-01-02"] * 2, "ticker": ["A", "B"], "score": [1.0, 2.0]}
+        )
+
+    @staticmethod
+    def _m2(X=None):
+        return pd.DataFrame(
+            {"date": ["2024-01-02"] * 2, "ticker": ["A", "B"], "score": [3.0, 4.0]}
+        )
+
+    def test_equal_weight_default(self):
+        """weights=None → simple mean of model scores."""
+        result = ensemble_models([self._m1, self._m2])
+        assert result["score"].tolist() == [2.0, 3.0]  # (1+3)/2, (2+4)/2
+
+    def test_explicit_weights(self):
+        """Explicit weights → Sum(w*s)/Sum(w)."""
+        result = ensemble_models([self._m1, self._m2], weights=[3.0, 1.0])
+        # A: (3*1 + 1*3)/4 = 1.5; B: (3*2 + 1*4)/4 = 2.5
+        assert result["score"].tolist() == [1.5, 2.5]
+
+    def test_skipna_partial_coverage(self):
+        """Models with partial coverage: only contributing models are averaged."""
+
+        def m_partial(X=None):
+            return pd.DataFrame(
+                {"date": ["2024-01-02"] * 1, "ticker": ["A"], "score": [10.0]}
+            )
+
+        result = ensemble_models([self._m1, m_partial])
+        # A: (1+10)/2 = 5.5; B: only m1 → 2.0
+        a_row = result[result["ticker"] == "A"].iloc[0]
+        b_row = result[result["ticker"] == "B"].iloc[0]
+        assert a_row["score"] == pytest.approx(5.5)
+        assert b_row["score"] == pytest.approx(2.0)
+
+    def test_single_model(self):
+        """A single model passes through unchanged."""
+        result = ensemble_models([self._m1])
+        assert result["score"].tolist() == [1.0, 2.0]
+
+    def test_empty_models_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            ensemble_models([])
+
+    def test_weights_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="weights length"):
+            ensemble_models([self._m1, self._m1], weights=[1.0])
+
+    def test_three_models_weighted(self):
+        """Three models with explicit weights."""
+
+        def m3(X=None):
+            return pd.DataFrame(
+                {"date": ["2024-01-02"], "ticker": ["A"], "score": [3.0]}
+            )
+
+        result = ensemble_models([self._m1, self._m2, m3], weights=[1.0, 1.0, 2.0])
+        # A: _m1=1.0, _m2=3.0, m3=3.0 → (1*1 + 1*3 + 2*3)/4 = 10/4 = 2.5
+        # B: _m1=2.0, _m2=4.0 (m3 missing) → (1*2 + 1*4)/2 = 3.0
+        a_row = result[result["ticker"] == "A"].iloc[0]
+        assert a_row["score"] == pytest.approx(2.5)
+
+
+# ---------------------------------------------------------------------------
+# sanity_check_ml_model (ac-1)
+# ---------------------------------------------------------------------------
+
+
+class TestSanityCheckMlModel:
+    def test_pass(self):
+        """sharpe over baseline, under 2.0, ic >= 0.5*train_ic → PASS."""
+        result = sanity_check_ml_model(
+            {"sharpe": 1.5, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "PASS"
+
+    def test_reject_sharpe_not_over_baseline_10pct(self):
+        """sharpe <= 1.1 * baseline → REJECT."""
+        # 1.1 * 1.0 = 1.1; sharpe = 1.1 exactly → REJECT (boundary)
+        result = sanity_check_ml_model(
+            {"sharpe": 1.1, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_reject_boundary_exactly_1_1x(self):
+        """Exactly 1.1× baseline is REJECT (未超 = reached-but-not-exceeded)."""
+        result = sanity_check_ml_model(
+            {"sharpe": 1.1, "ic": 1.0}, train_ic=0.1, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_suspect_sharpe_above_2(self):
+        """sharpe > 2.0 → SUSPECT (but only if not REJECT)."""
+        result = sanity_check_ml_model(
+            {"sharpe": 2.1, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "SUSPECT"
+
+    def test_suspect_boundary_strictly_above_2(self):
+        """Exactly 2.0 is NOT SUSPECT (strictly above 2.0)."""
+        result = sanity_check_ml_model(
+            {"sharpe": 2.0, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "PASS"
+
+    def test_suspect_ic_leakage(self):
+        """ic < 0.5 * train_ic → SUSPECT."""
+        result = sanity_check_ml_model(
+            {"sharpe": 1.5, "ic": 0.05}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "SUSPECT"
+
+    def test_reject_dominates_suspect(self):
+        """REJECT wins over SUSPECT when both conditions trigger."""
+        # sharpe=2.1 (>2.0 SUSPECT) but 2.1 > 1.1*1.0 so not REJECT...
+        # Let's make it: sharpe <= 1.1*baseline AND ic < 0.5*train_ic
+        result = sanity_check_ml_model(
+            {"sharpe": 1.0, "ic": 0.01}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_reject_dominates_high_sharpe(self):
+        """REJECT from baseline check dominates SUSPECT from sharpe>2.0.
+
+        Impossible to have sharpe<=1.1*baseline AND sharpe>2.0 simultaneously
+        unless baseline is very low.  Test with low baseline.
+        """
+        # baseline=1.0 → 1.1*1.0=1.1; sharpe=1.0 <= 1.1 → REJECT (even if ic also bad)
+        result = sanity_check_ml_model(
+            {"sharpe": 1.0, "ic": 0.01}, train_ic=0.1, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_missing_sharpe_raises(self):
+        with pytest.raises(ValueError, match="sharpe"):
+            sanity_check_ml_model({"ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0)
+
+    def test_missing_ic_raises(self):
+        with pytest.raises(ValueError, match="ic"):
+            sanity_check_ml_model({"sharpe": 1.5}, train_ic=0.15, baseline_sharpe=1.0)
+
+
+# ---------------------------------------------------------------------------
+# OCR regression tests (11 findings)
+# ---------------------------------------------------------------------------
+
+
+class TestOcrRegression:
+    """Regression tests for the 11 OCR second-opinion findings."""
+
+    # -- finding 1: NaN passes sanity_check --------------------------------
+
+    def test_nan_sharpe_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": float("nan"), "ic": 0.1},
+                train_ic=0.15,
+                baseline_sharpe=1.0,
+            )
+
+    def test_nan_ic_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": 1.5, "ic": float("nan")},
+                train_ic=0.15,
+                baseline_sharpe=1.0,
+            )
+
+    def test_nan_train_ic_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": 1.5, "ic": 0.1},
+                train_ic=float("nan"),
+                baseline_sharpe=1.0,
+            )
+
+    def test_nan_baseline_sharpe_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": 1.5, "ic": 0.1},
+                train_ic=0.15,
+                baseline_sharpe=float("nan"),
+            )
+
+    def test_inf_sharpe_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": float("inf"), "ic": 0.1},
+                train_ic=0.15,
+                baseline_sharpe=1.0,
+            )
+
+    # -- finding 2: REJECT guard bypassable -------------------------------
+
+    def test_reject_lowercase_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict="reject",
+                base_dir=str(tmp_path),
+            )
+        assert not (tmp_path / "alpha").exists()
+
+    def test_reject_with_spaces_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict=" REJECT ",
+                base_dir=str(tmp_path),
+            )
+
+    def test_reject_mixed_case_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict="Reject",
+                base_dir=str(tmp_path),
+            )
+
+    def test_invalid_verdict_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="verdict must be one of"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict="BOGUS",
+                base_dir=str(tmp_path),
+            )
+
+    def test_verdict_persisted_in_metadata(self, tmp_path):
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="m",
+            config={},
+            metadata={},
+            verdict="suspect",
+            base_dir=str(tmp_path),
+        )
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["verdict"] == "SUSPECT"
+
+    # -- finding 3: raw start/end leaks -----------------------------------
+
+    def test_raw_branch_respects_start_end(self):
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+                "ticker": ["A"] * 4,
+                "close": [10.0, 11.0, 12.0, 13.0],
+            }
+        )
+        specs = [{"source": "raw", "field": "close", "transform": "none"}]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-03", bars=bars
+        )
+        dates = pd.to_datetime(result["date"])
+        assert dates.min() >= pd.Timestamp("2024-01-02")
+        assert dates.max() <= pd.Timestamp("2024-01-03")
+        assert len(result) == 2
+
+    # -- finding 4: ensemble weights sum to zero --------------------------
+
+    def test_zero_weight_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            ensemble_models([TestEnsembleModels._m1], weights=[0.0])
+
+    def test_negative_weight_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            ensemble_models(
+                [TestEnsembleModels._m1, TestEnsembleModels._m2], weights=[1.0, -1.0]
+            )
+
+    def test_non_finite_weight_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ensemble_models([TestEnsembleModels._m1], weights=[float("nan")])
+
+    # -- finding 5: model call contract -----------------------------------
+
+    def test_model_without_default_X(self):
+        """A model defined as def f(X) must work when X is None."""
+
+        def strict_model(X):
+            return pd.DataFrame(
+                {"date": ["2024-01-02"], "ticker": ["A"], "score": [1.0]}
+            )
+
+        result = ensemble_models([strict_model])
+        assert result["score"].iloc[0] == pytest.approx(1.0)
+
+    def test_model_with_X_passed(self):
+        """X is passed through to the model callable."""
+        received = {}
+
+        def capture_model(X):
+            received["X"] = X
+            return pd.DataFrame(
+                {"date": ["2024-01-02"], "ticker": ["A"], "score": [1.0]}
+            )
+
+        sentinel = object()
+        ensemble_models([capture_model], X=sentinel)
+        assert received["X"] is sentinel
+
+    # -- finding 6: TRANSFORMS constant -----------------------------------
+
+    def test_transforms_constant_matches_implementation(self):
+        from research.ml_signal import TRANSFORMS
+
+        assert "pct_change_N" in TRANSFORMS
+        assert "pct_change" not in TRANSFORMS
+
+    # -- finding 7: features_hash dedup contract --------------------------
+
+    def test_dep_hash_dedup_documented(self):
+        """sorted(set(dep_hashes)) — duplicates collapse to one entry."""
+        s = [{"source": "factor", "name": "momentum", "transform": "none"}]
+        h1 = features_hash(s, ["abc", "abc", "def"])
+        h2 = features_hash(s, ["abc", "def"])
+        assert h1 == h2
+
+    # -- finding 8: no-op transform in raw branch --------------------------
+
+    def test_raw_branch_none_transform(self):
+        """transform='none' in raw branch copies the field value (no crash)."""
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03"],
+                "ticker": ["A", "A"],
+                "close": [10.0, 11.0],
+            }
+        )
+        specs = [{"source": "raw", "field": "close", "transform": "none"}]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-03", bars=bars
+        )
+        assert result["feat_0"].tolist() == [10.0, 11.0]
+
+    # -- finding 9: JSON serialisation crash ------------------------------
+
+    def test_write_model_numpy_scalars(self, tmp_path):
+        """numpy scalars and pd.Timestamp in metadata must not crash json.dumps."""
+        metadata = {
+            "sharpe": np.float64(1.5),
+            "count": np.int64(42),
+            "train_date": pd.Timestamp("2024-01-02"),
+            "nested": {"val": np.float32(0.5)},
+        }
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="m",
+            config={"lr": np.float64(0.01)},
+            metadata=metadata,
+            base_dir=str(tmp_path),
+        )
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["sharpe"] == 1.5
+        assert meta["count"] == 42
+        assert meta["nested"]["val"] == pytest.approx(0.5)
+
+    def test_write_experiment_numpy_scalars(self, tmp_path):
+        metrics = {"sharpe": np.float64(1.5), "nan_val": float("nan")}
+        out = write_experiment(
+            "exp_np", metrics=metrics, config={}, base_dir=str(tmp_path)
+        )
+        m = json.loads((out / "metrics.json").read_text())
+        assert m["sharpe"] == 1.5
+        assert m["nan_val"] is None
+
+    # -- finding 10: transform_bars index contract ------------------------
+
+    def test_pct_change_preserves_original_index(self):
+        """Unsorted input: result index must match bars.index exactly."""
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-04", "2024-01-02", "2024-01-03"],
+                "ticker": ["A", "A", "A"],
+                "close": [12.0, 10.0, 11.0],
+            },
+            index=[10, 20, 30],
+        )
+        result = transform_bars(bars, "close", "pct_change_1")
+        assert list(result.index) == [10, 20, 30]
+
+    # -- finding 11: row-wise apply (vectorised ensemble) ------------------
+
+    def test_ensemble_vectorised_correctness(self):
+        """Vectorised weighted mean matches manual computation on larger input."""
+        n = 50
+        dates = ["2024-01-02"] * n
+        tickers = [f"T{i:03d}" for i in range(n)]
+        scores1 = list(range(n))
+        scores2 = [s * 2.0 for s in scores1]
+
+        def m1(X=None):
+            return pd.DataFrame({"date": dates, "ticker": tickers, "score": scores1})
+
+        def m2(X=None):
+            return pd.DataFrame({"date": dates, "ticker": tickers, "score": scores2})
+
+        result = ensemble_models([m1, m2], weights=[3.0, 1.0])
+        # Expected: (3*s1 + 1*s2) / 4 = (3*s + 2*s) / 4 = 5s/4 = 1.25*s
+        expected = [1.25 * s for s in scores1]
+        np.testing.assert_allclose(result["score"].values, expected, rtol=1e-12)
