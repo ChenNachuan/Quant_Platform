@@ -309,11 +309,13 @@ class TestNavIdentity:
         commission,
     ):
         """BUY at fill price ≠ mark price on existing position — nav identity must hold."""
-        # Ensure freeze amount is affordable.
-        freeze_amount = fill_price * fill_qty
-        if freeze_amount > initial_cash:
-            fill_qty = max(1, int(initial_cash / fill_price) - 1)
-            freeze_amount = fill_price * fill_qty
+        # Ensure settlement cost (fill_price × fill_qty + commission) is affordable.
+        # The freeze covers fill_price × fill_qty; commission comes from remaining
+        # cash at settle_fill, so both must fit within initial_cash.
+        settlement_cost = fill_price * fill_qty + commission
+        if settlement_cost > initial_cash:
+            fill_qty = max(1, int((initial_cash - commission) / fill_price))
+            settlement_cost = fill_price * fill_qty + commission
 
         acct = SimAccount(cash=initial_cash)
         # Existing position at mark price (divergent from fill).
