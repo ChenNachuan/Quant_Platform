@@ -531,20 +531,22 @@ def _job_records() -> list[dict]:
     return rows
 
 
-def _run_day(started_at: Any) -> str | None:
-    """The reporting-day key for one run row's ``started_at`` stamp.
+def _run_day(stamp: Any) -> str | None:
+    """The reporting-day key for one row's instant stamp (``started_at``,
+    ``timestamp``).
 
-    Run records carry UTC instants (``ops/scheduler.py`` stamps
-    ``datetime.now(timezone.utc).isoformat()``) while ``end_day`` is the local
-    reporting day (``health_check``'s ``date.today()``). Slicing the stamp's
-    date part compared a UTC date against a local one and dropped every row of
-    the day whenever the two calendars disagree (local 00:00-08:00 at UTC+8) —
-    so the instant is parsed and keyed to the reporting calendar instead.
+    Run records and risk-audit rows carry UTC instants (``ops/scheduler.py``
+    stamps ``datetime.now(timezone.utc).isoformat()``) while ``end_day`` is the
+    local reporting day (``health_check``'s ``date.today()``). Slicing the
+    stamp's date part compared a UTC date against a local one and dropped every
+    row of the day whenever the two calendars disagree (local 00:00-08:00 at
+    UTC+8) — so the instant is parsed and keyed to the reporting calendar
+    instead.
 
     A naive stamp is already reporting-local and keeps its date part; an
     unparseable one falls back to the raw slice so the reader stays null-safe.
     """
-    text = str(started_at or "")
+    text = str(stamp or "")
     if not text:
         return None
     try:
@@ -613,7 +615,7 @@ def _risk_reject_count(end_day: str) -> int | None:
             continue
         if not isinstance(row, dict) or str(row.get("action")) != "BLOCK":
             continue
-        if str(row.get("timestamp") or "")[:10] == end_day:
+        if _run_day(row.get("timestamp")) == end_day:
             count += 1
     return count
 

@@ -567,8 +567,8 @@ class TestSourceReaders:
 
 
 # ---------------------------------------------------------------------------
-# Regression (QUANT-49): run rows are UTC instants — bucket them on the local
-# reporting day
+# Regression (QUANT-49): run rows and risk rows are UTC instants — bucket them
+# on the local reporting day
 # ---------------------------------------------------------------------------
 
 
@@ -604,6 +604,8 @@ class TestRunRowDayBucketing:
     every row missed the bucket whenever the two calendars disagree
     (00:00-08:00 at UTC+8) — ``pipeline_duration_min`` came back null and the
     metric sank to MEDIUM while the ac-6 integration case demands ok.
+    ``_risk_reject_count`` sliced the risk-audit ``timestamp`` the same way, so
+    the cond-8 fact under-fired to 0 in the same window.
     """
 
     def test_run_after_local_midnight_lands_in_the_reporting_day(
@@ -637,6 +639,40 @@ class TestRunRowDayBucketing:
         system = collect_metrics(day)["system"]
         assert system["pipeline_duration_min"]["value"] == pytest.approx(10.0)
         assert system["pipeline_duration_min"]["status"] == "ok"
+
+    def test_early_morning_blocks_reach_cond8(self, sources, shanghai_tz):
+        day = date.today().isoformat()
+        # Same divergence as the run rows: 00:30 local at UTC+8 is 16:30Z on
+        # the PREVIOUS UTC date, so the risk-audit stamp's UTC date part
+        # disagrees with the reporting day the count is taken for.
+        started = datetime.fromisoformat(f"{day}T00:30:00").astimezone(timezone.utc)
+        assert started.isoformat()[:10] != day  # the case really diverges
+        with (sources / "risk_audit.jsonl").open("a", encoding="utf-8") as fh:
+            for _ in range(4):
+                fh.write(
+                    json.dumps(
+                        {
+                            "timestamp": started.isoformat(),
+                            "rule": "single_weight",
+                            "ticker": "600519.SH",
+                            "action": "BLOCK",
+                            "reason": "exceeds max_single_weight",
+                        }
+                    )
+                    + "\n"
+                )
+        assert monitoring._risk_reject_count(day) == 4
+        import ops.alerting as alerting
+
+        _, facts = monitoring._collect(day)
+        firings = [
+            f
+            for f in alerting.evaluate_alerts(facts)
+            if f["alert_type"] == "risk_reject"
+        ]
+        assert [(f["level"], f["alpha_type_id"]) for f in firings] == [
+            (alerting.AlertLevel.MEDIUM, "")
+        ]  # cond 8: 4 BLOCKs in one day (> 3)
 
 
 # ---------------------------------------------------------------------------
