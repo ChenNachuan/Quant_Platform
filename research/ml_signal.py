@@ -10,6 +10,8 @@ Iteration 1 scope (ac-3, ac-4): :class:`MLSignalAdapter` (``from_scores`` /
 Iteration 2 scope (ac-2): :func:`build_feature_matrix`, :func:`transform_bars`,
 :func:`features_hash`, :func:`model_id`, :func:`write_model`,
 :func:`write_experiment`.
+Iteration 3 scope (ac-1, ac-5): :func:`ensemble_models`,
+:func:`sanity_check_ml_model`.
 
 Design pins (PR restates):
 
@@ -46,11 +48,14 @@ from research.post_processor import standardize_zscore
 
 __all__ = [
     "MLSignalAdapter",
+    "VERDICTS",
+    "build_feature_matrix",
+    "ensemble_models",
     "features_hash",
     "model_id",
+    "sanity_check_ml_model",
     "smooth_signal",
     "transform_bars",
-    "build_feature_matrix",
     "write_experiment",
     "write_model",
 ]
@@ -475,3 +480,144 @@ def write_experiment(
     )
 
     return out_dir
+
+
+# ---------------------------------------------------------------------------
+# ensemble_models (D7, ac-5)
+# ---------------------------------------------------------------------------
+
+
+def ensemble_models(
+    models: list,
+    X=None,
+    *,
+    weights: list[float] | None = None,
+) -> pd.DataFrame:
+    """Combine multiple model outputs into one signal frame.
+
+    Each element of *models* is a callable ``f(X) -> DataFrame [date, ticker,
+    score]``.  Frames are outer-joined on ``[date, ticker]``; the combined
+    score is the weighted mean ``Σwᵢsᵢ / Σwᵢ`` over the models that produced
+    that cell (skipna — a model that has no row for a key is excluded from
+    that key's denominator).
+
+    ``weights=None`` → ``wᵢ=1`` for all (equal-weight default).  Explicit
+    weights are taken as given — no normalisation policy beyond the mean.
+    Gap #14 (validation ICIR normalisation) is **not decided here**;
+    ``weights`` is an interface only.
+
+    Parameters
+    ----------
+    models : list of callable
+        Each ``f(X) -> DataFrame [date, ticker, score]``.
+    X : optional
+        Passed through to each model callable.
+    weights : list of float, optional
+        Per-model weights.  Must have the same length as *models*.
+
+    Returns
+    -------
+    DataFrame
+        ``[date, ticker, score]`` — the weighted mean across models.
+    """
+    if not models:
+        raise ValueError("models must be a non-empty list")
+    if weights is not None and len(weights) != len(models):
+        raise ValueError(
+            f"weights length {len(weights)} != models length {len(models)}"
+        )
+
+    w = [1.0] * len(models) if weights is None else [float(v) for v in weights]
+
+    # Collect per-model frames.
+    frames: list[pd.DataFrame] = []
+    for model in models:
+        result = model(X) if X is not None else model()
+        if not isinstance(result, pd.DataFrame):
+            raise TypeError(f"model must return DataFrame, got {type(result).__name__}")
+        _validate_frame(result)
+        frames.append(result[["date", "ticker", "score"]].copy())
+
+    # Normalise date to pd.Timestamp for consistent joining.
+    frames = [f.assign(date=pd.to_datetime(f["date"])) for f in frames]
+
+    # Outer-join all frames on (date, ticker), keeping scores in separate columns.
+    merged = frames[0].rename(columns={"score": "score_0"})
+    for i, f in enumerate(frames[1:], start=1):
+        merged = merged.merge(
+            f.rename(columns={"score": f"score_{i}"}),
+            on=["date", "ticker"],
+            how="outer",
+        )
+
+    # Weighted mean with skipna: only models that produced a cell contribute.
+    score_cols = [f"score_{i}" for i in range(len(models))]
+    w_arr = np.array(w, dtype="float64")
+
+    def _weighted_mean(row) -> float:
+        vals = row[score_cols].to_numpy(dtype="float64")
+        mask = ~np.isnan(vals)
+        if not mask.any():
+            return np.nan
+        w_masked = w_arr[mask]
+        return float(np.dot(vals[mask], w_masked) / w_masked.sum())
+
+    merged["score"] = merged[score_cols].apply(_weighted_mean, axis=1)
+    return merged[["date", "ticker", "score"]].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# sanity_check_ml_model (D8, ac-1)
+# ---------------------------------------------------------------------------
+
+#: The three verdicts the sanity check returns.
+VERDICTS: tuple[str, ...] = ("PASS", "SUSPECT", "REJECT")
+
+
+def sanity_check_ml_model(
+    test_metrics: dict,
+    train_ic: float,
+    baseline_sharpe: float,
+) -> str:
+    """Overfitting three-check gate: PASS | SUSPECT | REJECT.
+
+    Three checks, REJECT dominating SUSPECT:
+
+    1. ``sharpe <= 1.1 * baseline_sharpe`` → **REJECT** (夏普未超等权 10%).
+       Boundary: exactly 1.1× is REJECT (未超 = reached-but-not-exceeded).
+    2. ``sharpe > 2.0`` → **SUSPECT** (查前视).
+       Boundary: strictly above 2.0.
+    3. ``ic < 0.5 * train_ic`` → **SUSPECT** (查泄漏).
+
+    If multiple checks trigger, REJECT wins over SUSPECT.  Otherwise PASS.
+
+    Parameters
+    ----------
+    test_metrics : dict
+        Must carry ``sharpe`` and ``ic``.
+    train_ic : float
+        Training-set IC.
+    baseline_sharpe : float
+        Equal-weight ensemble's Sharpe (D7).
+
+    Returns
+    -------
+    str
+        ``"PASS"``, ``"SUSPECT"``, or ``"REJECT"``.
+    """
+    sharpe = test_metrics.get("sharpe")
+    ic = test_metrics.get("ic")
+    if sharpe is None:
+        raise ValueError("test_metrics must carry 'sharpe'")
+    if ic is None:
+        raise ValueError("test_metrics must carry 'ic'")
+
+    # REJECT: sharpe not over baseline by 10%.
+    if sharpe <= 1.1 * baseline_sharpe:
+        return "REJECT"
+
+    # SUSPECT checks (REJECT already excluded above).
+    if sharpe > 2.0 or ic < 0.5 * train_ic:
+        return "SUSPECT"
+
+    return "PASS"

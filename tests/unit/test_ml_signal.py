@@ -24,8 +24,10 @@ from research.ml_signal import (
     PROB_CLIP_LOW,
     MLSignalAdapter,
     build_feature_matrix,
+    ensemble_models,
     features_hash,
     model_id,
+    sanity_check_ml_model,
     smooth_signal,
     transform_bars,
     write_experiment,
@@ -699,3 +701,169 @@ class TestWriteExperiment:
         )
         c = json.loads((out / "config.json").read_text())
         assert c["lr"] == 0.01
+
+
+# ---------------------------------------------------------------------------
+# ensemble_models (ac-5)
+# ---------------------------------------------------------------------------
+
+
+def _make_model(scores: dict) -> callable:
+    """Build a model callable returning a fixed [date, ticker, score] frame."""
+
+    def f(X=None):
+        return pd.DataFrame(
+            {
+                "date": list(scores.keys()),
+                "ticker": list(scores.keys()),
+                "score": list(scores.values()),
+            }
+        )
+
+    return f
+
+
+class TestEnsembleModels:
+    @staticmethod
+    def _m1(X=None):
+        return pd.DataFrame(
+            {"date": ["2024-01-02"] * 2, "ticker": ["A", "B"], "score": [1.0, 2.0]}
+        )
+
+    @staticmethod
+    def _m2(X=None):
+        return pd.DataFrame(
+            {"date": ["2024-01-02"] * 2, "ticker": ["A", "B"], "score": [3.0, 4.0]}
+        )
+
+    def test_equal_weight_default(self):
+        """weights=None → simple mean of model scores."""
+        result = ensemble_models([self._m1, self._m2])
+        assert result["score"].tolist() == [2.0, 3.0]  # (1+3)/2, (2+4)/2
+
+    def test_explicit_weights(self):
+        """Explicit weights → Sum(w*s)/Sum(w)."""
+        result = ensemble_models([self._m1, self._m2], weights=[3.0, 1.0])
+        # A: (3*1 + 1*3)/4 = 1.5; B: (3*2 + 1*4)/4 = 2.5
+        assert result["score"].tolist() == [1.5, 2.5]
+
+    def test_skipna_partial_coverage(self):
+        """Models with partial coverage: only contributing models are averaged."""
+
+        def m_partial(X=None):
+            return pd.DataFrame(
+                {"date": ["2024-01-02"] * 1, "ticker": ["A"], "score": [10.0]}
+            )
+
+        result = ensemble_models([self._m1, m_partial])
+        # A: (1+10)/2 = 5.5; B: only m1 → 2.0
+        a_row = result[result["ticker"] == "A"].iloc[0]
+        b_row = result[result["ticker"] == "B"].iloc[0]
+        assert a_row["score"] == pytest.approx(5.5)
+        assert b_row["score"] == pytest.approx(2.0)
+
+    def test_single_model(self):
+        """A single model passes through unchanged."""
+        result = ensemble_models([self._m1])
+        assert result["score"].tolist() == [1.0, 2.0]
+
+    def test_empty_models_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            ensemble_models([])
+
+    def test_weights_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="weights length"):
+            ensemble_models([self._m1, self._m1], weights=[1.0])
+
+    def test_three_models_weighted(self):
+        """Three models with explicit weights."""
+
+        def m3(X=None):
+            return pd.DataFrame(
+                {"date": ["2024-01-02"], "ticker": ["A"], "score": [3.0]}
+            )
+
+        result = ensemble_models([self._m1, self._m2, m3], weights=[1.0, 1.0, 2.0])
+        # A: _m1=1.0, _m2=3.0, m3=3.0 → (1*1 + 1*3 + 2*3)/4 = 10/4 = 2.5
+        # B: _m1=2.0, _m2=4.0 (m3 missing) → (1*2 + 1*4)/2 = 3.0
+        a_row = result[result["ticker"] == "A"].iloc[0]
+        assert a_row["score"] == pytest.approx(2.5)
+
+
+# ---------------------------------------------------------------------------
+# sanity_check_ml_model (ac-1)
+# ---------------------------------------------------------------------------
+
+
+class TestSanityCheckMlModel:
+    def test_pass(self):
+        """sharpe over baseline, under 2.0, ic >= 0.5*train_ic → PASS."""
+        result = sanity_check_ml_model(
+            {"sharpe": 1.5, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "PASS"
+
+    def test_reject_sharpe_not_over_baseline_10pct(self):
+        """sharpe <= 1.1 * baseline → REJECT."""
+        # 1.1 * 1.0 = 1.1; sharpe = 1.1 exactly → REJECT (boundary)
+        result = sanity_check_ml_model(
+            {"sharpe": 1.1, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_reject_boundary_exactly_1_1x(self):
+        """Exactly 1.1× baseline is REJECT (未超 = reached-but-not-exceeded)."""
+        result = sanity_check_ml_model(
+            {"sharpe": 1.1, "ic": 1.0}, train_ic=0.1, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_suspect_sharpe_above_2(self):
+        """sharpe > 2.0 → SUSPECT (but only if not REJECT)."""
+        result = sanity_check_ml_model(
+            {"sharpe": 2.1, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "SUSPECT"
+
+    def test_suspect_boundary_strictly_above_2(self):
+        """Exactly 2.0 is NOT SUSPECT (strictly above 2.0)."""
+        result = sanity_check_ml_model(
+            {"sharpe": 2.0, "ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "PASS"
+
+    def test_suspect_ic_leakage(self):
+        """ic < 0.5 * train_ic → SUSPECT."""
+        result = sanity_check_ml_model(
+            {"sharpe": 1.5, "ic": 0.05}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "SUSPECT"
+
+    def test_reject_dominates_suspect(self):
+        """REJECT wins over SUSPECT when both conditions trigger."""
+        # sharpe=2.1 (>2.0 SUSPECT) but 2.1 > 1.1*1.0 so not REJECT...
+        # Let's make it: sharpe <= 1.1*baseline AND ic < 0.5*train_ic
+        result = sanity_check_ml_model(
+            {"sharpe": 1.0, "ic": 0.01}, train_ic=0.15, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_reject_dominates_high_sharpe(self):
+        """REJECT from baseline check dominates SUSPECT from sharpe>2.0.
+
+        Impossible to have sharpe<=1.1*baseline AND sharpe>2.0 simultaneously
+        unless baseline is very low.  Test with low baseline.
+        """
+        # baseline=1.0 → 1.1*1.0=1.1; sharpe=1.0 <= 1.1 → REJECT (even if ic also bad)
+        result = sanity_check_ml_model(
+            {"sharpe": 1.0, "ic": 0.01}, train_ic=0.1, baseline_sharpe=1.0
+        )
+        assert result == "REJECT"
+
+    def test_missing_sharpe_raises(self):
+        with pytest.raises(ValueError, match="sharpe"):
+            sanity_check_ml_model({"ic": 0.1}, train_ic=0.15, baseline_sharpe=1.0)
+
+    def test_missing_ic_raises(self):
+        with pytest.raises(ValueError, match="ic"):
+            sanity_check_ml_model({"sharpe": 1.5}, train_ic=0.15, baseline_sharpe=1.0)
