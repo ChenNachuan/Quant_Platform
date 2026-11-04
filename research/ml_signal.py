@@ -190,7 +190,7 @@ def smooth_signal(
 
 #: The two transforms V1 implements.  ``pct_change_N`` is N-period return;
 #: ``zscore_cs`` is per-date cross-sectional z-score.
-TRANSFORMS: tuple[str, ...] = ("pct_change", "zscore_cs")
+TRANSFORMS: tuple[str, ...] = ("pct_change_N", "zscore_cs")
 
 
 def transform_bars(
@@ -232,11 +232,12 @@ def transform_bars(
             raise ValueError(f"invalid pct_change transform: {transform!r}") from None
         if n <= 0:
             raise ValueError(f"pct_change period must be positive, got {n}")
-        return (
+        result = (
             bars.sort_values(["ticker", "date"])
             .groupby("ticker")[field]
             .transform(lambda s: s.pct_change(n))
         )
+        return result.reindex(bars.index)
     raise ValueError(f"unknown transform: {transform!r} (expected one of {TRANSFORMS})")
 
 
@@ -308,7 +309,17 @@ def build_feature_matrix(
                 raise ValueError("bars is required for source=raw features")
             col_name = f"feat_{i}"
             raw = bars[["date", "ticker", field]].copy()
-            raw[col_name] = transform_bars(bars, field, transform)
+            if transform and transform != "none":
+                raw[col_name] = transform_bars(bars, field, transform)
+            else:
+                raw[col_name] = raw[field]
+            # Filter to the requested date window (factor branch gets this
+            # from load_factor; raw must apply it explicitly).
+            raw_dates = pd.to_datetime(raw["date"])
+            raw = raw[
+                (raw_dates >= pd.to_datetime(start))
+                & (raw_dates <= pd.to_datetime(end))
+            ]
             frames.append(raw[["date", "ticker", col_name]])
         else:
             raise ValueError(f"spec[{i}] has unknown source: {source!r}")
@@ -342,7 +353,7 @@ def _canonical_spec_key(spec: dict) -> tuple:
 def features_hash(specs: list[dict], dep_hashes: list[str]) -> str:
     """Compute the feature-set fingerprint.
 
-    ``sha256(canonical_specs_json + "|" + "|".join(sorted(dep_hashes)))``
+    ``sha256(canonical_specs_json + "|" + "|".join(sorted(set(dep_hashes))))``
     where ``canonical_specs_json`` is the sorted-keys, compact-separator JSON
     of *specs* sorted by ``(source, name|field, transform)``.
 
@@ -400,6 +411,21 @@ def model_id(
 # ---------------------------------------------------------------------------
 
 
+def _jsonable(value):
+    """Normalise numpy/pandas scalars so ``json.dumps`` does not crash."""
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
 def write_model(
     name: str,
     major: int,
@@ -423,9 +449,13 @@ def write_model(
 
     Refuses a ``REJECT`` verdict — nothing is written (red line).
     ``PASS``/``SUSPECT`` may be written; ``SUSPECT`` is not promoted.
+    The normalised verdict is persisted in ``metadata.json``.
 
     Returns the deployment directory path.
     """
+    verdict = str(verdict).strip().upper()
+    if verdict not in VERDICTS:
+        raise ValueError(f"verdict must be one of {VERDICTS}, got {verdict!r}")
     if verdict == "REJECT":
         raise ValueError("REJECT models never enter data/models/ (red line)")
 
@@ -436,12 +466,14 @@ def write_model(
 
     config_path = out_dir / "config.json"
     config_path.write_text(
-        json.dumps(config, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(_jsonable(config), indent=2, sort_keys=True), encoding="utf-8"
     )
 
+    meta_with_verdict = {**metadata, "verdict": verdict}
     meta_path = out_dir / "metadata.json"
     meta_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(_jsonable(meta_with_verdict), indent=2, sort_keys=True),
+        encoding="utf-8",
     )
 
     return out_dir
@@ -473,10 +505,11 @@ def write_experiment(
 
     metrics_payload = {**metrics, "created_at": datetime.now(timezone.utc).isoformat()}
     (out_dir / "metrics.json").write_text(
-        json.dumps(metrics_payload, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(_jsonable(metrics_payload), indent=2, sort_keys=True),
+        encoding="utf-8",
     )
     (out_dir / "config.json").write_text(
-        json.dumps(config, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(_jsonable(config), indent=2, sort_keys=True), encoding="utf-8"
     )
 
     return out_dir
@@ -528,11 +561,14 @@ def ensemble_models(
         )
 
     w = [1.0] * len(models) if weights is None else [float(v) for v in weights]
+    for i, wi in enumerate(w):
+        if not np.isfinite(wi) or wi <= 0:
+            raise ValueError(f"weight[{i}] must be finite and positive, got {wi!r}")
 
     # Collect per-model frames.
     frames: list[pd.DataFrame] = []
     for model in models:
-        result = model(X) if X is not None else model()
+        result = model(X)
         if not isinstance(result, pd.DataFrame):
             raise TypeError(f"model must return DataFrame, got {type(result).__name__}")
         _validate_frame(result)
@@ -552,17 +588,17 @@ def ensemble_models(
 
     # Weighted mean with skipna: only models that produced a cell contribute.
     score_cols = [f"score_{i}" for i in range(len(models))]
+    vals = merged[score_cols].to_numpy(dtype="float64")
     w_arr = np.array(w, dtype="float64")
 
-    def _weighted_mean(row) -> float:
-        vals = row[score_cols].to_numpy(dtype="float64")
-        mask = ~np.isnan(vals)
-        if not mask.any():
-            return np.nan
-        w_masked = w_arr[mask]
-        return float(np.dot(vals[mask], w_masked) / w_masked.sum())
+    mask = ~np.isnan(vals)
+    vals_clean = np.where(mask, vals, 0.0)
+    w_masked = np.where(mask, w_arr, 0.0)
+    denom = w_masked.sum(axis=1)
+    numer = (vals_clean * w_arr).sum(axis=1)
+    score = np.where(denom > 0, numer / denom, np.nan)
 
-    merged["score"] = merged[score_cols].apply(_weighted_mean, axis=1)
+    merged["score"] = score
     return merged[["date", "ticker", "score"]].reset_index(drop=True)
 
 
@@ -604,6 +640,13 @@ def sanity_check_ml_model(
     -------
     str
         ``"PASS"``, ``"SUSPECT"``, or ``"REJECT"``.
+
+    Raises
+    ------
+    ValueError
+        If any of ``sharpe``, ``ic``, ``train_ic``, ``baseline_sharpe`` is
+        missing, ``None``, or not a finite number.  NaN must not silently
+        pass the gate.
     """
     sharpe = test_metrics.get("sharpe")
     ic = test_metrics.get("ic")
@@ -611,6 +654,14 @@ def sanity_check_ml_model(
         raise ValueError("test_metrics must carry 'sharpe'")
     if ic is None:
         raise ValueError("test_metrics must carry 'ic'")
+    for label, value in [
+        ("sharpe", sharpe),
+        ("ic", ic),
+        ("train_ic", train_ic),
+        ("baseline_sharpe", baseline_sharpe),
+    ]:
+        if not np.isfinite(value):
+            raise ValueError(f"{label} must be a finite number, got {value!r}")
 
     # REJECT: sharpe not over baseline by 10%.
     if sharpe <= 1.1 * baseline_sharpe:

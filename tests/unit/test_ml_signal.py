@@ -867,3 +867,288 @@ class TestSanityCheckMlModel:
     def test_missing_ic_raises(self):
         with pytest.raises(ValueError, match="ic"):
             sanity_check_ml_model({"sharpe": 1.5}, train_ic=0.15, baseline_sharpe=1.0)
+
+
+# ---------------------------------------------------------------------------
+# OCR regression tests (11 findings)
+# ---------------------------------------------------------------------------
+
+
+class TestOcrRegression:
+    """Regression tests for the 11 OCR second-opinion findings."""
+
+    # -- finding 1: NaN passes sanity_check --------------------------------
+
+    def test_nan_sharpe_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": float("nan"), "ic": 0.1},
+                train_ic=0.15,
+                baseline_sharpe=1.0,
+            )
+
+    def test_nan_ic_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": 1.5, "ic": float("nan")},
+                train_ic=0.15,
+                baseline_sharpe=1.0,
+            )
+
+    def test_nan_train_ic_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": 1.5, "ic": 0.1},
+                train_ic=float("nan"),
+                baseline_sharpe=1.0,
+            )
+
+    def test_nan_baseline_sharpe_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": 1.5, "ic": 0.1},
+                train_ic=0.15,
+                baseline_sharpe=float("nan"),
+            )
+
+    def test_inf_sharpe_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            sanity_check_ml_model(
+                {"sharpe": float("inf"), "ic": 0.1},
+                train_ic=0.15,
+                baseline_sharpe=1.0,
+            )
+
+    # -- finding 2: REJECT guard bypassable -------------------------------
+
+    def test_reject_lowercase_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict="reject",
+                base_dir=str(tmp_path),
+            )
+        assert not (tmp_path / "alpha").exists()
+
+    def test_reject_with_spaces_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict=" REJECT ",
+                base_dir=str(tmp_path),
+            )
+
+    def test_reject_mixed_case_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="REJECT"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict="Reject",
+                base_dir=str(tmp_path),
+            )
+
+    def test_invalid_verdict_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="verdict must be one of"):
+            write_model(
+                "alpha",
+                1,
+                0,
+                model="m",
+                config={},
+                metadata={},
+                verdict="BOGUS",
+                base_dir=str(tmp_path),
+            )
+
+    def test_verdict_persisted_in_metadata(self, tmp_path):
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="m",
+            config={},
+            metadata={},
+            verdict="suspect",
+            base_dir=str(tmp_path),
+        )
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["verdict"] == "SUSPECT"
+
+    # -- finding 3: raw start/end leaks -----------------------------------
+
+    def test_raw_branch_respects_start_end(self):
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+                "ticker": ["A"] * 4,
+                "close": [10.0, 11.0, 12.0, 13.0],
+            }
+        )
+        specs = [{"source": "raw", "field": "close", "transform": "none"}]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-03", bars=bars
+        )
+        dates = pd.to_datetime(result["date"])
+        assert dates.min() >= pd.Timestamp("2024-01-02")
+        assert dates.max() <= pd.Timestamp("2024-01-03")
+        assert len(result) == 2
+
+    # -- finding 4: ensemble weights sum to zero --------------------------
+
+    def test_zero_weight_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            ensemble_models([TestEnsembleModels._m1], weights=[0.0])
+
+    def test_negative_weight_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            ensemble_models(
+                [TestEnsembleModels._m1, TestEnsembleModels._m2], weights=[1.0, -1.0]
+            )
+
+    def test_non_finite_weight_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ensemble_models([TestEnsembleModels._m1], weights=[float("nan")])
+
+    # -- finding 5: model call contract -----------------------------------
+
+    def test_model_without_default_X(self):
+        """A model defined as def f(X) must work when X is None."""
+
+        def strict_model(X):
+            return pd.DataFrame(
+                {"date": ["2024-01-02"], "ticker": ["A"], "score": [1.0]}
+            )
+
+        result = ensemble_models([strict_model])
+        assert result["score"].iloc[0] == pytest.approx(1.0)
+
+    def test_model_with_X_passed(self):
+        """X is passed through to the model callable."""
+        received = {}
+
+        def capture_model(X):
+            received["X"] = X
+            return pd.DataFrame(
+                {"date": ["2024-01-02"], "ticker": ["A"], "score": [1.0]}
+            )
+
+        sentinel = object()
+        ensemble_models([capture_model], X=sentinel)
+        assert received["X"] is sentinel
+
+    # -- finding 6: TRANSFORMS constant -----------------------------------
+
+    def test_transforms_constant_matches_implementation(self):
+        from research.ml_signal import TRANSFORMS
+
+        assert "pct_change_N" in TRANSFORMS
+        assert "pct_change" not in TRANSFORMS
+
+    # -- finding 7: features_hash dedup contract --------------------------
+
+    def test_dep_hash_dedup_documented(self):
+        """sorted(set(dep_hashes)) — duplicates collapse to one entry."""
+        s = [{"source": "factor", "name": "momentum", "transform": "none"}]
+        h1 = features_hash(s, ["abc", "abc", "def"])
+        h2 = features_hash(s, ["abc", "def"])
+        assert h1 == h2
+
+    # -- finding 8: no-op transform in raw branch --------------------------
+
+    def test_raw_branch_none_transform(self):
+        """transform='none' in raw branch copies the field value (no crash)."""
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03"],
+                "ticker": ["A", "A"],
+                "close": [10.0, 11.0],
+            }
+        )
+        specs = [{"source": "raw", "field": "close", "transform": "none"}]
+        result = build_feature_matrix(
+            specs, start="2024-01-02", end="2024-01-03", bars=bars
+        )
+        assert result["feat_0"].tolist() == [10.0, 11.0]
+
+    # -- finding 9: JSON serialisation crash ------------------------------
+
+    def test_write_model_numpy_scalars(self, tmp_path):
+        """numpy scalars and pd.Timestamp in metadata must not crash json.dumps."""
+        metadata = {
+            "sharpe": np.float64(1.5),
+            "count": np.int64(42),
+            "train_date": pd.Timestamp("2024-01-02"),
+            "nested": {"val": np.float32(0.5)},
+        }
+        out = write_model(
+            "alpha",
+            1,
+            0,
+            model="m",
+            config={"lr": np.float64(0.01)},
+            metadata=metadata,
+            base_dir=str(tmp_path),
+        )
+        meta = json.loads((out / "metadata.json").read_text())
+        assert meta["sharpe"] == 1.5
+        assert meta["count"] == 42
+        assert meta["nested"]["val"] == pytest.approx(0.5)
+
+    def test_write_experiment_numpy_scalars(self, tmp_path):
+        metrics = {"sharpe": np.float64(1.5), "nan_val": float("nan")}
+        out = write_experiment(
+            "exp_np", metrics=metrics, config={}, base_dir=str(tmp_path)
+        )
+        m = json.loads((out / "metrics.json").read_text())
+        assert m["sharpe"] == 1.5
+        assert m["nan_val"] is None
+
+    # -- finding 10: transform_bars index contract ------------------------
+
+    def test_pct_change_preserves_original_index(self):
+        """Unsorted input: result index must match bars.index exactly."""
+        bars = pd.DataFrame(
+            {
+                "date": ["2024-01-04", "2024-01-02", "2024-01-03"],
+                "ticker": ["A", "A", "A"],
+                "close": [12.0, 10.0, 11.0],
+            },
+            index=[10, 20, 30],
+        )
+        result = transform_bars(bars, "close", "pct_change_1")
+        assert list(result.index) == [10, 20, 30]
+
+    # -- finding 11: row-wise apply (vectorised ensemble) ------------------
+
+    def test_ensemble_vectorised_correctness(self):
+        """Vectorised weighted mean matches manual computation on larger input."""
+        n = 50
+        dates = ["2024-01-02"] * n
+        tickers = [f"T{i:03d}" for i in range(n)]
+        scores1 = list(range(n))
+        scores2 = [s * 2.0 for s in scores1]
+
+        def m1(X=None):
+            return pd.DataFrame({"date": dates, "ticker": tickers, "score": scores1})
+
+        def m2(X=None):
+            return pd.DataFrame({"date": dates, "ticker": tickers, "score": scores2})
+
+        result = ensemble_models([m1, m2], weights=[3.0, 1.0])
+        # Expected: (3*s1 + 1*s2) / 4 = (3*s + 2*s) / 4 = 5s/4 = 1.25*s
+        expected = [1.25 * s for s in scores1]
+        np.testing.assert_allclose(result["score"].values, expected, rtol=1e-12)
