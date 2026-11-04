@@ -10,24 +10,38 @@ Iteration 1 scope (ac-1, ac-2, ac-4): ``TAG_DIMENSIONS``, ``REGISTRY_DIR``,
 ``promote_alpha_type``, ``log_audit``.
 
 Iteration 2 scope (ac-3, ac-5): ``Rule`` ABC + ``RulePipeline``,
-``run_daily_signal``, ``build_portfolio``, ``compute_turnover``.
+``run_daily_signal``, ``build_portfolio``, ``compute_turnover``,
+``send_alert`` seam.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
+from research.alpha_signal import DEFAULT_K, WEIGHT_METHODS, signal_to_weights
+
 __all__ = [
     "REGISTRY_DIR",
     "TAG_DIMENSIONS",
+    "Rule",
+    "RulePipeline",
+    "TopKFilter",
+    "build_portfolio",
+    "compute_turnover",
     "create_alpha_type",
+    "create_rule",
     "list_alpha_types",
     "log_audit",
     "promote_alpha_type",
+    "run_daily_signal",
+    "send_alert",
     "transition_alpha_type",
 ]
 
@@ -505,3 +519,282 @@ def promote_alpha_type(
         )
 
     return gate_ok
+
+
+# ---------------------------------------------------------------------------
+# send_alert seam (D10)
+# ---------------------------------------------------------------------------
+
+
+def send_alert(
+    level: str,
+    msg: str,
+    alert_type: str = "generic",
+    alpha_type_id: str = "",
+) -> None:
+    """Alert seam (D10).  V1 body logs via std logging; monkeypatched in tests.
+
+    S12 swaps the body to ``ops/alerting.py`` when it lands.
+    Signature matches ``ops/alerting.md`` exactly.
+    """
+    logger.warning(
+        "[%s] %s alert_type=%s alpha_type_id=%s: %s",
+        level,
+        level,
+        alert_type,
+        alpha_type_id,
+        msg,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule ABC + RulePipeline (D11)
+# ---------------------------------------------------------------------------
+
+_RULE_REGISTRY: dict[str, type["Rule"]] = {}
+
+#: Valid rule categories (D11).
+RULE_CATEGORIES = frozenset({"signal_transform", "filter", "position", "risk_gate"})
+
+
+class Rule(ABC):
+    """Base class for all rules (D11).
+
+    Class attrs: ``rule_id``, ``category``, ``param_schema``.
+    Params are type-checked against ``param_schema`` at instantiation.
+    """
+
+    rule_id: str = ""
+    category: str = ""
+    param_schema: dict[str, type] = {}
+
+    def __init__(self, **params: Any) -> None:
+        self._validate_params(params)
+        self.params = params
+
+    def _validate_params(self, params: dict[str, Any]) -> None:
+        for key, expected_type in self.param_schema.items():
+            if key in params:
+                val = params[key]
+                if not isinstance(val, expected_type):
+                    raise ValueError(
+                        f"rule {self.rule_id!r} param {key!r}: "
+                        f"expected {expected_type.__name__}, got {type(val).__name__}"
+                    )
+
+    @abstractmethod
+    def apply(self, data: pd.DataFrame, **params: Any) -> pd.DataFrame:
+        """Transform data.  Must be implemented by subclasses."""
+
+
+class TopKFilter(Rule):
+    """Keep top-k names per date by score (D11: V1 concrete rule)."""
+
+    rule_id = "top_k_filter"
+    category = "filter"
+    param_schema = {"k": int}
+
+    def apply(self, data: pd.DataFrame, **params: Any) -> pd.DataFrame:
+        k = params.get("k", self.params.get("k", DEFAULT_K))
+        valid = data.dropna(subset=["score"])
+        if valid.empty:
+            return valid
+        ranked = valid.sort_values(
+            ["date", "score", "ticker"], ascending=[True, False, True]
+        )
+        return ranked.groupby("date", sort=True).head(k).reset_index(drop=True)
+
+
+def create_rule(rule_id: str, **params: Any) -> Rule:
+    """Factory over the module rule registry (D11)."""
+    if rule_id not in _RULE_REGISTRY:
+        raise ValueError(
+            f"unknown rule_id: {rule_id!r}; registered: {sorted(_RULE_REGISTRY)}"
+        )
+    return _RULE_REGISTRY[rule_id](**params)
+
+
+# Register V1 rules.
+_RULE_REGISTRY["top_k_filter"] = TopKFilter
+
+
+class RulePipeline:
+    """Run rules serially (D11: no parallel/nested composition).
+
+    Container shape: ``list[Rule]`` — rules carry their own params at
+    instantiation (design doc's sketch; the archive sketch ``(rule_id, params)``
+    tuples is the rejected alternative).
+    """
+
+    def __init__(self, rules: list[Rule]) -> None:
+        self.rules = list(rules)
+
+    def run(
+        self, data: pd.DataFrame, params: dict[str, Any] | None = None
+    ) -> pd.DataFrame:
+        """Apply rules in sequence; each receives the prior rule's output."""
+        result = data
+        for rule in self.rules:
+            result = rule.apply(result, **(params or {}))
+        return result
+
+
+# ---------------------------------------------------------------------------
+# compute_turnover (D9)
+# ---------------------------------------------------------------------------
+
+
+def compute_turnover(
+    new_weights: pd.DataFrame,
+    old_weights: pd.DataFrame,
+) -> float:
+    """Turnover = Σ|Δw| / 2 over the outer join (D9).
+
+    Frames are ``[date, ticker, target_weight]``.  Missing rows treated as 0.
+    """
+    merged = new_weights.merge(
+        old_weights,
+        on=["date", "ticker"],
+        how="outer",
+        suffixes=("_new", "_old"),
+    )
+    merged["target_weight_new"] = merged["target_weight_new"].fillna(0.0)
+    merged["target_weight_old"] = merged["target_weight_old"].fillna(0.0)
+    delta = merged["target_weight_new"] - merged["target_weight_old"]
+    return float(delta.abs().sum() / 2.0)
+
+
+# ---------------------------------------------------------------------------
+# build_portfolio (D8)
+# ---------------------------------------------------------------------------
+
+
+def build_portfolio(
+    signal: pd.DataFrame,
+    alpha: dict[str, Any],
+    prev_weights: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Signal → target weights with constraint checks (D8).
+
+    Solve = ``signal_to_weights(signal, method, k)``.  method from
+    ``alpha["params"].get("weight_method", "top_k")``; k from the recipe's
+    TopKFilter rule entry ``params.k``, else ``DEFAULT_K``.  Scale by
+    ``params.total_position`` default 1.0.
+
+    Concentration check (alert-only): per-date max weight >
+    ``params.max_single_weight`` default 0.25 → ``send_alert("MEDIUM")``,
+    no correction.
+
+    Turnover check (alert-only, when *prev_weights* given): turnover >
+    ``params.max_turnover`` default 1.5 → ``send_alert("MEDIUM")``, no trim.
+
+    Solve failure → equal-weight fallback (1/N per date, scaled by
+    total_position); never an empty book.  Empty signal → ``ValueError``.
+    """
+    if signal.empty:
+        raise ValueError("empty signal frame: cannot build portfolio")
+
+    params = alpha.get("params", {})
+    total_position = params.get("total_position", 1.0)
+    method = params.get("weight_method", "top_k")
+    if method not in WEIGHT_METHODS:
+        method = "top_k"
+
+    # Find k from TopKFilter rule entry, else default.
+    k = DEFAULT_K
+    for rule_entry in alpha.get("rules", []):
+        if isinstance(rule_entry, dict) and rule_entry.get("rule_id") == "top_k_filter":
+            k = rule_entry.get("params", {}).get("k", DEFAULT_K)
+            break
+
+    # Solve (D8: analytical, rules are transforms, weights are solver output).
+    try:
+        weights = signal_to_weights(signal, method=method, k=k)
+    except Exception:
+        # Equal-weight fallback: 1/N per date over signal's tickers.
+        weights = _equal_weight_fallback(signal)
+
+    # Scale by total_position.
+    weights["target_weight"] = weights["target_weight"] * total_position
+
+    # Concentration check (alert-only, no correction).
+    max_single = params.get("max_single_weight", 0.25)
+    if not weights.empty:
+        per_date_max = weights.groupby("date")["target_weight"].max()
+        if (per_date_max > max_single).any():
+            send_alert(
+                "MEDIUM",
+                f"concentration alert: max weight exceeds {max_single}",
+                alert_type="concentration",
+                alpha_type_id=alpha.get("alpha_type_id", ""),
+            )
+
+    # Turnover check (alert-only, no trim).
+    if prev_weights is not None and not prev_weights.empty:
+        max_turnover = params.get("max_turnover", 1.5)
+        turnover = compute_turnover(weights, prev_weights)
+        if turnover > max_turnover:
+            send_alert(
+                "MEDIUM",
+                f"turnover alert: {turnover:.2f} exceeds {max_turnover}",
+                alert_type="turnover",
+                alpha_type_id=alpha.get("alpha_type_id", ""),
+            )
+
+    return weights
+
+
+def _equal_weight_fallback(signal: pd.DataFrame) -> pd.DataFrame:
+    """1/N equal weight per date over the signal's tickers (D8 fallback)."""
+    counts = signal.groupby("date")["ticker"].transform("count")
+    out = signal[["date", "ticker"]].copy()
+    out["target_weight"] = 1.0 / counts
+    return out.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# run_daily_signal (D7)
+# ---------------------------------------------------------------------------
+
+
+def run_daily_signal(
+    alpha: dict[str, Any],
+    date: str,
+    prev_portfolio: pd.DataFrame | None = None,
+    *,
+    signal_fn: Any,
+) -> dict[str, Any]:
+    """Daily signal production (D7).  Failure → hold, never liquidate.
+
+    ``signal_fn(alpha, date) -> [date, ticker, score]`` is a required keyword
+    (signal computation is the alpha_signal.md boundary; S12 injects the
+    producer).
+
+    At most 2 attempts (retry 1).  Success →
+    ``{"status": "SUCCESS", "portfolio": weights}``.  Both attempts raise →
+    ``send_alert("HIGH", ...)`` and
+    ``{"status": "HOLD", "portfolio": prev_portfolio}`` — previous book
+    passes through untouched; an empty/liquidating book is never fabricated.
+    No persistence inside (S12 owns the pipeline).
+    """
+    alpha_id = alpha.get("alpha_type_id", "unknown")
+
+    for attempt in range(2):  # retry 1 = 2 attempts total
+        try:
+            signal = signal_fn(alpha, date)
+            weights = build_portfolio(signal, alpha, prev_portfolio)
+            return {"status": "SUCCESS", "portfolio": weights}
+        except Exception as e:
+            if attempt == 0:
+                continue  # retry once
+            # Both attempts failed: HOLD, never liquidate.
+            send_alert(
+                "HIGH",
+                f"signal failed {alpha_id}: {e}",
+                alert_type="signal_failure",
+                alpha_type_id=alpha_id,
+            )
+            return {"status": "HOLD", "portfolio": prev_portfolio}
+
+    # Unreachable, but keeps type checkers happy.
+    return {"status": "HOLD", "portfolio": prev_portfolio}

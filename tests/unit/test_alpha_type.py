@@ -1,22 +1,29 @@
-"""Tests for research.alpha_type — tag validation, lifecycle, audit (S11-T3 iter 1).
+"""Tests for research.alpha_type — governance + runtime (S11-T3).
 
-Covers AC1 (7-dim closed-enum tags, out-of-enum/free-text/missing-dim rejected),
-AC2 (5-state lifecycle legal set, illegal transitions raise), and AC4
-(audit_log.jsonl append-only, corrections are new entries).
+Covers AC1 (7-dim closed-enum tags), AC2 (5-state lifecycle),
+AC3 (run_daily_signal failure → HOLD), AC4 (audit append-only),
+and AC5 (build_portfolio analytical + alerts + fallback).
 """
 
 from __future__ import annotations
 
 import json
 
+import pandas as pd
 import pytest
 
 from research.alpha_type import (
     TAG_DIMENSIONS,
+    RulePipeline,
+    TopKFilter,
+    build_portfolio,
+    compute_turnover,
     create_alpha_type,
+    create_rule,
     list_alpha_types,
     log_audit,
     promote_alpha_type,
+    run_daily_signal,
     transition_alpha_type,
 )
 
@@ -373,3 +380,275 @@ class TestPromoteGate:
         }
         ok = promote_alpha_type(alpha, boundary_eval, registry_dir=registry_dir)
         assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# AC3 — run_daily_signal failure → HOLD (never liquidate)
+# ---------------------------------------------------------------------------
+
+
+def _make_signal(n=5):
+    return pd.DataFrame(
+        {
+            "date": ["2026-01-05"] * n,
+            "ticker": [f"{600000 + i}.SH" for i in range(n)],
+            "score": [float(i + 1) for i in range(n)],
+        }
+    )
+
+
+def _make_prev_portfolio(n=3):
+    return pd.DataFrame(
+        {
+            "date": ["2026-01-02"] * n,
+            "ticker": [f"{600000 + i}.SH" for i in range(n)],
+            "target_weight": [1.0 / n] * n,
+        }
+    )
+
+
+class TestRunDailySignal:
+    """AC3: failure → retry 1 → HOLD prev portfolio + HIGH alert."""
+
+    def test_success_returns_portfolio(self):
+        alpha = {"alpha_type_id": "test", "params": {}}
+        result = run_daily_signal(
+            alpha, "2026-01-05", signal_fn=lambda a, d: _make_signal()
+        )
+        assert result["status"] == "SUCCESS"
+        assert not result["portfolio"].empty
+
+    def test_failure_holds_prev_portfolio(self, monkeypatch):
+        """Both attempts fail → HOLD, prev portfolio passes through unchanged."""
+        alerts = []
+        monkeypatch.setattr(
+            "research.alpha_type.send_alert",
+            lambda level, msg, **kw: alerts.append((level, msg)),
+        )
+        alpha = {"alpha_type_id": "test_hold", "params": {}}
+        prev = _make_prev_portfolio()
+        call_count = 0
+
+        def failing_signal_fn(a, d):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("data source down")
+
+        result = run_daily_signal(
+            alpha, "2026-01-05", prev, signal_fn=failing_signal_fn
+        )
+        assert result["status"] == "HOLD"
+        assert result["portfolio"] is prev  # passes through untouched
+        assert call_count == 2  # retry 1 = 2 attempts
+        assert len(alerts) == 1
+        assert alerts[0][0] == "HIGH"
+        assert "test_hold" in alerts[0][1]
+
+    def test_failure_no_prev_portfolio_holds_none(self, monkeypatch):
+        """No prev portfolio → HOLD returns None (never fabricates empty book)."""
+        monkeypatch.setattr("research.alpha_type.send_alert", lambda *a, **kw: None)
+        alpha = {"alpha_type_id": "test_none", "params": {}}
+
+        def failing_signal_fn(a, d):
+            raise ValueError("bad signal")
+
+        result = run_daily_signal(alpha, "2026-01-05", signal_fn=failing_signal_fn)
+        assert result["status"] == "HOLD"
+        assert result["portfolio"] is None
+
+    def test_retry_on_transient_failure(self):
+        """First attempt fails, second succeeds → SUCCESS."""
+        alpha = {"alpha_type_id": "test_retry", "params": {}}
+        call_count = 0
+
+        def flaky_signal_fn(a, d):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("transient")
+            return _make_signal()
+
+        result = run_daily_signal(alpha, "2026-01-05", signal_fn=flaky_signal_fn)
+        assert result["status"] == "SUCCESS"
+        assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# AC5 — build_portfolio analytical + alerts + fallback
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPortfolio:
+    """AC5: analytical solve, concentration/turnover alerts, equal-weight fallback."""
+
+    def test_analytical_top_k(self):
+        alpha = {
+            "alpha_type_id": "bp_1",
+            "params": {"weight_method": "top_k", "total_position": 1.0},
+            "rules": [{"rule_id": "top_k_filter", "params": {"k": 3}}],
+        }
+        signal = _make_signal(n=5)
+        weights = build_portfolio(signal, alpha)
+        assert not weights.empty
+        # top-3 each at 1/3
+        assert abs(weights["target_weight"].sum() - 1.0) < 1e-9
+
+    def test_total_position_scaling(self):
+        alpha = {
+            "alpha_type_id": "bp_2",
+            "params": {"weight_method": "top_k", "total_position": 0.5},
+            "rules": [{"rule_id": "top_k_filter", "params": {"k": 2}}],
+        }
+        weights = build_portfolio(_make_signal(n=5), alpha)
+        assert abs(weights["target_weight"].sum() - 0.5) < 1e-9
+
+    def test_concentration_alert_no_correction(self, monkeypatch):
+        alerts = []
+        monkeypatch.setattr(
+            "research.alpha_type.send_alert",
+            lambda level, msg, **kw: alerts.append((level, msg)),
+        )
+        alpha = {
+            "alpha_type_id": "bp_conc",
+            "params": {
+                "weight_method": "top_k",
+                "total_position": 1.0,
+                "max_single_weight": 0.10,
+            },
+            "rules": [{"rule_id": "top_k_filter", "params": {"k": 2}}],
+        }
+        weights = build_portfolio(_make_signal(n=5), alpha)
+        # Alert fired but weights not trimmed.
+        assert any("concentration" in m for _, m in alerts)
+        assert abs(weights["target_weight"].sum() - 1.0) < 1e-9  # not trimmed
+
+    def test_turnover_alert_no_trim(self, monkeypatch):
+        alerts = []
+        monkeypatch.setattr(
+            "research.alpha_type.send_alert",
+            lambda level, msg, **kw: alerts.append((level, msg)),
+        )
+        alpha = {
+            "alpha_type_id": "bp_to",
+            "params": {
+                "weight_method": "top_k",
+                "total_position": 1.0,
+                "max_turnover": 0.1,
+            },
+            "rules": [{"rule_id": "top_k_filter", "params": {"k": 3}}],
+        }
+        prev = _make_prev_portfolio(n=3)
+        build_portfolio(_make_signal(n=5), alpha, prev)
+        assert any("turnover" in m for _, m in alerts)
+
+    def test_equal_weight_fallback_on_solve_failure(self, monkeypatch):
+        """Solver exception → 1/N fallback, never empty."""
+        monkeypatch.setattr("research.alpha_type.send_alert", lambda *a, **kw: None)
+        alpha = {
+            "alpha_type_id": "bp_fb",
+            "params": {"weight_method": "top_k", "total_position": 1.0},
+            "rules": [],
+        }
+        signal = _make_signal(n=4)
+        # Force solver failure by monkeypatching signal_to_weights.
+        monkeypatch.setattr(
+            "research.alpha_type.signal_to_weights",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("solver fail")),
+        )
+        weights = build_portfolio(signal, alpha)
+        assert not weights.empty
+        assert abs(weights["target_weight"].sum() - 1.0) < 1e-9  # 1/N * 4 = 1.0
+
+    def test_empty_signal_raises(self):
+        alpha = {"alpha_type_id": "bp_empty", "params": {}}
+        with pytest.raises(ValueError, match="empty signal"):
+            build_portfolio(pd.DataFrame(), alpha)
+
+
+# ---------------------------------------------------------------------------
+# D9 — compute_turnover
+# ---------------------------------------------------------------------------
+
+
+class TestComputeTurnover:
+    """D9: Σ|Δw|/2 over outer join, missing = 0."""
+
+    def test_identical_weights_zero_turnover(self):
+        w = pd.DataFrame(
+            {
+                "date": ["2026-01-05"] * 3,
+                "ticker": ["A", "B", "C"],
+                "target_weight": [0.4, 0.3, 0.3],
+            }
+        )
+        assert compute_turnover(w, w) == 0.0
+
+    def test_full_replacement_turnover_one(self):
+        old = pd.DataFrame(
+            {
+                "date": ["2026-01-05"] * 2,
+                "ticker": ["A", "B"],
+                "target_weight": [0.5, 0.5],
+            }
+        )
+        new = pd.DataFrame(
+            {
+                "date": ["2026-01-05"] * 2,
+                "ticker": ["C", "D"],
+                "target_weight": [0.5, 0.5],
+            }
+        )
+        # |Δw| for A=0.5, B=0.5, C=0.5, D=0.5 → Σ=2.0 → /2 = 1.0
+        assert abs(compute_turnover(new, old) - 1.0) < 1e-9
+
+    def test_partial_change(self):
+        old = pd.DataFrame(
+            {
+                "date": ["2026-01-05"] * 2,
+                "ticker": ["A", "B"],
+                "target_weight": [0.6, 0.4],
+            }
+        )
+        new = pd.DataFrame(
+            {
+                "date": ["2026-01-05"] * 2,
+                "ticker": ["A", "B"],
+                "target_weight": [0.4, 0.6],
+            }
+        )
+        # |Δw| = 0.2 + 0.2 = 0.4 → /2 = 0.2
+        assert abs(compute_turnover(new, old) - 0.2) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# D11 — Rule / RulePipeline
+# ---------------------------------------------------------------------------
+
+
+class TestRulePipeline:
+    """D11: Rule ABC, param validation, serial pipeline."""
+
+    def test_top_k_filter(self):
+        rule = TopKFilter(k=2)
+        data = _make_signal(n=5)
+        result = rule.apply(data)
+        assert len(result) == 2
+
+    def test_param_type_checked(self):
+        with pytest.raises(ValueError, match="expected int"):
+            TopKFilter(k="not_an_int")
+
+    def test_create_rule_factory(self):
+        rule = create_rule("top_k_filter", k=3)
+        assert rule.rule_id == "top_k_filter"
+        assert rule.category == "filter"
+
+    def test_create_rule_unknown(self):
+        with pytest.raises(ValueError, match="unknown rule_id"):
+            create_rule("nonexistent")
+
+    def test_pipeline_serial(self):
+        pipeline = RulePipeline([TopKFilter(k=3), TopKFilter(k=2)])
+        data = _make_signal(n=5)
+        result = pipeline.run(data)
+        assert len(result) == 2  # first filter to 3, then to 2
