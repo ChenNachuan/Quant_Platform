@@ -433,6 +433,42 @@ class TestConditions:
 
 
 class TestCorruptLogRobustness:
+    def test_append_after_a_truncated_tail_does_not_glue(self):
+        # A crash mid-append leaves the tail without its newline. The next
+        # alert must start its own line — gluing onto the fragment would lose
+        # both rows to one unparseable line (T1 review residual).
+        send_alert("HIGH", "first", alert_type="data_delay")
+        with alerting.ALERTS_JSONL.open("a", encoding="utf-8") as fh:
+            fh.write('{"date": "2026-11-04", "lev')  # no trailing newline
+        send_alert("MEDIUM", "second", alert_type="nav_drop", alpha_type_id="alpha-x")
+        lines = alerting.ALERTS_JSONL.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3  # fragment on its own line, not glued
+        assert lines[1] == '{"date": "2026-11-04", "lev'
+        assert json.loads(lines[0])["msg"] == "first"
+        row = json.loads(lines[2])
+        assert row["msg"] == "second"
+        assert row["alert_type"] == "nav_drop"
+
+    def test_seed_state_tolerates_non_dict_json_lines(self):
+        # A valid-JSON non-object line ("[1,2]", "42", '"str"') is not a row;
+        # reseed must skip it the way _replace_row does (T1 review residual).
+        send_alert("HIGH", "first", alert_type="data_delay")
+        with alerting.ALERTS_JSONL.open("a", encoding="utf-8") as fh:
+            fh.write('[1, 2, 3]\n42\n"str"\n')
+        reset_state()  # restart: the day reseeds from whatever parses
+        send_alert("HIGH", "again", alert_type="data_delay")
+        rows = [
+            r
+            for r in (
+                json.loads(line)
+                for line in alerting.ALERTS_JSONL.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+            if isinstance(r, dict)
+        ]
+        assert [r["msg"] for r in rows] == ["first"]  # deduped, nothing lost
+
     def test_corrupt_line_does_not_kill_an_upgrade(self):
         send_alert("MEDIUM", "low", alert_type="nav_drop", alpha_type_id="alpha-x")
         send_alert("HIGH", "other", alert_type="risk_reject", alpha_type_id="alpha-y")

@@ -5,8 +5,8 @@ QUANT-48 T1 (ac-5) scope: the ``run_job`` engine (retry / timeout /
 ``log_job_run`` over ``logs/runs/jobs.jsonl``, ``JOB_REGISTRY`` for the five
 job classes, and the cross-process run mutex reusing
 :class:`data.storage_ops.FileLock`. ``daily_pipeline`` (T2) runs the 5-job
-chain over that engine; the ``health_check`` / ``write_daily_report`` bodies
-stay S12-T2 / S12-T3 placeholders at their call sites.
+chain over that engine; ``health_check`` runs the S12-T2 body
+(``ops.monitoring``) and ``write_daily_report`` stays an S12-T3 placeholder.
 
 Seams pinned in ``task/plan_quant48.md``:
 
@@ -43,7 +43,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from data.storage_ops import FileLock
-from research.alpha_type import send_alert
+from ops.alerting import send_alert
+from ops.monitoring import health_check
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -190,7 +191,7 @@ JOB_REGISTRY: dict[str, Callable[[], Any]] = {
     "run_daily_signal": _pending(
         "run_daily_signal", "S12 injects the signal_fn producer"
     ),
-    "health_check": _pending("health_check", "S12-T2 body"),
+    "health_check": health_check,
     "write_daily_report": _pending("write_daily_report", "S12-T3 body"),
 }
 
@@ -367,7 +368,12 @@ def run_job(
                 if on_failure == "hold" or held:
                     hold_previous_portfolio(name)  # §65.6: keep previous book
                 mark_downstream_skipped(name)  # review gap: both paths record
-                send_alert("HIGH", f"job {name} failed: {error}")
+                send_alert(
+                    "HIGH",
+                    f"job {name} failed: {error}",
+                    alert_type="job_failure",
+                    alpha_type_id=name,
+                )
                 return record
             log_job_run(
                 name,

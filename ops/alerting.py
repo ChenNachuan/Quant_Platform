@@ -324,6 +324,8 @@ def _seed_state(iso_day: str) -> None:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(row, dict):
+            continue
         if row.get("date") != iso_day:
             continue
         key = row.get("key")
@@ -339,11 +341,23 @@ def _seed_state(iso_day: str) -> None:
 
 
 def log_alert(payload: dict) -> None:
-    """Append one row to ``data/ops/alerts.jsonl`` (design signature)."""
+    """Append one row to ``data/ops/alerts.jsonl`` (design signature).
+
+    A tail left without its trailing newline by an interrupted append would
+    glue the new row onto the fragment and lose both rows to one unparseable
+    line — so the tail is checked and a break line goes in first.
+    """
     with _write_lock:
         path = ALERTS_JSONL
         path.parent.mkdir(parents=True, exist_ok=True)
+        needs_break = False
+        if path.exists() and path.stat().st_size > 0:
+            with path.open("rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                needs_break = fh.read(1) != b"\n"
         with path.open("a", encoding="utf-8") as fh:
+            if needs_break:
+                fh.write("\n")
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
