@@ -4,8 +4,9 @@ QUANT-48 T1 (ac-5) scope: the ``run_job`` engine (retry / timeout /
 ``on_failure`` ``skip|hold``), the nine-field run-record writer
 ``log_job_run`` over ``logs/runs/jobs.jsonl``, ``JOB_REGISTRY`` for the five
 job classes, and the cross-process run mutex reusing
-:class:`data.storage_ops.FileLock`. ``daily_pipeline`` orchestration and the
-``health_check`` / ``write_daily_report`` bodies land in T2 / S12-T2 / S12-T3.
+:class:`data.storage_ops.FileLock`. ``daily_pipeline`` (T2) runs the 5-job
+chain over that engine; the ``health_check`` / ``write_daily_report`` bodies
+stay S12-T2 / S12-T3 placeholders at their call sites.
 
 Seams pinned in ``task/plan_quant48.md``:
 
@@ -13,9 +14,14 @@ Seams pinned in ``task/plan_quant48.md``:
    ``{"status": "HOLD", ...}`` **without raising**. A returned ``HOLD`` is the
    hold outcome: record ``status=FAILED`` (the enum has no HOLD), ``error``
    carries the inner reason, take the hold path, and do **not** re-retry.
-2. A ``FAILED`` job with ``on_failure="skip"`` writes a ``SKIPPED`` record for
-   *every* later job in ``JOB_ORDER``. ``daily_pipeline`` must not execute
-   those jobs afterwards — the records already exist.
+2. A terminal ``FAILED`` job writes a ``SKIPPED`` record for *every* later job
+   in ``JOB_ORDER``, on the skip **and** the hold path (review gap: hold is a
+   portfolio action, skip-marks are record bookkeeping — not exclusive).
+   ``daily_pipeline`` must not execute those jobs afterwards — the records
+   already exist.
+3. A ``SKIPPED`` signal job also holds: no new signal, no new book.
+   ``daily_pipeline`` holds the previous portfolio when ``run_daily_signal``
+   never ran.
 4. ``fetch_stock_daily`` is a Docker-container script, not importable
    in-process; ``JOB_REGISTRY`` wraps it as a subprocess (tests inject fakes
    via ``run_job(..., fn=...)`` and never touch Docker).
@@ -316,9 +322,10 @@ def run_job(
     run record and returns the outcome record.
 
     Failure handling after retries are exhausted: ``on_failure="hold"`` (or a
-    returned ``{"status": "HOLD"}``, seam 1) takes the hold path and never
-    liquidates; ``on_failure="skip"`` writes ``SKIPPED`` records for every
-    later job (seam 2). Either way exactly one HIGH alert is sent.
+    returned ``{"status": "HOLD"}``, seam 1) holds the previous portfolio and
+    never liquidates. Either way every later job gets a ``SKIPPED`` record
+    (seam 2 — the hold path records the skips too) and exactly one HIGH alert
+    is sent.
     """
     if on_failure not in ("skip", "hold"):
         raise ValueError(f'on_failure must be "skip" or "hold", got {on_failure!r}')
@@ -358,9 +365,8 @@ def run_job(
                     finished=finished,
                 )
                 if on_failure == "hold" or held:
-                    hold_previous_portfolio(name)
-                else:
-                    mark_downstream_skipped(name)
+                    hold_previous_portfolio(name)  # §65.6: keep previous book
+                mark_downstream_skipped(name)  # review gap: both paths record
                 send_alert("HIGH", f"job {name} failed: {error}")
                 return record
             log_job_run(
@@ -375,3 +381,24 @@ def run_job(
     raise AssertionError(
         "unreachable: the last attempt always returns"
     )  # pragma: no cover
+
+
+def daily_pipeline() -> None:
+    """日频流水线: 数据→因子→信号→巡检→日报 (design-doc signature).
+
+    Runs the five jobs in ``JOB_ORDER`` under the run mutex (seam 6), each
+    with its ``JOB_CONFIG`` row, and stops at the first non-SUCCESS —
+    ``run_job`` has already written the downstream ``SKIPPED`` records.
+    Seam 3: if the signal job never ran, hold the previous portfolio (a
+    failed signal job already held inside ``run_job``).
+    """
+    with run_mutex():
+        signal_ran = False
+        for name in JOB_ORDER:
+            record = run_job(name, **JOB_CONFIG[name])
+            if name == "run_daily_signal":
+                signal_ran = True
+            if record["status"] != "SUCCESS":
+                break
+        if not signal_ran:
+            hold_previous_portfolio("run_daily_signal")  # seam 3: no new book

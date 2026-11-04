@@ -258,11 +258,6 @@ class TestFailurePropagation:
         monkeypatch.setattr(
             scheduler, "hold_previous_portfolio", lambda name: holds.append(name)
         )
-        monkeypatch.setattr(
-            scheduler,
-            "mark_downstream_skipped",
-            lambda name: pytest.fail("hold path must not mark downstream skipped"),
-        )
         calls = []
 
         def held():
@@ -275,6 +270,9 @@ class TestFailurePropagation:
         assert record["error"] == "signal failed alpha-1"  # inner reason
         assert holds == ["run_daily_signal"]
         assert len(sent_alerts) == 1 and sent_alerts[0][0] == "HIGH"
+        # Review gap (T1): the hold path also records the downstream skips.
+        skipped = [r["job_name"] for r in _read_rows() if r["status"] == "SKIPPED"]
+        assert skipped == ["health_check", "write_daily_report"]
 
     def test_hold_return_error_defaults_when_inner_reason_absent(self, monkeypatch):
         monkeypatch.setattr(scheduler, "hold_previous_portfolio", lambda name: {})
@@ -283,17 +281,20 @@ class TestFailurePropagation:
         assert record["error"] == "returned status=HOLD"
 
     def test_signal_failure_takes_hold_path(self, monkeypatch):
-        holds, skips = [], []
+        holds = []
         monkeypatch.setattr(
             scheduler, "hold_previous_portfolio", lambda name: holds.append(name)
         )
-        monkeypatch.setattr(
-            scheduler, "mark_downstream_skipped", lambda name: skips.append(name)
-        )
         record = run_job("run_daily_signal", fn=_boom, retries=0, on_failure="hold")
         assert record["status"] == "FAILED"
-        assert holds == ["run_daily_signal"]
-        assert skips == []  # hold is never a liquidation and never a skip mark
+        assert holds == ["run_daily_signal"]  # hold is never a liquidation
+        # Review gap (T1): hold and skip-marks are not exclusive — the tail
+        # never ran, so it gets SKIPPED rows either way.
+        rows = _read_rows()
+        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == [
+            "health_check",
+            "write_daily_report",
+        ]
 
 
 # ---------------------------------------------------------------------------
