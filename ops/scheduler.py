@@ -6,7 +6,14 @@ QUANT-48 T1 (ac-5) scope: the ``run_job`` engine (retry / timeout /
 job classes, and the cross-process run mutex reusing
 :class:`data.storage_ops.FileLock`. ``daily_pipeline`` (T2) runs the 5-job
 chain over that engine; ``health_check`` runs the S12-T2 body
-(``ops.monitoring``) and ``write_daily_report`` stays an S12-T3 placeholder.
+(``ops.monitoring``).
+
+QUANT-50 T2 wires the reporting tail (``docs/design/ops/reporting.md``,
+"daily_pipeline 尾部链路"): ``write_daily_report`` gets its body, and a
+month-end day **appends** the attribution job to the chain
+(:data:`MONTH_END_JOB`). The chain a day runs is :func:`job_chain` — the five
+daily jobs are :data:`JOB_ORDER` on any day, plus the attribution job when
+:func:`is_month_end` holds.
 
 Seams pinned in ``task/plan_quant48.md``:
 
@@ -15,10 +22,12 @@ Seams pinned in ``task/plan_quant48.md``:
    hold outcome: record ``status=FAILED`` (the enum has no HOLD), ``error``
    carries the inner reason, take the hold path, and do **not** re-retry.
 2. A terminal ``FAILED`` job writes a ``SKIPPED`` record for *every* later job
-   in ``JOB_ORDER``, on the skip **and** the hold path (review gap: hold is a
+   in the day's chain, on the skip **and** the hold path (review gap: hold is a
    portfolio action, skip-marks are record bookkeeping — not exclusive).
    ``daily_pipeline`` must not execute those jobs afterwards — the records
-   already exist.
+   already exist. The chain defaults to :data:`JOB_ORDER`; ``daily_pipeline``
+   passes :func:`job_chain` so a month-end day's attribution job is
+   skip-marked too.
 3. A ``SKIPPED`` signal job also holds: no new signal, no new book.
    ``daily_pipeline`` holds the previous portfolio when ``run_daily_signal``
    never ran.
@@ -38,13 +47,21 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
+
+import pandas as pd
 
 from data.storage_ops import FileLock
-from ops.alerting import send_alert
-from ops.monitoring import health_check
+from ops.alerting import evaluate_alerts, send_alert
+from ops.monitoring import (
+    active_alpha_type_id,
+    collect_day,
+    health_check,
+    nav_series,
+)
+from ops.reporting import write_attribution_report, write_daily_report
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,15 +93,88 @@ JOB_ORDER = (
     "write_daily_report",
 )
 
+#: The month-end attribution job. Not in :data:`JOB_ORDER`: reporting.md
+#: appends it to the tail of a month-end day's run ("月末追加归因 Job"), so it
+#: is part of :func:`job_chain` for those days only.
+MONTH_END_JOB = "month_end_attribution"
+
+#: Where :data:`MONTH_END_JOB` reads its three factor frames — one
+#: ``{month}/`` directory per run holding ``weights.parquet``,
+#: ``factor_returns.parquet`` and ``factor_exposures.parquet``, the shapes
+#: :func:`research.factor_combiner.factor_contribution` documents. The signal
+#: and factor jobs produce them (``signal_to_weights`` for the book); they are
+#: not on disk until those jobs are wired, and absent files are a missing
+#: input — the engine records FAILED and alerts, scheduler.md's "无数据" path.
+ATTRIBUTION_DIR = Path("data/ops/attribution")
+
 #: The design job table (docs/design/ops/scheduler.md). Call sites pass these
 #: to ``run_job`` (its signature defaults stay the doc's verbatim ones).
+#:
+#: The last row is reporting.md's month-end job, not scheduler.md's 5-job
+#: table — it runs only on the days :func:`job_chain` puts it in.
 JOB_CONFIG = {
     "fetch_stock_daily": {"retries": 2, "timeout_s": 300, "on_failure": "skip"},
     "compute_all": {"retries": 1, "timeout_s": 300, "on_failure": "skip"},
     "run_daily_signal": {"retries": 1, "timeout_s": 300, "on_failure": "hold"},
     "health_check": {"retries": 1, "timeout_s": 300, "on_failure": "skip"},
     "write_daily_report": {"retries": 1, "timeout_s": 300, "on_failure": "skip"},
+    MONTH_END_JOB: {"retries": 1, "timeout_s": 300, "on_failure": "skip"},
 }
+
+
+def reporting_day() -> str:
+    """The day this run reports on, as ``YYYY-MM-DD``.
+
+    One name for "which day is it", so the chain (:func:`job_chain`) and the
+    job bodies stamp the same date — a month-end run must not select one day's
+    chain and write another day's report. Production leaves it alone; the tests
+    patch it to pin a day.
+    """
+    return date.today().isoformat()
+
+
+def is_month_end(day: Any) -> bool:
+    """Whether *day* is the month's last pipeline day (Mon–Fri).
+
+    ``daily_pipeline`` is scheduled ``day_of_week="mon-fri"``, so a month that
+    ends on a Saturday attributes on the Friday before it: "月末追加归因" is the
+    month's **last run**, not the calendar's last date. A month ending on a
+    weekday attributes that day. Weekend dates are never a run and never
+    month-end.
+
+    There is no trading calendar in the tree yet (the platform has
+    ``data/calendar_adjustment`` but no holiday table), so this is weekdays.
+    When a calendar lands, the last *trading* day is the right reading.
+    """
+    try:
+        if isinstance(day, datetime):
+            d = day.date()
+        elif isinstance(day, date):
+            d = day
+        else:
+            d = date.fromisoformat(str(day)[:10])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"not a date: {day!r}") from exc
+    if d.weekday() >= 5:
+        return False
+    nxt = d + timedelta(days=1)
+    while nxt.month == d.month:
+        if nxt.weekday() < 5:
+            return False
+        nxt += timedelta(days=1)
+    return True
+
+
+def job_chain(day: Any = None) -> tuple[str, ...]:
+    """The jobs ``daily_pipeline`` runs on *day* (default :func:`reporting_day`).
+
+    The five daily jobs always; :data:`MONTH_END_JOB` appended on a month-end
+    day. This is the single source of truth for "what runs when" — the run
+    records, the skip marks and the tests all read it.
+    """
+    if day is None:
+        day = reporting_day()
+    return JOB_ORDER + ((MONTH_END_JOB,) if is_month_end(day) else ())
 
 
 class JobTimeoutError(TimeoutError):
@@ -183,6 +273,118 @@ def fetch_stock_daily() -> str:
     return (proc.stdout or "").strip()[-200:] or "fetch_stock_daily exited 0"
 
 
+# ---------------------------------------------------------------------------
+# The reporting tail (reporting.md "daily_pipeline 尾部链路") and its inputs
+# ---------------------------------------------------------------------------
+
+
+def _quarter(month: str) -> str:
+    """``YYYY-Qn`` for a ``YYYY-MM`` month, the attribution filename's slot."""
+    year, mon = month.split("-")
+    return f"{year}Q{(int(mon) - 1) // 3 + 1}"
+
+
+def monthly_returns(end_day: str) -> tuple[pd.Series, pd.Series]:
+    """Month-end-to-month-end portfolio and benchmark returns to *end_day*.
+
+    The Alpha-Beta fit is 月频 — the design annualises with a flat ``×12``
+    (``alpha_annual = alpha_monthly × 12``), which only reads correctly if the
+    regression is on monthly returns. So the journal's daily nav is cut to the
+    **last observation in each calendar month** and differenced there; the
+    first month has no prior base and is dropped.
+
+    Returns two equal-length series so
+    :func:`ops.reporting.alpha_beta_attribution` can pair them positionally and
+    drop the rows where either side is missing.
+    """
+    nav, bench = nav_series(end_day)
+    if len(nav) < 2:
+        raise ValueError(
+            f"need >= 2 nav observations for monthly returns, got {len(nav)}"
+        )
+    frame = pd.DataFrame(
+        {"nav": nav.to_numpy(), "b": bench.to_numpy()}, index=nav.index
+    )
+    months = frame.index.to_period("M")
+    monthly = frame.loc[~months.duplicated(keep="last")]
+    if len(monthly) < 2:
+        raise ValueError(
+            f"need >= 2 calendar months of nav for monthly returns, got {len(monthly)}"
+        )
+    for col in ("nav", "b"):
+        base = monthly[col].shift(1).iloc[1:]
+        if bool((base == 0).any()):
+            raise ValueError(f"{col} has a zero month — monthly returns undefined")
+    r_p = (monthly["nav"] / monthly["nav"].shift(1) - 1.0).iloc[1:]
+    r_b = (monthly["b"] / monthly["b"].shift(1) - 1.0).iloc[1:]
+    return r_p, r_b
+
+
+def attribution_frames(
+    month: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """The three factor frames behind the month-end breakdown.
+
+    Reads :data:`ATTRIBUTION_DIR` ``/{month}/`` — the signal and factor jobs
+    write ``weights.parquet`` (``[date, ticker, weight]``, the book
+    ``signal_to_weights`` produced), ``factor_returns.parquet`` and
+    ``factor_exposures.parquet`` there. Nothing here invents or fills a frame:
+    absent files are a missing input, and the job fails on them so the engine
+    records FAILED and alerts rather than shipping a half-attributed month.
+    """
+    base = Path(ATTRIBUTION_DIR) / month
+    frames: list[pd.DataFrame] = []
+    for stem in ("weights", "factor_returns", "factor_exposures"):
+        path = base / f"{stem}.parquet"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"no {stem} for {month} at {path} — the signal/factor jobs write "
+                f"it into {ATTRIBUTION_DIR}/{month}/"
+            )
+        frames.append(pd.read_parquet(path))
+    return frames[0], frames[1], frames[2]
+
+
+def write_daily_report_job() -> str:
+    """The ``write_daily_report`` job body: collect → alerts → report.
+
+    Same shape as :func:`ops.monitoring.health_check` — one day's read, one
+    artefact, a one-line summary for the run record. The nav curve beside the
+    report is drawn from the same journal snapshots the tables were measured
+    on, so the picture and the numbers cannot drift apart.
+    """
+    day = reporting_day()
+    metrics, facts = collect_day(day)
+    nav, _ = nav_series(day)
+    path = write_daily_report(day, metrics, evaluate_alerts(facts), nav=nav)
+    return f"daily report {day}: {path}"
+
+
+def month_end_attribution() -> str:
+    """The month-end attribution job body (reporting.md, 月末追加归因 Job).
+
+    Alpha-Beta fit and the factor-contribution breakdown into one
+    ``attribution_{alpha_type_id}_{quarter}.md``. The breakdown is
+    :func:`research.factor_combiner.factor_contribution` via
+    :func:`ops.reporting.write_attribution_report` — this body supplies the
+    frames and does not redo the arithmetic (ac-4).
+    """
+    day = reporting_day()
+    month = day[:7]
+    r_p, r_b = monthly_returns(day)
+    weights, factor_returns, factor_exposures = attribution_frames(month)
+    path = write_attribution_report(
+        active_alpha_type_id(),
+        _quarter(month),
+        r_p,
+        r_b,
+        weights=weights,
+        factor_returns=factor_returns,
+        factor_exposures=factor_exposures,
+    )
+    return f"attribution {month}: {path}"
+
+
 #: The five job classes (5 类 Job) and their callables. ``run_job(name)``
 #: without ``fn`` looks the callable up here. Tests monkeypatch entries.
 JOB_REGISTRY: dict[str, Callable[[], Any]] = {
@@ -192,7 +394,8 @@ JOB_REGISTRY: dict[str, Callable[[], Any]] = {
         "run_daily_signal", "S12 injects the signal_fn producer"
     ),
     "health_check": health_check,
-    "write_daily_report": _pending("write_daily_report", "S12-T3 body"),
+    "write_daily_report": write_daily_report_job,
+    MONTH_END_JOB: month_end_attribution,
 }
 
 
@@ -287,12 +490,18 @@ def log_job_run(
     return record
 
 
-def mark_downstream_skipped(name: str) -> list[dict]:
-    """Seam 2: ``SKIPPED`` records for every job after *name* in ``JOB_ORDER``."""
+def mark_downstream_skipped(name: str, chain: Sequence[str] = JOB_ORDER) -> list[dict]:
+    """Seam 2: ``SKIPPED`` records for every job after *name* in *chain*.
+
+    *chain* is the day's job chain (:func:`job_chain`), defaulting to
+    :data:`JOB_ORDER` so a bare call keeps the five daily jobs' behaviour. A
+    month-end day passes the six-job chain so the attribution job is
+    skip-marked when an earlier job dies.
+    """
     records: list[dict] = []
-    if name not in JOB_ORDER:
+    if name not in chain:
         return records
-    for later in JOB_ORDER[JOB_ORDER.index(name) + 1 :]:
+    for later in chain[chain.index(name) + 1 :]:
         records.append(
             log_job_run(later, "SKIPPED", error=f"skipped: upstream {name} failed")
         )
@@ -315,6 +524,8 @@ def run_job(
     retries: int = 1,
     timeout_s: int = 300,
     on_failure: str = "skip",
+    *,
+    chain: Sequence[str] = JOB_ORDER,
 ) -> dict:
     """Run one job with retry / timeout / failure handling.
 
@@ -327,6 +538,11 @@ def run_job(
     never liquidates. Either way every later job gets a ``SKIPPED`` record
     (seam 2 — the hold path records the skips too) and exactly one HIGH alert
     is sent.
+
+    ``chain`` is the day's job chain, threaded to
+    :func:`mark_downstream_skipped`. It is keyword-only so the design-doc call
+    ``run_job(name, fn, retries, timeout_s, on_failure)`` keeps working
+    verbatim.
     """
     if on_failure not in ("skip", "hold"):
         raise ValueError(f'on_failure must be "skip" or "hold", got {on_failure!r}')
@@ -367,7 +583,7 @@ def run_job(
                 )
                 if on_failure == "hold" or held:
                     hold_previous_portfolio(name)  # §65.6: keep previous book
-                mark_downstream_skipped(name)  # review gap: both paths record
+                mark_downstream_skipped(name, chain)  # review gap: both paths
                 send_alert(
                     "HIGH",
                     f"job {name} failed: {error}",
@@ -392,16 +608,19 @@ def run_job(
 def daily_pipeline() -> None:
     """日频流水线: 数据→因子→信号→巡检→日报 (design-doc signature).
 
-    Runs the five jobs in ``JOB_ORDER`` under the run mutex (seam 6), each
-    with its ``JOB_CONFIG`` row, and stops at the first non-SUCCESS —
-    ``run_job`` has already written the downstream ``SKIPPED`` records.
+    Runs the day's :func:`job_chain` under the run mutex (seam 6), each with
+    its ``JOB_CONFIG`` row, and stops at the first non-SUCCESS — ``run_job``
+    has already written the downstream ``SKIPPED`` records. The chain is the
+    five daily jobs, plus the month-end attribution job on a month-end day
+    (reporting.md: "17:05 ``write_daily_report``；月末追加归因 Job").
     Seam 3: if the signal job never ran, hold the previous portfolio (a
     failed signal job already held inside ``run_job``).
     """
+    chain = job_chain()
     with run_mutex():
         signal_ran = False
-        for name in JOB_ORDER:
-            record = run_job(name, **JOB_CONFIG[name])
+        for name in chain:
+            record = run_job(name, chain=chain, **JOB_CONFIG[name])
             if name == "run_daily_signal":
                 signal_ran = True
             if record["status"] != "SUCCESS":

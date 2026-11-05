@@ -21,8 +21,10 @@ from ops.scheduler import (
     JOB_CONFIG,
     JOB_ORDER,
     JOB_REGISTRY,
+    MONTH_END_JOB,
     RUN_RECORD_FIELDS,
     RUN_STATUSES,
+    job_chain,
     log_job_run,
     mark_downstream_skipped,
     run_job,
@@ -336,8 +338,16 @@ class TestRunMutex:
 
 class TestJobTable:
     def test_registry_config_and_order_agree(self):
-        assert set(JOB_REGISTRY) == set(JOB_CONFIG) == set(JOB_ORDER)
+        # The five daily jobs, plus the month-end attribution job that
+        # reporting.md appends to a month-end day's chain and to no other.
+        assert set(JOB_REGISTRY) == set(JOB_CONFIG) == set(JOB_ORDER) | {MONTH_END_JOB}
         assert all(callable(fn) for fn in JOB_REGISTRY.values())
+        assert MONTH_END_JOB not in JOB_ORDER
+
+    def test_job_chain_is_the_daily_five_plus_month_end(self):
+        assert job_chain("2026-11-16") == JOB_ORDER
+        assert job_chain("2026-11-30") == JOB_ORDER + (MONTH_END_JOB,)
+        assert job_chain("2026-05-29") == JOB_ORDER + (MONTH_END_JOB,)
 
     def test_retry_and_hold_facts(self):
         assert JOB_CONFIG["fetch_stock_daily"]["retries"] == 2
