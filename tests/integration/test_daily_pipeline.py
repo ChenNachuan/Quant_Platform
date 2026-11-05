@@ -8,9 +8,16 @@ ac-4: data-job failure -> later jobs ``SKIPPED`` + exactly one HIGH alert;
 ac-6 (QUANT-49 T2): after the pipeline, ``data/ops/metrics.jsonl`` holds the
       day's 12-row snapshot — the real ``health_check`` body inside the chain.
 
+ac-5 (QUANT-50 T2): the month-end attribution job is appended to the chain on
+      a month-end day and to no other day.
+
 Seam 1: a returned ``{"status": "HOLD"}`` maps to ``FAILED`` with no re-retry.
 Seam 3: a ``SKIPPED`` signal job also holds. Review gap (T1): the hold path
 also writes the downstream ``SKIPPED`` rows.
+
+The chain is day-dependent — ``job_chain(day)`` is what runs when — so every
+assertion about *which* jobs ran reads that function rather than hardcoding a
+length. Otherwise these fail on the one day a month the chain grows.
 """
 
 from __future__ import annotations
@@ -18,13 +25,22 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import pandas as pd
 import pytest
 
 import ops.alerting as alerting
 import ops.monitoring as monitoring
 import ops.scheduler as scheduler
 from ops.monitoring import STRATEGY_METRICS, SYSTEM_METRICS
-from ops.scheduler import JOB_ORDER, RUN_RECORD_FIELDS, RUN_STATUSES, daily_pipeline
+from ops.scheduler import (
+    JOB_ORDER,
+    MONTH_END_JOB,
+    RUN_RECORD_FIELDS,
+    RUN_STATUSES,
+    daily_pipeline,
+    is_month_end,
+    job_chain,
+)
 
 HOLD_MARKER = {
     "action": "hold_previous_portfolio",
@@ -63,7 +79,13 @@ def _boom():
 
 
 def _install(monkeypatch, **bodies):
-    """Swap JOB_REGISTRY entries for this test (fakes never touch Docker)."""
+    """Swap JOB_REGISTRY entries for this test (fakes never touch Docker).
+
+    Only the entries the test names are swapped — ``TestMetricsSnapshot`` runs
+    the real ``health_check`` on purpose, and filling the gaps would take that
+    away. A test that runs past ``write_daily_report`` has to fake
+    :data:`MONTH_END_JOB` itself, because the chain grows on a month-end day.
+    """
     for name, fn in bodies.items():
         monkeypatch.setitem(scheduler.JOB_REGISTRY, name, fn)
 
@@ -100,14 +122,15 @@ class TestPipelineOrder:
 
             return body
 
-        _install(monkeypatch, **{name: make(name) for name in JOB_ORDER})
+        chain = job_chain()
+        _install(monkeypatch, **{name: make(name) for name in chain})
         assert daily_pipeline() is None  # design-doc signature: -> None
-        assert order == list(JOB_ORDER)  # ac-1
+        assert order == list(chain)  # ac-1
         rows = _read_rows()
-        assert [r["job_name"] for r in rows] == list(JOB_ORDER)
+        assert [r["job_name"] for r in rows] == list(chain)
         assert all(r["status"] == "SUCCESS" for r in rows)
         assert all(r["retry_count"] == 0 for r in rows)
-        assert [r["error"] for r in rows] == [None] * 5
+        assert [r["error"] for r in rows] == [None] * len(chain)
 
 
 class TestRecords:
@@ -138,11 +161,9 @@ class TestRecords:
             assert set(row) == set(RUN_RECORD_FIELDS)  # ac-2
             assert row["status"] in RUN_STATUSES
         assert set(r["status"] for r in rows) == set(RUN_STATUSES)  # ac-3
-        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == [
-            "run_daily_signal",
-            "health_check",
-            "write_daily_report",
-        ]
+        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == list(
+            job_chain()[2:]
+        )
 
 
 class TestFailurePropagation:
@@ -163,7 +184,7 @@ class TestFailurePropagation:
         assert rows[0]["job_name"] == "fetch_stock_daily"
         assert [r["status"] for r in rows[:3]] == ["RETRY", "RETRY", "FAILED"]
         assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == list(
-            JOB_ORDER[1:]
+            job_chain()[1:]
         )
         assert len(sent_alerts) == 1  # exactly one HIGH alert, ac-4
         level, msg = sent_alerts[0]
@@ -196,10 +217,9 @@ class TestFailurePropagation:
         assert [r["status"] for r in rows[2:4]] == ["RETRY", "FAILED"]
         assert "signal exploded" in rows[3]["error"]
         # Review gap closed: the hold path also records the tail skips.
-        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == [
-            "health_check",
-            "write_daily_report",
-        ]
+        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == list(
+            job_chain()[3:]
+        )
         assert markers == [HOLD_MARKER]  # hold once, never a liquidation
         assert len(sent_alerts) == 1 and sent_alerts[0][0] == "HIGH"
 
@@ -229,10 +249,9 @@ class TestFailurePropagation:
         assert len(signal_rows) == 1
         assert signal_rows[0]["status"] == "FAILED"  # the enum has no HOLD
         assert signal_rows[0]["error"] == "signal failed alpha-1"
-        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == [
-            "health_check",
-            "write_daily_report",
-        ]
+        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == list(
+            job_chain()[3:]
+        )
         assert markers == [HOLD_MARKER]
         assert len(sent_alerts) == 1 and sent_alerts[0][0] == "HIGH"
 
@@ -268,9 +287,9 @@ class TestFailurePropagation:
         markers = _spy_hold(monkeypatch)
         daily_pipeline()
         rows = _read_rows()
-        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == [
-            "write_daily_report"
-        ]
+        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == list(
+            job_chain()[4:]
+        )
         assert [r["status"] for r in rows if r["job_name"] == "run_daily_signal"] == [
             "SUCCESS"
         ]
@@ -312,6 +331,9 @@ class TestMetricsSnapshot:
             compute_all=lambda: "45 factors",
             run_daily_signal=lambda: {"status": "OK", "portfolio": "new"},
             write_daily_report=lambda: "daily report written",
+            # The chain grows on a month-end day; this test is about
+            # health_check's snapshot, so the appended job stays inert.
+            month_end_attribution=_never("month_end_attribution"),
         )
         daily_pipeline()
 
@@ -351,7 +373,242 @@ class TestMetricsSnapshot:
         # summary the body returned.
         assert alert_calls == []
         run_rows = _read_rows()
-        assert [r["job_name"] for r in run_rows] == list(JOB_ORDER)
+        assert [r["job_name"] for r in run_rows] == list(job_chain())
         assert all(r["status"] == "SUCCESS" for r in run_rows)
         health_row = run_rows[JOB_ORDER.index("health_check")]
         assert "12 rows" in health_row["output_summary"]
+
+
+# ---------------------------------------------------------------------------
+# ac-5 (QUANT-50 T2) — the month-end attribution job
+# ---------------------------------------------------------------------------
+
+
+def _pin_day(monkeypatch, day):
+    """Make this run report on *day* — the chain and the bodies agree on it."""
+    monkeypatch.setattr(scheduler, "reporting_day", lambda: day)
+
+
+def _attribution_frames():
+    """A two-date, two-ticker book whose contributions are hand-checkable.
+
+    weights 0.5 on both tickers both dates, exposures momentum (1.0, 0.5) and
+    value (1.0, 1.0), factor returns +0.02 / -0.01 on both dates. Per date
+    ``Σ_j w·x`` is 0.75 for momentum and 1.00 for value, so over two dates
+    momentum = 2·0.75·0.02 = 0.03 and value = 2·1.00·(-0.01) = -0.02. Shares
+    normalised on the absolute sum (0.05) are 0.6 and -0.4.
+    """
+    dates = ["2026-10-30", "2026-11-30"]
+    weights = pd.DataFrame(
+        [
+            {"date": d, "ticker": t, "weight": 0.5}
+            for d in dates
+            for t in ("600000", "600036")
+        ]
+    )
+    factor_returns = pd.DataFrame(
+        [
+            {"date": d, "factor_name": name, "factor_return": ret}
+            for d in dates
+            for name, ret in (("momentum", 0.02), ("value", -0.01))
+        ]
+    )
+    factor_exposures = pd.DataFrame(
+        [
+            {"date": d, "ticker": t, "momentum": mom, "value": val}
+            for d in dates
+            for t, mom, val in (("600000", 1.0, 1.0), ("600036", 0.5, 1.0))
+        ]
+    )
+    return weights, factor_returns, factor_exposures
+
+
+def _nav_book():
+    """Four month-end observations; both sides move, so the fit is defined."""
+    index = pd.to_datetime(["2026-08-31", "2026-09-30", "2026-10-31", "2026-11-30"])
+    return (
+        pd.Series([1.0, 1.10, 1.18, 1.32], index=index),
+        pd.Series([1.0, 1.05, 1.09, 1.13], index=index),
+    )
+
+
+class TestMonthEndAttribution:
+    """ac-5: the month-end attribution job is triggered by ``daily_pipeline``."""
+
+    def test_month_end_day_appends_the_attribution_job(self, monkeypatch):
+        order: list[str] = []
+
+        def make(name):
+            def body():
+                order.append(name)
+                return f"{name} ok"
+
+            return body
+
+        _pin_day(monkeypatch, "2026-11-30")  # Monday, the month's last weekday
+        chain = job_chain()
+        assert chain == JOB_ORDER + (MONTH_END_JOB,)
+        _install(monkeypatch, **{name: make(name) for name in chain})
+        daily_pipeline()
+
+        assert order == list(chain)
+        rows = _read_rows()
+        assert [r["job_name"] for r in rows] == list(chain)
+        assert rows[-1]["job_name"] == MONTH_END_JOB
+        assert rows[-1]["status"] == "SUCCESS"
+
+    def test_mid_month_day_runs_only_the_five_daily_jobs(self, monkeypatch):
+        _pin_day(monkeypatch, "2026-11-16")
+        assert job_chain() == JOB_ORDER
+        order: list[str] = []
+
+        def make(name):
+            def body():
+                order.append(name)
+                return f"{name} ok"
+
+            return body
+
+        _install(monkeypatch, **{name: make(name) for name in JOB_ORDER})
+        daily_pipeline()
+
+        assert order == list(JOB_ORDER)
+        assert [r["job_name"] for r in _read_rows()] == list(JOB_ORDER)
+
+    def test_a_month_ending_on_a_weekend_attributes_on_the_last_weekday(self):
+        # 2026-05 ends on Sunday the 31st, so the Friday before is the month's
+        # last pipeline run and the day the attribution belongs to.
+        assert is_month_end("2026-05-28") is False  # Thursday
+        assert is_month_end("2026-05-29") is True  # Friday
+        assert is_month_end("2026-05-30") is False  # Saturday
+        assert is_month_end("2026-05-31") is False  # Sunday
+        assert job_chain("2026-05-29")[-1] == MONTH_END_JOB
+        assert job_chain("2026-05-28") == JOB_ORDER
+
+    def test_report_failure_skip_marks_the_attribution_job(
+        self, monkeypatch, sent_alerts
+    ):
+        # The chain's skip marks cover the appended job too: an unreachable
+        # report leaves a SKIPPED row behind, not a silent gap in the log.
+        _pin_day(monkeypatch, "2026-11-30")
+        _install(
+            monkeypatch,
+            fetch_stock_daily=lambda: "fetched",
+            compute_all=lambda: "45 factors",
+            run_daily_signal=lambda: {"status": "OK", "portfolio": "new"},
+            health_check=_boom,
+            write_daily_report=_never("write_daily_report"),
+        )
+        daily_pipeline()
+
+        rows = _read_rows()
+        assert [r["job_name"] for r in rows if r["status"] == "SKIPPED"] == [
+            "write_daily_report",
+            MONTH_END_JOB,
+        ]
+        assert len(sent_alerts) == 1
+
+    def test_attribution_failure_is_recorded_and_alerted(
+        self, monkeypatch, sent_alerts
+    ):
+        _pin_day(monkeypatch, "2026-11-30")
+        _install(
+            monkeypatch,
+            fetch_stock_daily=lambda: "fetched",
+            compute_all=lambda: "45 factors",
+            run_daily_signal=lambda: {"status": "OK", "portfolio": "new"},
+            health_check=lambda: "health ok",
+            write_daily_report=lambda: "report written",
+            **{MONTH_END_JOB: _boom},
+        )
+        daily_pipeline()
+
+        rows = _read_rows()
+        assert [r["job_name"] for r in rows][-1] == MONTH_END_JOB
+        assert rows[-1]["status"] == "FAILED"
+        assert len(sent_alerts) == 1 and sent_alerts[0][0] == "HIGH"
+
+    def test_absent_factor_frames_fail_instead_of_half_attributing(
+        self, monkeypatch, tmp_path
+    ):
+        # No frames is a missing input, not a zero contribution — the engine
+        # records FAILED and alerts rather than shipping a half report.
+        monkeypatch.setattr(scheduler, "ATTRIBUTION_DIR", tmp_path / "attribution")
+        with pytest.raises(FileNotFoundError, match="no weights"):
+            scheduler.attribution_frames("2026-11")
+
+
+class TestAttributionInputs:
+    """What the month-end body feeds the fit — 月频 returns, not daily."""
+
+    def test_monthly_returns_cut_the_journal_to_month_end(self, monkeypatch):
+        nav, bench = _nav_book()
+        monkeypatch.setattr(scheduler, "nav_series", lambda end_day: (nav, bench))
+
+        r_p, r_b = scheduler.monthly_returns("2026-11-30")
+
+        # Four month-end observations -> three month-end-to-month-end returns.
+        assert len(r_p) == 3 == len(r_b)
+        assert r_p.iloc[0] == pytest.approx(0.10, abs=1e-12)
+        assert r_p.iloc[1] == pytest.approx(1.18 / 1.10 - 1.0, abs=1e-12)
+        assert r_b.iloc[0] == pytest.approx(0.05, abs=1e-12)
+        assert r_b.iloc[1] == pytest.approx(1.09 / 1.05 - 1.0, abs=1e-12)
+
+    def test_monthly_returns_drop_intra_month_observations(self, monkeypatch):
+        # Two months, each carrying mid-month observations that must not
+        # become a return's base: only a month's last observation counts.
+        index = pd.to_datetime(["2026-10-15", "2026-10-31", "2026-11-16", "2026-11-30"])
+        nav = pd.Series([1.0, 1.10, 1.20, 1.32], index=index)
+        bench = pd.Series([1.0, 1.02, 1.04, 1.05], index=index)
+        monkeypatch.setattr(scheduler, "nav_series", lambda end_day: (nav, bench))
+
+        r_p, r_b = scheduler.monthly_returns("2026-11-30")
+
+        assert len(r_p) == 1
+        assert r_p.iloc[0] == pytest.approx(1.32 / 1.10 - 1.0, abs=1e-12)
+        assert r_b.iloc[0] == pytest.approx(1.05 / 1.02 - 1.0, abs=1e-12)
+
+    def test_monthly_returns_reject_a_single_month(self, monkeypatch):
+        index = pd.to_datetime(["2026-11-02", "2026-11-30"])
+        nav = pd.Series([1.0, 1.1], index=index)
+        monkeypatch.setattr(scheduler, "nav_series", lambda end_day: (nav, nav))
+
+        with pytest.raises(ValueError, match=">= 2 calendar months"):
+            scheduler.monthly_returns("2026-11-30")
+
+
+class TestAttributionBody:
+    """The body writes the report the design names, reuse included."""
+
+    def test_writes_attribution_report_with_the_research_breakdown(
+        self, monkeypatch, tmp_path
+    ):
+        import ops.reporting as reporting
+
+        weights, factor_returns, factor_exposures = _attribution_frames()
+        month_dir = tmp_path / "attribution" / "2026-11"
+        month_dir.mkdir(parents=True)
+        weights.to_parquet(month_dir / "weights.parquet", index=False)
+        factor_returns.to_parquet(month_dir / "factor_returns.parquet", index=False)
+        factor_exposures.to_parquet(month_dir / "factor_exposures.parquet", index=False)
+
+        nav, bench = _nav_book()
+        monkeypatch.setattr(scheduler, "ATTRIBUTION_DIR", tmp_path / "attribution")
+        monkeypatch.setattr(scheduler, "nav_series", lambda end_day: (nav, bench))
+        monkeypatch.setattr(scheduler, "active_alpha_type_id", lambda: "momentum")
+        monkeypatch.setattr(scheduler, "reporting_day", lambda: "2026-11-30")
+        monkeypatch.setattr(reporting, "REPORTS_DIR", tmp_path / "reports")
+
+        summary = scheduler.month_end_attribution()
+
+        path = tmp_path / "reports" / "attribution_momentum_2026Q4.md"
+        assert "attribution 2026-11" in summary
+        assert path.is_file()
+        content = path.read_text(encoding="utf-8")
+        assert "## Alpha-Beta 回归" in content
+        assert "| alpha_annual |" in content
+        assert "## 因子贡献拆解" in content
+        # research.factor_combiner.factor_contribution, rendered verbatim.
+        assert "| momentum | 0.6000 |" in content
+        assert "| value | -0.4000 |" in content
+        assert "## 解读" in content

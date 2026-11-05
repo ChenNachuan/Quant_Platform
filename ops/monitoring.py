@@ -808,6 +808,53 @@ def collect_metrics(date: str) -> dict:
     return _collect(date)[0]
 
 
+def collect_day(day: str) -> tuple[dict, dict]:
+    """``(metrics, facts)`` for one day — one collection pass over the sources.
+
+    The job bodies in :mod:`ops.scheduler` need both halves (the report tables
+    and the alerting facts), and reading the journal twice to get them would
+    double the day's I/O. ``facts`` is what
+    :func:`ops.alerting.evaluate_alerts` takes.
+    """
+    return _collect(day)
+
+
+def active_alpha_type_id() -> str:
+    """The alpha name on record, ``""`` when no ``eval_report.json`` exists.
+
+    The scope the platform attributes a book to — the same name the alerting
+    facts carry. Read here rather than from ``collect_day`` because a caller
+    that only wants the name should not pay for a full metrics pass.
+    """
+    return _eval_report()[0]
+
+
+def nav_series(end_day: str) -> tuple[pd.Series, pd.Series]:
+    """``(nav, benchmark_nav)`` from the journal's DAY_END snapshots.
+
+    Both series share a :class:`~pandas.DatetimeIndex` of the days that carry a
+    ``nav``, oldest first; the benchmark side is NaN on days its snapshot was
+    missing, so the caller pairs observations and drops what it cannot use.
+
+    No benchmark is selected here — ``benchmark_nav`` is whatever the Day-End
+    event recorded (see ``docs/design/ops/reporting.md``, 归因基准的选
+    择). Reading the series is monitoring's job; choosing one is not.
+    """
+    book = _day_end_book(_journal_rows(end_day))
+    days = sorted(book)
+    nav = {d: _float_or_none(book[d].get("nav")) for d in days}
+    keep = [d for d in days if nav[d] is not None]
+    index = pd.to_datetime(keep)
+    return (
+        pd.Series([nav[d] for d in keep], index=index, dtype="float64"),
+        pd.Series(
+            [_float_or_none(book[d].get("benchmark_nav")) for d in keep],
+            index=index,
+            dtype="float64",
+        ),
+    )
+
+
 def append_metrics_snapshot(date: str, metrics: dict) -> None:
     """时点指标序列追加写 ``data/ops/metrics.jsonl`` (design signature).
 
