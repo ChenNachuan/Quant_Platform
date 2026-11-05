@@ -96,36 +96,16 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             f"  {layer:<12} {elapsed:7.2f}s / {budget}s  [{status}]"
         )
         if elapsed >= budget:
-            msg = (
-                f"layer {layer!r} overran its {budget}s budget "
-                f"({elapsed:.2f}s)"
-            )
+            msg = f"layer {layer!r} overran its {budget}s budget ({elapsed:.2f}s)"
             warnings.warn(msg, stacklevel=1)
             terminalreporter.write_line(f"  WARNING: {msg}")
-
-
-# ---------------------------------------------------------------------------
-# Test isolation: reset the ConfigLoader singleton around every test
-# ---------------------------------------------------------------------------
-@pytest.fixture(autouse=True)
-def reset_config_loader():
-    """Clear the ConfigLoader singleton before and after every test.
-
-    ``StorageManager`` caches ``ConfigLoader._config`` for the process;
-    without this reset, later tests see stale config.
-    """
-    from infra.storage import ConfigLoader
-
-    ConfigLoader.reset()
-    yield
-    ConfigLoader.reset()
 
 
 # ---------------------------------------------------------------------------
 # Hard rules — installed at import time so they cover every phase
 # ---------------------------------------------------------------------------
 # Both secret files are protected: `config/.env` is the documented one, but
-# `infra/storage.py::ConfigLoader.load()` reads `<repo>/.env` (via
+# the data layer reads `<repo>/.env` (via
 # python-dotenv) and `config/settings.toml` tells users to create exactly that
 # file. Guarding only `config/.env` guarded the wrong path.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -288,17 +268,30 @@ class _Clock:
 #: trading calendar: the Spring Festival week is the largest date-keyed gap in
 #: the year, and a clock double that treats 2024-02-12 as an open session hands
 #: T+1 settlement, rolling windows and date joins a non-trading date.
-_A_SHARE_HOLIDAYS_2024 = frozenset({
-    date(2024, 1, 1),                      # New Year
-    date(2024, 2, 9), date(2024, 2, 12), date(2024, 2, 13),
-    date(2024, 2, 14), date(2024, 2, 15), date(2024, 2, 16),  # Spring Festival
-    date(2024, 4, 4), date(2024, 4, 5),                       # Qingming
-    date(2024, 5, 1), date(2024, 5, 2), date(2024, 5, 3),     # Labour Day
-    date(2024, 6, 10),                                        # Dragon Boat
-    date(2024, 9, 16), date(2024, 9, 17),                     # Mid-Autumn
-    date(2024, 10, 1), date(2024, 10, 2), date(2024, 10, 3),
-    date(2024, 10, 4), date(2024, 10, 7),                     # National Day
-})
+_A_SHARE_HOLIDAYS_2024 = frozenset(
+    {
+        date(2024, 1, 1),  # New Year
+        date(2024, 2, 9),
+        date(2024, 2, 12),
+        date(2024, 2, 13),
+        date(2024, 2, 14),
+        date(2024, 2, 15),
+        date(2024, 2, 16),  # Spring Festival
+        date(2024, 4, 4),
+        date(2024, 4, 5),  # Qingming
+        date(2024, 5, 1),
+        date(2024, 5, 2),
+        date(2024, 5, 3),  # Labour Day
+        date(2024, 6, 10),  # Dragon Boat
+        date(2024, 9, 16),
+        date(2024, 9, 17),  # Mid-Autumn
+        date(2024, 10, 1),
+        date(2024, 10, 2),
+        date(2024, 10, 3),
+        date(2024, 10, 4),
+        date(2024, 10, 7),  # National Day
+    }
+)
 
 
 def _trading_days(start: date, count: int) -> list[date]:
