@@ -59,7 +59,7 @@ def alpha_beta_attribution(portfolio_returns, benchmark_returns):
         "alpha_annual": round(lr.intercept * 12, 4),   # 月频×12
         "beta": round(lr.slope, 3),
         "r_squared": round(lr.rvalue ** 2, 3),
-        "t_alpha": round(lr.intercept / lr.stderr, 2) if lr.stderr else None,
+        "t_alpha": round(lr.intercept / lr.intercept_stderr, 2) if lr.stderr else None,
     }
 ```
 

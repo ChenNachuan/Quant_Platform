@@ -118,7 +118,7 @@ def alpha_beta_attribution(
 
     fit = linregress(frame["b"].to_numpy(), frame["p"].to_numpy())
     alpha_monthly = float(fit.intercept)
-    stderr = float(fit.stderr)
+    stderr = float(fit.intercept_stderr)
     t_alpha = (
         alpha_monthly / stderr if math.isfinite(stderr) and stderr != 0.0 else None
     )

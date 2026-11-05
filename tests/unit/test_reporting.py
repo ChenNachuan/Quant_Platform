@@ -185,7 +185,28 @@ class TestAlphaBetaAccuracy:
         fit = linregress(r_b.to_numpy(), r_p.to_numpy())
         result = alpha_beta_attribution(r_p, r_b)
 
-        assert result["t_alpha"] == pytest.approx(fit.intercept / fit.stderr, abs=1e-9)
+        assert result["t_alpha"] == pytest.approx(
+            fit.intercept / fit.intercept_stderr, abs=1e-9
+        )
+
+    def test_t_alpha_regression_not_slope_stderr(self, returns):
+        """Regression: t_alpha must use intercept_stderr, not the slope's stderr.
+
+        On the ac-1 fixture the slope SE is ~18x the intercept SE, so the two
+        formulas diverge from 2.33 to 41.59 — a genuine alpha reads as marginal
+        under the wrong divisor.  This test fails without the fix.
+        """
+        r_p, r_b = returns
+        fit = linregress(r_b.to_numpy(), r_p.to_numpy())
+        result = alpha_beta_attribution(r_p, r_b)
+
+        # The two standard errors are different quantities
+        assert fit.intercept_stderr != pytest.approx(fit.stderr)
+        # t_alpha must match intercept_stderr, NOT slope stderr
+        assert result["t_alpha"] == pytest.approx(
+            fit.intercept / fit.intercept_stderr, abs=1e-9
+        )
+        assert result["t_alpha"] != pytest.approx(fit.intercept / fit.stderr, abs=1e-9)
 
     def test_drops_nan_pairs_instead_of_failing(self):
         r_b = pd.Series([0.01, 0.02, np.nan, 0.03, 0.04, 0.05])
