@@ -91,8 +91,8 @@ Quant/
 
 | # | 现行位置（§5.2） | 批次 | 当前状态 | 处置 | 说明 |
 |---|---|---|---|---|---|
-| 1 | `config/settings.toml`、`config/strategies.yaml` | M1 | 存在 | **归档** | Iter 2 删除；新配置已在 `config/config.toml` + `config/strategies/` |
-| 2 | `tests/`（3 个文件） | M1 | 存在 | **归档** | 重组为 `tests/{unit,integration,golden}/`；`test_tl_intraday_reproduction.py` **保留**（红线 6） |
+| 1 | `config/settings.toml`、`config/strategies.yaml` | M1 | 存在 | **归档** | 后续批次（M1）归档；新配置已在 `config/config.toml` + `config/strategies/` |
+| 2 | `tests/`（3 个文件） | M1 | 存在 | **归档** | 后续批次（M1）重组为 `tests/{unit,integration,golden}/`；`test_tl_intraday_reproduction.py` **保留**（红线 6） |
 | 3 | `factor_library/base.py`、`registry.py`、`dag.py`、`preprocessor.py` | M2 | 存在 | **归档** | 已由 `research/factor_interface.py`、`core/registry.py`、`research/factor_runtime.py`、`research/post_processor.py` 取代 |
 | 4 | `factor_library/operators/` | M2 | 存在 | **归档** | 已由 `research/` 共享算子取代 |
 | 5 | `factor_library/stock/` | M2 | 存在 | **归档** | 已由 `research/` 因子实现取代（V1 范围） |
@@ -119,7 +119,7 @@ Quant/
 | 26 | `knowledge-base/` | — | 存在 | **保留** | 补充笔记，非权威，不归档 |
 | 27 | `docs/PROJECT_STRUCTURE.md`「建议的后续收口」四项 | M7 | 存在 | **后续批次** | 本计划不执行，保留原文 |
 
-**处置统计**：归档 10 行 · 登记不迁 5 行 · 已无此件 9 行 · 保留 1 行 · 后续批次 1 行 · 拆分处置 1 行。无「待定」。
+**处置统计**：归档 13 行 · 登记不迁 5 行 · 已无此件 6 行 · 保留 1 行 · 后续批次 1 行 · 拆分处置 1 行。无「待定」。
 
 ### 行外发现（§5.2 表未覆盖）
 
