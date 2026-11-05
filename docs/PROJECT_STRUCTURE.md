@@ -6,30 +6,50 @@
 
 ```text
 Quant/
-├── config/                 # 可版本化的配置
-├── infra/                  # 存储、查询、调度、数据集适配
-├── factor_library/         # 多资产因子与通用算子
-│   ├── stock/
-│   ├── futures/
-│   ├── option/
-│   └── operators/
-├── engine/                 # 策略流水线、模型、回测和框架桥接
-│   ├── backtest/
-│   ├── ensemble/
-│   ├── factor/
-│   ├── models/
-│   ├── vectorbt_engine/
-│   └── zvt_bridge/
+├── config/                 # 可版本化的配置（M1 迁移前为 settings.toml / strategies.yaml）
+├── core/                   # types·config·logging·registry·asset_rules 共享工具
+├── data/                   # 采集、存储、查询、DQC 数据域
+│   ├── adapters/           # 多源适配（akshare / amazingdata / tushare）
+│   ├── normalizers/        # 源归一化
+│   ├── dqc/                # DQC 规则、检查、引擎、严重度
+│   ├── execution/          # 风险审计产物（risk_audit.jsonl，不入 Git）
+│   └── ops/                # 运行指标/告警产物（不入 Git）
+├── dqc/                    # 命名空间垫片（__path__ → data/dqc/）
+├── data_platform/          # 扁平数据湖（L2 表 Phase 2 预留）
+│   ├── asset/              # bars_daily、calendar
+│   ├── raw/                # amazingdata
+│   └── config/
+├── research/               # 因子接口/运行时/存储、信号、评价、治理、ML 信号
+│   └── reports/
+├── engine/                 # 策略流水线与回测
+│   └── backtest/           # 期货回测（V3 登记不迁）
+├── factor_library/         # 多资产因子（登记不迁）
+│   ├── futures/            # 期货因子（V3）
+│   └── option/             # 期权因子（V4）
 ├── strategies/             # 策略组装，不重复实现底层算子
-├── execution/              # 风控、仓位和交易通道
+│   └── futures/            # alstm/、tl_intraday/（V3 登记不迁）
+├── execution/              # 组合、订单、风控、账本、通道
+│   └── router/             # 通道连接器（V2 起点，登记不迁）
+├── infra/                  # 期货连续合约、跨品种（V3 登记不迁）
+├── ops/                    # 调度、监控、日报、告警
 ├── scripts/                # 面向用户/调度器的可执行入口
+│   ├── bootstrap/
+│   └── data_processing/
 ├── examples/               # 最小示例与 notebook
 ├── tests/                  # 自动化测试
+│   ├── unit/
+│   ├── integration/
+│   └── golden/
 ├── docs/                   # 项目文档
-├── libs/zvt/               # 本地可编辑依赖
-├── data_lake/              # 行情、因子、Qlib 数据（不入 Git）
+│   ├── archive/            # 冻结只读
+│   ├── data/
+│   └── design/
+├── logs/                   # 运行日志（不入 Git）
+├── data_lake/              # 行情、因子、tick 数据（不入 Git）
 └── artifacts/              # 模型、图表、报告（不入 Git）
 ```
+
+> 目录树与 `find . -type d -not -path './.git*' -not -path './.venv*'` 逐条对照（M7 / S13-T3 定稿）：以上条目均在仓库实际目录中。不入树的目录：工具与缓存（`.idea/`、`.mypy_cache/`、`.pytest_cache/`、`.ruff_cache/`、`.hypothesis/`、`__pycache__/`、`cmake-build-debug/`）、工作区运行时产物（`task/`、`.multica/`、`.claude/`、`tmp/`、`third_party/`）、M3 归档残留（`libs/zvt/` Git 已无此树，磁盘仅剩 `zvt.egg-info` 构建产物）。
 
 ## 模块放置决策
 
@@ -72,12 +92,12 @@ Quant/
 
 ## 建议的后续收口
 
-以下操作涉及大量删除或路径变更，应分批回归，不在本次低风险整理中直接执行：
+以下四项由迁移批次逐项落定，各自标注完成批次（M7 / S13-T3 核对现状并标注，不执行删除）。经核：四项均已标注完成批次，无未标注项。
 
-1. 确认 `indicator_py/` 的因子结果与 `factor_library/futures/` 一致后归档旧目录。
-2. 确认根目录 `indicator_py/` 的旧因子均已有主干实现后移除重复代码。
-3. 确认精简后的 `libs/zvt/` 通过回测后删除本地备份。
-4. 项目文档统一维护在小写 `docs/`；策略研究报告跟随所属策略维护。
+1. 确认 `indicator_py/` 的因子结果与 `factor_library/futures/` 一致后归档旧目录。—— **完成批次 M7 核销**：`indicator_py/` 从未入 Git（`git rev-list --all --objects` 无此路径），当前检出无此目录（`find . -name indicator_py` 无结果），归档对象已无此件；因子迁移注记现存 `factor_library/futures/`（`__init__.py`、`functions.py`「从 indicator_py 迁移」）。
+2. 确认根目录 `indicator_py/` 的旧因子均已有主干实现后移除重复代码。—— **完成批次 M7 核销**：同第 1 项，根目录已无 `indicator_py/` 重复代码可移除。
+3. 确认精简后的 `libs/zvt/` 通过回测后删除本地备份。—— **完成批次 M3**：QUANT-51（PR #79）已删除 `libs/zvt/`，删除前全量测试绿；磁盘仅剩 `zvt.egg-info` 构建残留，不入 Git。
+4. 项目文档统一维护在小写 `docs/`；策略研究报告跟随所属策略维护。—— **完成批次 M7 核销（现状成立）**：文档统一在 `docs/`；策略报告在 `strategies/futures/alstm/reports|notebooks/`、`strategies/futures/tl_intraday/reports/`。
 
 ---
 
@@ -130,36 +150,44 @@ Quant/
 
 ---
 
-## M6 / M-V3 / M-V4 登记清单（登记不迁）
+## V2+ 登记清单（登记不迁）
 
-> 以下条目**只登记、不动代码**。它们属于 V2/V3/V4 范围，当前阶段不迁移、不归档、不重写。
+> 以下条目**只登记、不动代码**。它们属于 V2/V3/V4 与 L2 预留范围，当前阶段不迁移、不归档、不重写。每项写明**现存路径 + 起用阶段**；起用阶段口径见 `docs/ROADMAP.md` §1「V1 明确不做」表。原 M6 / M-V3 / M-V4 登记按归档批次并入下表（V2=M6、V3=M-V3、V4=M-V4，L2 预留为新增类）。
 
-### M6 — 执行通道（V2 起点）
+### V2 — 执行通道（M6 登记不迁；起用阶段 V2：QmtBroker 实盘接入）
 
-| 文件 | 登记说明 |
-|---|---|
-| `execution/router/xtquant_connector.py` | QMT 通道连接器。**登记不迁**，V2 执行通道起点（目标：`execution/broker.py` 的 `QmtBroker`） |
-| `execution/router/base.py` | 通道抽象基类。**登记不迁**，V2 执行通道起点 |
+| 现存路径 | 起用阶段 | 登记说明 |
+|---|---|---|
+| `execution/router/xtquant_connector.py` | V2 | QMT 通道连接器。**登记不迁**，V2 执行通道起点（目标：`execution/broker.py` 的 `QmtBroker`） |
+| `execution/router/base.py` | V2 | 通道抽象基类。**登记不迁**，V2 执行通道起点 |
 
-### M-V3 — 期货（V3 范围）
+### V3 — 期货（M-V3 登记不迁；起用阶段 V3：期货，含连续合约、夜盘归属、保证金账本）
 
-| 文件/目录 | 登记说明 |
-|---|---|
-| `factor_library/futures/` | 期货因子库。**登记不迁**，V3 因子范围 |
-| `infra/futures_continuous.py` | 期货连续合约处理。**登记不迁**，V3 数据范围 |
-| `infra/cross_instrument.py` | 跨品种处理。**登记不迁**，V3 数据范围 |
-| `engine/backtest/` | 期货回测（futures_backtest / intraday_futures / regime_filter / continuous_backtest_utils）。**登记不迁**，V3 回测范围 |
-| `strategies/futures/` | 期货策略（alstm / tl_intraday）。**登记不迁**，V3 策略范围 |
-| `tests/test_tl_intraday_reproduction.py` | 期货 ALSTM 回归基准测试。**随期货 ALSTM 回归基准保留**（红线 6），不归档 |
+| 现存路径 | 起用阶段 | 登记说明 |
+|---|---|---|
+| `factor_library/futures/` | V3 | 期货因子库。**登记不迁**，V3 因子范围 |
+| `infra/futures_continuous.py` | V3 | 期货连续合约处理。**登记不迁**，V3 数据范围 |
+| `infra/cross_instrument.py` | V3 | 跨品种处理。**登记不迁**，V3 数据范围 |
+| `engine/backtest/` | V3 | 期货回测（futures_backtest / intraday_futures / regime_filter / continuous_backtest_utils）。**登记不迁**，V3 回测范围 |
+| `strategies/futures/` | V3 | 期货策略（alstm / tl_intraday）。**登记不迁**，V3 策略范围 |
+| `tests/test_tl_intraday_reproduction.py` | V3 | 期货 ALSTM 回归基准测试。**随期货 ALSTM 回归基准保留**（红线 6），不归档 |
 
 **期货 ALSTM 回归基准保留**（红线 6）：
 - `strategies/futures/alstm/`（含 `train.py` / `reporting.py` / `reports/` / `notebooks/`）—— 一律不动
 - `tests/test_tl_intraday_reproduction.py` —— 一律不动
+- 平台黄金样本（`tests/golden/`，等权 top-5 ETF 动量）与期货 ALSTM 回归基准（策略自身）是两套独立基线，**不混用、不互为对拍**（红线 6）
 
 **缺口 #15 登记**：`find . -name baseline_spec.py` **无结果**——设计要求「保留 `baseline_spec.py` 作期货 ALSTM 自身回归基准」，但对象在仓库中缺失。登记为「对象缺失，V3 回归基准待补」。不删相关表述，不新写 `baseline_spec`。裁决权归 Orchestrator。
 
-### M-V4 — 期权（V4 范围）
+### V4 — 期权（M-V4 登记不迁；起用阶段 V4+：期权）
 
-| 文件/目录 | 登记说明 |
-|---|---|
-| `factor_library/option/` | 期权因子库。**登记不迁**，V4 因子范围 |
+| 现存路径 | 起用阶段 | 登记说明 |
+|---|---|---|
+| `factor_library/option/` | V4+ | 期权因子库。**登记不迁**，V4 因子范围 |
+
+### L2 预留（起用阶段 Phase 2：`tick_futures_l2` schema 已预留，列数口径差异未裁决，见 l2_data.md「使用路径登记」）
+
+| 现存路径 | 起用阶段 | 登记说明 |
+|---|---|---|
+| `docs/design/data/l2_data.md` 所述五档/逐笔链路 | Phase 2 预留 | 使用路径登记见该文件「使用路径登记」一节：采集 `data/source_adapter.py` + `data/ingestion.py`，存储 `data/storage_ops.py` + `data/storage_schema.py`（`tick_futures_l2` 表），消费 `data/data_api.py`。L2 采集/存储/消费代码本阶段一律不实现 |
+| `docs/data/future_level2_data_processing.md` | Phase 2 预留 | 五档正式数据集口径（`data_lake/future/market_data/tick_l2/`，DuckDB 视图名 `future_market_data_tick_l2`）；数据集不入 Git |
