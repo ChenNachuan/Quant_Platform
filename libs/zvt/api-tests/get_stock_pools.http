@@ -1,5 +1,0 @@
-GET http://127.0.0.1:8090/api/work/get_stock_pools?stock_pool_name=main_line
-accept: application/json
-
-
-
