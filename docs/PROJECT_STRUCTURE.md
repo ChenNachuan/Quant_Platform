@@ -78,3 +78,88 @@ Quant/
 2. 确认根目录 `indicator_py/` 的旧因子均已有主干实现后移除重复代码。
 3. 确认精简后的 `libs/zvt/` 通过回测后删除本地备份。
 4. 项目文档统一维护在小写 `docs/`；策略研究报告跟随所属策略维护。
+
+---
+
+## §5.2 旧→新映射表逐行处置登记
+
+> 本节由 QUANT-52 Iter 1（2026-11-05）写入。对 `docs/ROADMAP.md` §5.2 映射表的每一行给出明确处置结论：**归档**（Iter 2 删除或移入 `docs/archive/`）、**登记不迁**（登记保留，不迁移）、**已无此件**（文件在当前检出中不存在，无需归档）。
+>
+> 审计基准：develop `644b78c` + QUANT-51（M3 归档批）`ac6e4a7`。
+
+### 处置表
+
+| # | 现行位置（§5.2） | 批次 | 当前状态 | 处置 | 说明 |
+|---|---|---|---|---|---|
+| 1 | `config/settings.toml`、`config/strategies.yaml` | M1 | 存在 | **归档** | 后续批次（M1）归档；新配置已在 `config/config.toml` + `config/strategies/` |
+| 2 | `tests/`（3 个文件） | M1 | 存在 | **归档** | 后续批次（M1）重组为 `tests/{unit,integration,golden}/`；`test_tl_intraday_reproduction.py` **保留**（红线 6） |
+| 3 | `factor_library/base.py`、`registry.py`、`dag.py`、`preprocessor.py` | M2 | 存在 | **归档** | 已由 `research/factor_interface.py`、`core/registry.py`、`research/factor_runtime.py`、`research/post_processor.py` 取代 |
+| 4 | `factor_library/operators/` | M2 | 存在 | **归档** | 已由 `research/` 共享算子取代 |
+| 5 | `factor_library/stock/` | M2 | 存在 | **归档** | 已由 `research/` 因子实现取代（V1 范围） |
+| 6 | `factor_library/futures/`、`factor_library/option/` | M-V3/M-V4 | 存在 | **登记不迁** | V3/V4 范围，见下方登记清单 |
+| 7 | `infra/storage.py`、`query.py`、`writer.py`、`connection.py` | M2 | 存在 | **归档** | 已由 `data/storage_ops.py`、`data/data_api.py` 取代 |
+| 8 | `infra/scheduler.py` | M5 | 存在 | **归档** | 已由 `ops/scheduler.py` 取代（M5）；**注意**：`ops/scheduler.py:263` 有 subprocess 调用 `/scripts/data_fetcher/fetch_stock_daily.py`，grep 验证不覆盖此模式，Iter 2 须处理或登记 |
+| 9 | `infra/futures_continuous.py`、`cross_instrument.py` | M-V3 | 存在 | **登记不迁** | V3 范围，见下方登记清单 |
+| 10 | `infra/qlib_processors.py`、`infra/spread_dataset.py` | M3 | 已无此件 | **已无此件** | QUANT-51 `ac6e4a7` 已删除 |
+| 11 | `engine/pipeline.py` | M2 | 已无此件 | **已无此件** | QUANT-51 `ac6e4a7` 已删除（import vectorbt，grep 强制） |
+| 12 | `engine/factor/backtest_runner.py`、`incremental_updater.py` | M2 | 混合 | **拆分处置** | `backtest_runner.py` 已无此件（QUANT-51 删除，import zvt_bridge）；`incremental_updater.py` 存在 → **归档**（已由 `research/factor_runtime.py` 取代） |
+| 13 | `engine/simulation/models.py` | M2 | 存在 | **归档** | 已由 `execution/ledger.py` 取代 |
+| 14 | `engine/models/`（alstm / lgbm / distribution_nll / model_diagnostic） | M4 | 存在 | **归档** | 已由 `research/ml_signal.py` + `research/factor_runtime.MLFactor` 取代；期货 ALSTM 自身回归基准**保留**（红线 6，见 §5.3） |
+| 15 | `engine/ensemble/` | M4 | 存在 | **归档** | 已由 `research/ml_signal.ensemble_models` + `research/factor_combiner` 取代 |
+| 16 | `engine/backtest/`（futures_backtest / intraday_futures / regime_filter / continuous_backtest_utils） | M-V3 | 存在 | **登记不迁** | V3 期货回测，见下方登记清单 |
+| 17 | `engine/qlib_bridge/`、`engine/vectorbt_engine/`、`engine/zvt_bridge/` | M3 | 已无此件 | **已无此件** | QUANT-51 `ac6e4a7` 已删除（`qlib_bridge/` 在 `644b78c` 时已不存在） |
+| 18 | `libs/zvt/` | M3 | 已无此件 | **已无此件** | QUANT-51 `ac6e4a7` 已删除；磁盘残留 `egg-info` 构建产物，不入 Git |
+| 19 | `execution/position_manager.py` | M2 | 存在 | **归档** | 已由 `execution/portfolio_construction.py` + `execution/ledger.py` 取代 |
+| 20 | `execution/risk_control.py` | M2 | 已无此件 | **已无此件** | 原地重写（七规则表 + `ASSET_RULES`），旧代码已被新实现覆盖，无独立旧件可归档 |
+| 21 | `execution/router/vnpy_connector.py` | M3 | 已无此件 | **已无此件** | QUANT-51 或更早已删除（`644b78c` 时已不存在） |
+| 22 | `execution/router/xtquant_connector.py`、`router/base.py` | M6 | 存在 | **登记不迁** | V2 起点，见下方登记清单 |
+| 23 | `scripts/data_fetcher/*` | M2 | 存在 | **归档** | 已由 `data/source_adapter` + `data/ingestion` 取代；AmazingData Docker 用法保留 |
+| 24 | `strategies/stock/*` | M4 | 存在 | **归档** | 已由 `strategies/` + alphaType 配方取代 |
+| 25 | `strategies/futures/*`（alstm / tl_intraday） | M-V3 | 存在 | **登记不迁** | V3 范围；ALSTM 回归基准与报告**保留**（红线 6） |
+| 26 | `knowledge-base/` | — | 存在 | **保留** | 补充笔记，非权威，不归档 |
+| 27 | `docs/PROJECT_STRUCTURE.md`「建议的后续收口」四项 | M7 | 存在 | **后续批次** | 本计划不执行，保留原文 |
+
+**处置统计**：归档 13 行 · 登记不迁 5 行 · 已无此件 6 行 · 保留 1 行 · 后续批次 1 行 · 拆分处置 1 行。无「待定」。
+
+### 行外发现（§5.2 表未覆盖）
+
+| 项目 | 状态 | 处置 |
+|---|---|---|
+| `factor_library/universe.py` | 存在，`factor_library/__init__.py` 导入 `UniverseFilter` / `UniverseConfig` | **不在 §5.2 任何行中**。Iter 2 归档 `factor_library/` 时须清理 `__init__.py` 导入（保留 `futures/` 可导入以维持 `test_tl_intraday_reproduction.py`） |
+| `ops/scheduler.py:263` subprocess 调用 `scripts/data_fetcher/fetch_stock_daily.py` | 功能性依赖 | grep 验证（`ac-2`）不覆盖 subprocess 路径；Iter 2 归档 `scripts/data_fetcher/` 前须处理此调用或在 PR 中登记为已知缺口 |
+
+---
+
+## M6 / M-V3 / M-V4 登记清单（登记不迁）
+
+> 以下条目**只登记、不动代码**。它们属于 V2/V3/V4 范围，当前阶段不迁移、不归档、不重写。
+
+### M6 — 执行通道（V2 起点）
+
+| 文件 | 登记说明 |
+|---|---|
+| `execution/router/xtquant_connector.py` | QMT 通道连接器。**登记不迁**，V2 执行通道起点（目标：`execution/broker.py` 的 `QmtBroker`） |
+| `execution/router/base.py` | 通道抽象基类。**登记不迁**，V2 执行通道起点 |
+
+### M-V3 — 期货（V3 范围）
+
+| 文件/目录 | 登记说明 |
+|---|---|
+| `factor_library/futures/` | 期货因子库。**登记不迁**，V3 因子范围 |
+| `infra/futures_continuous.py` | 期货连续合约处理。**登记不迁**，V3 数据范围 |
+| `infra/cross_instrument.py` | 跨品种处理。**登记不迁**，V3 数据范围 |
+| `engine/backtest/` | 期货回测（futures_backtest / intraday_futures / regime_filter / continuous_backtest_utils）。**登记不迁**，V3 回测范围 |
+| `strategies/futures/` | 期货策略（alstm / tl_intraday）。**登记不迁**，V3 策略范围 |
+| `tests/test_tl_intraday_reproduction.py` | 期货 ALSTM 回归基准测试。**随期货 ALSTM 回归基准保留**（红线 6），不归档 |
+
+**期货 ALSTM 回归基准保留**（红线 6）：
+- `strategies/futures/alstm/`（含 `train.py` / `reporting.py` / `reports/` / `notebooks/`）—— 一律不动
+- `tests/test_tl_intraday_reproduction.py` —— 一律不动
+
+**缺口 #15 登记**：`find . -name baseline_spec.py` **无结果**——设计要求「保留 `baseline_spec.py` 作期货 ALSTM 自身回归基准」，但对象在仓库中缺失。登记为「对象缺失，V3 回归基准待补」。不删相关表述，不新写 `baseline_spec`。裁决权归 Orchestrator。
+
+### M-V4 — 期权（V4 范围）
+
+| 文件/目录 | 登记说明 |
+|---|---|
+| `factor_library/option/` | 期权因子库。**登记不迁**，V4 因子范围 |

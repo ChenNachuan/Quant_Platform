@@ -10,49 +10,54 @@
 
 import pandas as pd
 
-from factor_library.futures.base import L2TickFactor
+try:
+    from factor_library.futures.base import L2TickFactor
 
-# 导入所有因子模块（触发 @register_factor 装饰器自动注册）
-from factor_library.futures.quote_spread import (  # noqa: F401
-    AvgQuote,
-    BidAskSpread,
-    MidPrice,
-)
-from factor_library.futures.orderbook_pressure import (  # noqa: F401
-    QuotePricePressure,
-    QuoteSizePressure,
-    QuoteSizeR,
-)
-from factor_library.futures.momentum_factors import (  # noqa: F401
-    Momentum,
-    VectorScalar,
-)
-from factor_library.futures.trade_factors import (  # noqa: F401
-    AvgNTrade,
-    IntradayDistance,
-    VwapDistance,
-)
-from factor_library.futures.push_factors import (  # noqa: F401
-    PushPrice,
-    PushSize,
-)
-from factor_library.futures.order_flow import (  # noqa: F401
-    AddQuoteSize,
-    MarketMakerSize,
-    OrderSize,
-    OrderStack,
-)
-from factor_library.futures.statistical import (  # noqa: F401
-    DerivedEMA,
-    EMSD,
-)
-from factor_library.futures.minute_factors import (  # noqa: F401
-    MinuteFactorLibrary,
-    MinuteFactors,
-    list_minute_factors,
-    get_minute_factor_expressions,
-    get_minute_factor_dict,
-)
+    # 导入所有因子模块（触发 @register_factor 装饰器自动注册）
+    from factor_library.futures.quote_spread import (  # noqa: F401
+        AvgQuote,
+        BidAskSpread,
+        MidPrice,
+    )
+    from factor_library.futures.orderbook_pressure import (  # noqa: F401
+        QuotePricePressure,
+        QuoteSizePressure,
+        QuoteSizeR,
+    )
+    from factor_library.futures.momentum_factors import (  # noqa: F401
+        Momentum,
+        VectorScalar,
+    )
+    from factor_library.futures.trade_factors import (  # noqa: F401
+        AvgNTrade,
+        IntradayDistance,
+        VwapDistance,
+    )
+    from factor_library.futures.push_factors import (  # noqa: F401
+        PushPrice,
+        PushSize,
+    )
+    from factor_library.futures.order_flow import (  # noqa: F401
+        AddQuoteSize,
+        MarketMakerSize,
+        OrderSize,
+        OrderStack,
+    )
+    from factor_library.futures.statistical import (  # noqa: F401
+        DerivedEMA,
+        EMSD,
+    )
+    from factor_library.futures.minute_factors import (  # noqa: F401
+        MinuteFactorLibrary,
+        MinuteFactors,
+        list_minute_factors,
+        get_minute_factor_expressions,
+        get_minute_factor_dict,
+    )
+except ImportError:
+    # factor_library.base / factor_library.registry archived (M2);
+    # self-contained submodules like tl_intraday remain importable.
+    L2TickFactor = None
 
 # 因子输出列注册表 (与 indicator_py/all_factors.py 的 FACTOR_REGISTRY 对应)
 FACTOR_REGISTRY: dict[str, list[str]] = {
