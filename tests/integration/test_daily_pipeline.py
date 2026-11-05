@@ -333,7 +333,7 @@ class TestMetricsSnapshot:
             write_daily_report=lambda: "daily report written",
             # The chain grows on a month-end day; this test is about
             # health_check's snapshot, so the appended job stays inert.
-            month_end_attribution=_never("month_end_attribution"),
+            month_end_attribution=lambda: "inert",
         )
         daily_pipeline()
 
