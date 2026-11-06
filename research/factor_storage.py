@@ -70,7 +70,11 @@ DEFAULT_BASE_DIR: str = "data_platform/factors"
 COMPRESSION: str = "zstd"
 COMPRESSION_LEVEL: int = 3
 
-#: metadata.json field names, in write order (factor_storage.md §61).
+#: Identity fields of metadata.json, in write order (factor_storage.md §61).
+#: This is not the full key set: the optional evaluation blocks (``eval`` /
+#: ``attempts`` / ``attempt_log``) are written after them and carried across
+#: rewrites by :func:`write_metadata`'s ``previous`` loop.  They cannot appear
+#: here — a bare save never writes them, so they are not always-present fields.
 METADATA_FIELDS: tuple[str, ...] = (
     "factor_name",
     "version",
@@ -179,7 +183,9 @@ def write_metadata(out_dir, factor, result) -> None:
     supplies them only when the directory holds no parquet yet.  ``date_range``
     is ISO ``YYYY-MM-DD`` — the natural serialisation of a ``DATE`` column.
 
-    ``created_at`` is preserved across rewrites; ``updated_at`` is now.
+    ``created_at`` is preserved across rewrites; ``updated_at`` is now.  The
+    evaluation block (``eval`` / ``attempts`` / ``attempt_log``) is preserved
+    too — see below.
     """
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -227,6 +233,12 @@ def write_metadata(out_dir, factor, result) -> None:
         "file_count": len(files),
         "compression": COMPRESSION,
     }
+    # The evaluation record (S11 factor_evaluation) survives data rewrites the
+    # same way created_at does — a daily append must not wipe the eval block
+    # that registration wrote.
+    for extra in ("eval", "attempts", "attempt_log"):
+        if extra in previous:
+            meta[extra] = previous[extra]
     meta_path.write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

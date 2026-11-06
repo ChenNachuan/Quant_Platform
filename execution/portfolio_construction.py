@@ -206,6 +206,10 @@ class PortfolioOptimizer:
             targeted += 1
             px = prices[ticker]
             raw_qty = weight * account.total_asset / px
+            if not (raw_qty > 0):
+                # Zero target after float underflow — skip lot rounding.
+                # A zero-weight book entry is a legal "do not buy" signal.
+                continue
             qty = floor_to_lot(raw_qty, constraints.lot_size)
             if qty < raw_qty:
                 note("lot_size")

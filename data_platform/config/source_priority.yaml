@@ -1,0 +1,43 @@
+# Source arbitration table (QUANT-40, S10-T1).
+# Spec: docs/design/data/ingestion.md + docs/archive/OPEN_QUESTIONS.md §41.2/§41.3.
+#
+# One entry per asset type: priority[0] is the primary source (the only one
+# that writes the asset layer); the rest are backups that cross-check and
+# backfill gaps, never mix-write.  field_override names the source a field is
+# always taken from, regardless of row priority.  There is no automatic
+# primary election — switching a primary is a reviewed commit here.
+bars_daily:
+  priority: [tushare, akshare]
+  field_override:
+    adjfactor: tushare      # adjfactor quality is better from tushare
+bars_minute:
+  priority: [tushare]       # single source, no backup
+fundamental:
+  priority: [akshare, tushare]
+  field_override:
+    pe_ttm: tushare         # tushare's PE_TTM definition is the reference
+option_basic:
+  priority: [amazingdata]   # the only source; no backfill path
+reference:                  # per-table priority
+  calendar:
+    priority: [tushare, akshare]
+  industry:
+    priority: [tushare]
+  # Tables with no source assigned yet (QUANT-40: left empty on purpose,
+  # listed in the PR description): contract_specs, corporate_actions.
+  contract_specs:
+    priority: []
+  corporate_actions:
+    priority: []
+
+# Cross-check tolerance per field class (§41.3).  price and adjfactor are
+# absolute; volume, amount, pe_pb and default are relative.  Field -> class
+# mapping lives in data/ingestion.py (TOLERANCE_CLASS).
+cross_check:
+  tolerances:
+    price: 0.01
+    volume: 0.001
+    amount: 0.001
+    adjfactor: 1.0e-6
+    pe_pb: 0.02
+    default: 0.001
