@@ -31,6 +31,17 @@ def alpha_beta_attribution(portfolio_returns: pd.Series,
 | 因子贡献拆解做（复用 §63.6） | 重新实现 | factor_contribution() 已有 |
 | 归因月频自动 + FF3 季手动 + 专项按需 | 全自动全频 | 月频够用，大回撤事件才做专项复盘 |
 
+## 权重口径
+
+日报与黄金样本夹具使用两套权重口径，**仅 0.19 进日报**：
+
+| 口径 | 数值 | 定义 | 用途 |
+|---|---|---|---|
+| 日报报告口径 | **0.19**（SLEEVE/5） | SLEEVE = 0.95，NAV 的 95% 分给五档，每档 0.19，留 5% 现金 | 日报 `daily_{date}.md` 打印此数 |
+| 夹具手算基准 | 0.20（1/5） | 满仓等权，NAV_0 起 100% 投入，再平衡重置为 1/5 | 三个月夹具手算校验基准，**不进日报** |
+
+两个数各留原处（0.19 定义见 [testing.md](../core/testing.md)，0.20 定义见 `tests/golden/portfolio_handcalc.md`），仅 0.19 出现在日报中。
+
 ## 实现要点
 
 **daily_pipeline 尾部链路**（[scheduler.md](scheduler.md)）：17:05 `write_daily_report`；月末追加 `alpha_beta_attribution` + `factor_contribution`（自动 Job）。
