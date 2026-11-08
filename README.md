@@ -41,7 +41,7 @@ docker-compose run --rm amazingdata \
 | `docs/` | 架构、数据源与开发文档 |
 | `libs/zvt/` | 精简后的 ZVT 本地 fork |
 
-完整的目录职责、数据边界和迁移说明见 [项目结构](docs/PROJECT_STRUCTURE.md)。文档索引见 [项目文档](docs/README.md)。因子开发规范见 [Factor Library](factor_library/README.md)。AmazingData 接口说明见 [AmazingData](docs/AmazingData.md)。
+完整的目录职责、数据边界和迁移说明见 [项目结构](docs/PROJECT_STRUCTURE.md)。文档索引见 [项目文档](docs/README.md)。因子开发规范见 [Factor Library](factor_library/README.md)。AmazingData 接口说明见 [AmazingData](docs/data_source/AmazingData/AmazingData.md)。
 
 ## 核心数据流
 

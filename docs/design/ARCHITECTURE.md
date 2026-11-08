@@ -1,22 +1,18 @@
 # Quant Platform 架构总纲
 
 > 状态：设计定稿，待实施
-> 依据：§16–§69 讨论结论（[archive/OPEN_QUESTIONS.md](../archive/OPEN_QUESTIONS.md)）+ 旧架构重审（§68）+ 横切收口（§69）
-> 最后更新：2026-10-10
+> 
+> 最后更新：2026-11-08
 
 这份文档是平台架构的**唯一权威总纲**：范式、边界、跨域契约、选型定稿。各域细节见 `design/<域>/` 下的模块文档（39 份，文件名与未来代码模块同名）；现行代码放置规则见 [PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)。
 
-旧版总纲（含四层时间模型 / EBGraph / ClickHouse / 三层 Signal）已按 §68 重审修正，原文存档于 [archive/ARCHITECTURE.md](../archive/ARCHITECTURE.md)，不再维护。
-
 ---
 
-## 1. 北极星
+## 1. 总纲
 
 **薄壳 + pandas 优先，对齐头部机构的分层范式，不照搬其重引擎实现。**
 
 重构完成后最应该被显著改善的一件事：**架构范式对齐**。研究迭代速度、工程可演进性、实盘落地能力是范式带来的结果，不是独立目标。
-
-单人单机场景裁决原则（§20/§68/§69）：公司体系是主干参照，但凡为 tick 级性能、多策略并发、多人协作而生的设施（事件驱动内核、ClickHouse、分布式追踪、配置中心、C++ Traits）一律不引入——个人平台的规模使这些问题天然消失。
 
 ## 2. 五域骨架
 
@@ -134,9 +130,8 @@ Factor(compute) → FactorDAG(拓扑) → PostProcessor → per-factor-one-table
 
 ## 6. 黄金样本与验证（§68.7）
 
-**平台级黄金样本 = 等权 top-5 ETF 动量**（教程 §2 双重动量变体，≤30 行 akshare 可重现）。五步验证法：手算 Excel → pandas → SimBroker 全链路 → 扣费对拍 → 五年基线落盘。预期区间：年化 10–15% / 夏普 0.8–1.2 / MDD 15–25%；超范围排查表（年化 >20% 查未来函数、夏普 >2 查前视、MDD <10% 查漏极端行情段、费用 <1% 查 FeeModel 漏计）。详见 [core/testing.md](core/testing.md)。
+**平台级黄金样本 = 等权 top-5 ETF 动量**。五步验证法：手算 Excel → pandas → SimBroker 全链路 → 扣费对拍 → 五年基线落盘。预期区间：年化 10–15% / 夏普 0.8–1.2 / MDD 15–25%；超范围排查表（年化 >20% 查未来函数、夏普 >2 查前视、MDD <10% 查漏极端行情段、费用 <1% 查 FeeModel 漏计）。详见 [core/testing.md](core/testing.md)。
 
-旧 `baseline_spec.py`（sharpe 16 不可信）**保留作期货 ALSTM 策略自身回归基准，不再是平台级黄金样本**——两者不混用。
 
 ## 7. 迁移阶段与红线
 
@@ -177,5 +172,4 @@ design/
 └── ops/     scheduler · monitoring · reporting · alerting
 ```
 
-- 讨论史（83 问 + 54 节结论，含被否决的选项与理由）：[archive/OPEN_QUESTIONS.md](../archive/OPEN_QUESTIONS.md)
 - 现行代码放置规则：[PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)
