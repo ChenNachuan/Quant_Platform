@@ -501,7 +501,8 @@
 - **期货 ALSTM 自身回归基准** —— `ARCHITECTURE.md` §6：「旧 `baseline_spec.py`（sharpe 16 不可信）**保留作期货 ALSTM 策略自身回归基准，不再是平台级黄金样本**——两者不混用」。连带保留 `strategies/futures/alstm/`（含 `train.py` / `reporting.py` / `reports/` / `notebooks/`）与 `tests/test_tl_intraday_reproduction.py`。
   > **注意**：`316261b` 树中**不存在** `strategies/futures/alstm/baseline_spec.py`（`find . -name baseline_spec.py` 无结果）。设计要求「保留」的对象在仓库里找不到——见 §7 缺口 #15。
 - **AmazingData Docker 用法与 API 限制**（`AGENTS.md` 现有段落仍有效）
-- **`examples/`、`knowledge-base/`** —— 探索性与笔记，不被生产模块 import
+- **`knowledge-base/`** —— 探索性与笔记，不被生产模块 import
+- ~~**`examples/`**~~ —— **保留登记作废，2026-11-08 删除**（依据：M2/M3 归档后三个示例的依赖全部不存在）。逐条：`test_dag_dependencies.py` 引 `factor_library.registry` / `factor_library.dag`（M2 迁 `core/registry.py` + `research/factor_runtime.py`）；`batch_backtest_example.py` 引 `engine.factor.backtest_runner` / `zvt.contract`（M2 + M3）；`zvt_backtest_example.py` 引 `zvt.*` / `engine.zvt_bridge.*` / `factor_library.stock.*`（M3 归档 + M2 迁移）。且 `batch_backtest_example.py:7` 写死 `/Users/nachuanchen/Documents/Quant` 旧用户名，**迁移前即已不可运行**。另 `examples/test_dag_dependencies.py` 文件名以 `test_` 开头而 `def test_` 为 0，被 G14 测试扫描器误收（`G14 failed: test_dag_dependencies.py: no def test_ functions`）——它不是测试，是演示脚本。日后若重开示例，须对齐 `research/` / `execution/` / `data/` 现行 API **另写**，不复原这三个。
 - **`docs/archive/`** —— 冻结只读
 
 **不混用（红线 6）**：平台级黄金样本 = 等权 top-5 ETF 动量；期货 ALSTM 回归基准 = 策略自身。两套基线各自独立，任何阶段不得互相当对拍参照。
