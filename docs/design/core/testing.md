@@ -1,23 +1,25 @@
 # testing
 
-> 域：core · 对应代码 core/testing.py（fixtures 归 tests/） · 来源 §69.4 / §68.7（archive/OPEN_QUESTIONS.md）
-
+> 域：core · 对应代码 [core/testing.py](core/testing.py)（fixtures 归 tests/）
 ## 职责与边界
 
 平台测试策略：pytest 三层目录、单测覆盖约定、hypothesis 性质测试、测试替身、黄金样本端到端对拍。规定**测什么、怎么组织、容差多少**，不含具体测试用例实现。
 
-边界：因子单测四范式归 ../research/factor_governance.md；黄金样本的策略逻辑是等权 top-5 ETF 动量（§68.7），验证方法在此收口。
+边界：因子单测四范式归 ../research/factor_governance.md；黄金样本的策略逻辑是等权 top-5 ETF 动量，验证方法在此收口。
 
-## 接口签名
+## 测试分层
 
 ```text
 tests/
-├── unit/         # 单测: 函数级，快
+├── unit/         # 单测: 函数级
 ├── integration/  # 集成: 管道级
-└── golden/       # 黄金样本: 端到端对拍（衔接 §68.7 五步验证）
+└── golden/       # 黄金样本: 端到端对拍
 ```
 
-**集成 3 场景**（§69.4）：①数据管道（fetch→DQC→parquet 落盘）②因子管道（FactorDAG→PostProcessor→per-factor 表）③回测主循环（build_portfolio→generate_orders→SimBroker→nav）。
+**集成 3 场景**：
+1. 数据管道（fetch→DQC→parquet 落盘）
+2. 因子管道（FactorDAG→PostProcessor→per-factor 表）
+3. 回测主循环（build_portfolio→generate_orders→SimBroker→nav）
 
 ```python
 TOLERANCE = 1e-4
@@ -54,69 +56,29 @@ def test_simbroker_matches_pandas() -> None: ...
 | 决策 | 否决项 | 一句话理由 |
 |---|---|---|
 | pytest 三层（unit/integration/golden） | 单层测试堆 | 按速度与意图分层，三档耗时预算可控 |
-| hypothesis 性质测试补充示例测试 | 只写示例测试 | 费率/权重/账本恒等式适合性质化（fee≥0、cash+mkt_value==nav 等） |
-| 黄金样本 = 等权 top-5 ETF 动量 | 旧 baseline_spec.py（sharpe 16.001135 不可信、trade_count 12686 暗示高频、期货 ALSTM vs V1 A 股、VectorBT/ZVT vs pandas） | ≤30 行 akshare 可重现，任何环境跑出同一组数字——旧基线保留作期货 ALSTM 自身回归基准，不作平台级黄金样本 |
-| 五步验证法 | 只对拍最终指标 | 手算 Excel→pandas→SimBroker→扣费→五年基线，逐层定位分歧 |
+| hypothesis 性质测试补充示例测试 | 只写示例测试 | 费率/权重/账本恒等式适合性质化 |
+| 黄金样本 = 等权 top-5 ETF 动量 | 旧 baseline | ≤30 行 akshare 可重现，任何环境跑出同一组数字 |
+| 五步验证法 | 只对拍最终指标 | 逐层定位分歧 |
 | TOLERANCE = 1e-4 | — | golden_expected.json 手算 4 位小数 |
-| V1 无 CI，本地三档耗时预算 | 先上 GitHub Actions | unit < 10s / integration < 60s / golden < 5min；CI 是 V2 |
-| 测试替身表 | 真调网络/柜台 | 时钟固定日期注入，QMT 用 SimBroker |
+| V1 无 CI，本地三档耗时预算 | 先上 GitHub Actions | CI 是 V2 |
 
-## 实现要点
-
-```python
-from hypothesis import given, strategies as st
-
-@given(price=st.floats(1, 1000), shares=st.integers(100, 10000))
-def test_fee_non_negative(price: float, shares: int) -> None:
-    fee = FeeModel().buy_fee(price, shares)
-    assert fee >= 0
-    assert fee >= 5.0          # 最低 5 元（§66.4）
-
-
-def test_pandas_matches_hand_calc() -> None:
-    """pandas 实现 vs golden_expected.json 手算（Excel 4 位小数）。"""
-    result = golden_baseline()
-    expected = json.loads(Path("tests/golden/golden_expected.json").read_text())
-    for key in ("total_return", "sharpe", "mdd"):
-        assert abs(result[key] - expected[key]) < TOLERANCE
-```
-
-黄金样本五步验证（§68.7）：
+黄金样本五步验证：
 
 | 步骤 | 内容 | 容差 |
 |---|---|---|
-| 1 | 手算 Excel 对拍（月末调仓 3 个月） | 4 位小数一致 |
+| 1 | 手算 Excel 对拍 | 4 位小数一致 |
 | 2 | pandas 实现 vs Excel | < 0.01% |
 | 3 | SimBroker 全链路 vs pandas | < 0.01% |
 | 4 | 扣费前后对比 | 费用与 FeeModel 手算一致 |
 | 5 | 2020–2024 五年完整基线 | 落盘 metrics 做回归基准 |
 
-**组合层约定（步骤 3–5 共用一套口径，S8 补注）** — 五步都跑在同一夹具
-`tests/golden/golden_prices.parquet`（5 ETF × 77 个交易日）上，组合层新增
-`golden_expected_portfolio.json` 与 `tests/golden/portfolio_handcalc.md`：
+预期区间：年化 10–15% / 夏普 0.8–1.2 / MDD 15–25%。
 
-| 约定 | 取值 |
-|---|---|
-| 日期 | warmup `2024-12-04`~`2024-12-31`（20 日，只做动量回看，**不进 NAV**）；sample `2025-01-02`~`2025-03-31`（57 日，计量窗口） |
-| NAV 起点 | `NAV_0 = 1.0` 于 close(`2024-12-31`)，running peak 计入 `NAV_0` |
-| 调仓时钟 | 四个决策日：`2024-12-31`（建仓）+ `2025-01-27` / `2025-02-28` / `2025-03-31`（自然月末）；权重在决策日收盘定，作用于其**后**的收益；调仓间权重随价格漂移。**不是** `_select_rebalance_dates("monthly")` |
-| 权重 | 等权 SLEEVE/5 each（SLEEVE = 0.95，即 NAV 的 95% 分给五档，每档 0.19，留 5% 现金）；top-5-of-5 选股是空操作（QUANT-11 裁定 1A），排名只断言存在、不改池 |
-| 成交价基准 | 步骤 1–2：决策日收盘（无费无滑点）；步骤 3–4：`t1_open`（缺口 #5 裁定 B）。夹具只有收盘价，bar 取 `open(D) := close(D-1)`，故 T+1 开盘价命中手算的决策日收盘价 —— 夹具建模选择，**不是第三种基准** |
-| 指标公式 | `total_return = NAV_T/NAV_0 - 1`（窗口复利，**非**年化）；`sharpe = mean(r_p)/std(r_p, ddof=1) × √252`（`rf = 0`）；`mdd = min(NAV_t/peak_t - 1)` |
-| 期望值 | 6 位小数（4 位会吃掉 1e-4 的 TOLERANCE 预算）；手算出处见 `portfolio_handcalc.md`（QUANT-11 裁定 2B：期望值由实现之外的人编写，人给的 Excel 优先） |
-
-预期区间：年化 10–15% / 夏普 0.8–1.2 / MDD 15–25%。超范围排查表：
-
-| 症状 | 排查方向 |
+| 异常 | 排查方向 |
 |---|---|
 | 年化 > 20% | 查未来函数（shift(1)/成交价基准） |
 | 夏普 > 2 | 查前视（权重用了当期信息） |
 | MDD < 10% | 查是否漏了极端行情段（2022/2024） |
 | 费用 < 1% | 查 FeeModel 是否漏计（印花税卖出/最低 5 元） |
 
-fixtures：`tests/golden/golden_prices.parquet`（5 ETF × 3 月）+ `golden_expected.json`（手算期望值）。
-
-## 实施时定稿项
-
-- ~~黄金样本 ETF 标的池定稿~~ — 已裁（红线 6）：标的池为 510300.SH / 510500.SH / 518880.SH / 511010.SH / 159915.SZ
-- GitHub Actions workflow 具体写法（V2，§69.6）
+组合层详细约定见tests/golden/portfolio_handcalc.md
