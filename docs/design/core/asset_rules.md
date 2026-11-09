@@ -1,6 +1,6 @@
 # asset_rules
 
-> 域：core · 对应代码 core/asset_rules.py
+> 域：core · 对应代码 [core/asset_rules.py](core/asset_rules.py)
 
 ## 职责与边界
 
