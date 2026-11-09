@@ -105,7 +105,7 @@ MONTH_END_JOB = "month_end_attribution"
 #: and factor jobs produce them (``signal_to_weights`` for the book); they are
 #: not on disk until those jobs are wired, and absent files are a missing
 #: input — the engine records FAILED and alerts, scheduler.md's "无数据" path.
-ATTRIBUTION_DIR = Path("data/ops/attribution")
+ATTRIBUTION_DIR = Path("logs/ops/attribution")
 
 #: The design job table (docs/design/ops/scheduler.md). Call sites pass these
 #: to ``run_job`` (its signature defaults stay the doc's verbatim ones).

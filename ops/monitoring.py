@@ -5,7 +5,7 @@ in three tiers (``healthy`` / ``warning`` / ``exit``) and 4 system metrics
 judged in two ( ``ok`` / the breach level in ``status`` : ``HIGH`` / ``MEDIUM`` ).
 ``collect_metrics(date)`` returns the design's ``{"strategy": {...}, "system":
 {...}}`` shape (each entry ``{"value", "status"}``); ``append_metrics_snapshot``
-appends the 12-row snapshot to ``data/ops/metrics.jsonl`` (row schema pinned by
+appends the 12-row snapshot to ``logs/ops/metrics.jsonl`` (row schema pinned by
 the PR: ``date / ts / scope / name / value / status``); ``health_check`` is the
 scheduler job body (seam 3) — collect → snapshot → facts →
 ``ops.alerting.evaluate_alerts`` → ``send_alert`` per firing.
@@ -62,13 +62,13 @@ from ops import alerting
 from research.alpha_type import compute_turnover
 
 #: Snapshot landing spot (``data/`` is gitignored runtime data).
-METRICS_JSONL = Path("data/ops/metrics.jsonl")
+METRICS_JSONL = Path("logs/ops/metrics.jsonl")
 
 #: Source locations (seam 4). Every one degrades to None when absent.
 JOURNAL_DIR = Path("journal")
 SIGNALS_DIR = Path("data/signals")
 JOBS_JSONL = Path("logs/runs/jobs.jsonl")
-RISK_AUDIT_JSONL = Path("data/execution/risk_audit.jsonl")
+RISK_AUDIT_JSONL = Path("logs/audit/risk_audit.jsonl")
 DATA_ROOT = "data_platform/asset"
 
 #: The 8 strategy metrics, monitoring.md table order.
@@ -598,7 +598,7 @@ def _job_metrics(records: list[dict], end_day: str) -> dict[str, Any]:
 
 
 def _risk_reject_count(end_day: str) -> int | None:
-    """The day's BLOCK count in ``data/execution/risk_audit.jsonl`` (cond 8 fact)."""
+    """The day's BLOCK count in ``logs/audit/risk_audit.jsonl`` (cond 8 fact)."""
     if not RISK_AUDIT_JSONL.exists():
         return None
     try:
@@ -856,7 +856,7 @@ def nav_series(end_day: str) -> tuple[pd.Series, pd.Series]:
 
 
 def append_metrics_snapshot(date: str, metrics: dict) -> None:
-    """时点指标序列追加写 ``data/ops/metrics.jsonl`` (design signature).
+    """时点指标序列追加写 ``logs/ops/metrics.jsonl`` (design signature).
 
     One row per metric (12 per snapshot) with the PR-pinned schema
     ``date / ts / scope / name / value / status``. Append-only: repeated calls

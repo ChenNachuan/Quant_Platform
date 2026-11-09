@@ -16,7 +16,7 @@ def collect_metrics(date: str) -> dict:
     每项含 value 与 status（健康/警告/退出）。"""
 
 def append_metrics_snapshot(date: str, metrics: dict) -> None:
-    """时点指标序列追加写 data/ops/metrics.jsonl。"""
+    """时点指标序列追加写 logs/ops/metrics.jsonl。"""
 ```
 
 阈值分档：策略级指标三档（健康 / 警告 / 退出），系统级指标两档（正常 / 超阈值带级别）。
@@ -28,7 +28,7 @@ def append_metrics_snapshot(date: str, metrics: dict) -> None:
 | 策略级 8 指标三档阈值 | 只看收益 | 衰减退出要靠 rolling IC/夏普/回撤对照，不是单指标 |
 | 系统级 4 指标 | 全量系统监控 | 单机 4 项已覆盖"跑没跑成、数据到没到" |
 | 指标阈值与 §62.4/§64.7 衰减退出同一套 | 两套阈值 | 同一问题（衰减）不应有两套判据 |
-| 指标时点序列落 `data/ops/metrics.jsonl` | 只进日报 | 告警与趋势要连续序列，日报是快照 |
+| 指标时点序列落 `logs/ops/metrics.jsonl` | 只进日报 | 告警与趋势要连续序列，日报是快照 |
 | 不做 Web 看板 | Grafana / Streamlit（V1） | Markdown 日报够用；V2 再加 |
 
 ## 实现要点
@@ -55,7 +55,7 @@ def append_metrics_snapshot(date: str, metrics: dict) -> None:
 | 数据新鲜度 | 最新交易日 > 1 天前 | HIGH |
 | 数据条数偏差 | vs 历史均值 ±30% | HIGH |
 
-指标采样写 `data/ops/metrics.jsonl`（时点指标序列，供告警与趋势用）；日报展示见 [reporting.md](reporting.md)。
+指标采样写 `logs/ops/metrics.jsonl`（时点指标序列，供告警与趋势用）；日报展示见 [reporting.md](reporting.md)。
 
 验证：跑完 `daily_pipeline` 后 `metrics.jsonl` 有当日快照（端到端验证 5 条在 §67.6，分落 scheduler/reporting）。
 

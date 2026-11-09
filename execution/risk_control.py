@@ -33,7 +33,7 @@ from typing import Protocol
 from core.asset_rules import ASSET_PREFIXES, get_asset_rules
 
 #: Default audit sink (design §66.3), append-only JSON Lines.
-RISK_AUDIT_PATH = Path("data/execution/risk_audit.jsonl")
+RISK_AUDIT_PATH = Path("logs/audit/risk_audit.jsonl")
 
 #: Rule-id -> audit reason.  Keep in sync with the seven-rule table (§66.3).
 RULE_REASONS: dict[str, str] = {

@@ -5,7 +5,7 @@
 governance red lines:
 
 * one row per ``{date}_{alert_type}_{alpha_type_id}`` per day in
-  ``data/ops/alerts.jsonl`` — a repeat at equal or lower level fires nothing
+  ``logs/ops/alerts.jsonl`` — a repeat at equal or lower level fires nothing
   at all;
 * severity only ever rises — an upgrade rewrites the day's single row upward
   and re-fires the channels at the new level (so an escalation reaches the
@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 #: Runtime landing spot for alert rows (``data/`` is gitignored runtime data).
-ALERTS_JSONL = Path("data/ops/alerts.jsonl")
+ALERTS_JSONL = Path("logs/ops/alerts.jsonl")
 
 
 class AlertLevel(Enum):
@@ -341,7 +341,7 @@ def _seed_state(iso_day: str) -> None:
 
 
 def log_alert(payload: dict) -> None:
-    """Append one row to ``data/ops/alerts.jsonl`` (design signature).
+    """Append one row to ``logs/ops/alerts.jsonl`` (design signature).
 
     A tail left without its trailing newline by an interrupted append would
     glue the new row onto the fragment and lose both rows to one unparseable

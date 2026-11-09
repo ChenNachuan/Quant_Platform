@@ -6,7 +6,7 @@
 
 - 出事怎么知道：告警规则 3 类（阈值/突变/趋势）、8 条具体条件、通道分层、告警治理（去重/只升不降/白名单）。
 - 触发源是 [monitoring.md](monitoring.md) 的指标状态与 [scheduler.md](scheduler.md) 的 Job 失败事件（`run_job` 失败后直接 `send_alert`）。
-- 告警落盘 `data/ops/alerts.jsonl`，并在 [reporting.md](reporting.md) 日报的告警列表中呈现。
+- 告警落盘 `logs/ops/alerts.jsonl`，并在 [reporting.md](reporting.md) 日报的告警列表中呈现。
 - 不做：飞书/钉钉机器人、Grafana 告警、动态级别自动升级。
 
 ## 接口签名
@@ -24,7 +24,7 @@ def send_alert(level: str, msg: str, alert_type: str = "generic",
 
 
 def log_alert(payload: dict) -> None:
-    """告警追加写 data/ops/alerts.jsonl。"""
+    """告警追加写 logs/ops/alerts.jsonl。"""
 ```
 
 ## 关键决策

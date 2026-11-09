@@ -4,7 +4,7 @@
 
 ## 职责与边界
 
-- 产出两类报告：① Markdown 日报 `data/ops/reports/daily_{date}.md`（指标表 + 异常列表 + nav 曲线 png）；② 归因报告 `data/ops/reports/attribution_{alpha_type_id}_{quarter}.md`。
+- 产出两类报告：① Markdown 日报 `logs/ops/reports/daily_{date}.md`（指标表 + 异常列表 + nav 曲线 png）；② 归因报告 `logs/ops/reports/attribution_{alpha_type_id}_{quarter}.md`。
 - 归因回答"收益从哪来"：Alpha-Beta 单因子回归（V1）+ 因子贡献拆解（复用 §63.6 `factor_contribution()`）。
 - 输入来自 [monitoring.md](monitoring.md) 的指标快照与 [alerting.md](alerting.md) 的当日告警。
 - 不做：Web 看板（V2 Streamlit 需要时再加）、Brinson/Barra 机构级归因。
@@ -13,7 +13,7 @@
 
 ```python
 def write_daily_report(date: str, metrics: dict, alerts: list) -> str:
-    """Markdown 日报落盘 data/ops/reports/daily_{date}.md，返回 path。"""
+    """Markdown 日报落盘 logs/ops/reports/daily_{date}.md，返回 path。"""
 
 def alpha_beta_attribution(portfolio_returns: pd.Series,
                            benchmark_returns: pd.Series) -> dict:
@@ -54,7 +54,7 @@ def write_daily_report(date, metrics, alerts):
         lines.append(f"| {k} | {v['value']} | {v['status']} |")
     lines += ["", "## 系统指标", ...]
     lines += ["", "## 告警", *[f"- [{a['level']}] {a['msg']}" for a in alerts]]
-    path = f"data/ops/reports/daily_{date}.md"
+    path = f"logs/ops/reports/daily_{date}.md"
     Path(path).write_text("\n".join(lines), encoding="utf-8")
     return path
 ```

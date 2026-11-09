@@ -27,7 +27,7 @@ def pre_trade_risk_check(
     """逐规则检查，一 BLOCK 即整批拒；金额过小单独 SKIP 不拒整批。"""
 
 def log_risk_audit(check: RiskCheckResult) -> None:
-    """append-only 写 data/execution/risk_audit.jsonl（时间戳/规则/标的/动作/原因）。"""
+    """append-only 写 logs/audit/risk_audit.jsonl（时间戳/规则/标的/动作/原因）。"""
 ```
 
 **风控七规则表**：

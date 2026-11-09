@@ -47,7 +47,7 @@ __all__ = [
 ]
 
 #: Landing spot for both report families (``data/`` is runtime data).
-REPORTS_DIR = Path("data/ops/reports")
+REPORTS_DIR = Path("logs/ops/reports")
 
 #: ``alpha_annual = alpha_monthly * ANNUALIZATION`` (design: 月频×12).
 ANNUALIZATION = 12
@@ -268,7 +268,7 @@ def write_daily_report(
     alerts: Sequence[Any],
     nav: pd.Series | None = None,
 ) -> str:
-    """Write ``data/ops/reports/daily_{date}.md`` and return its path.
+    """Write ``logs/ops/reports/daily_{date}.md`` and return its path.
 
     The report carries the design's four parts: the 策略指标 table, the 系统指标
     table, the 告警 list, and the nav curve link.  Both tables read monitoring's
