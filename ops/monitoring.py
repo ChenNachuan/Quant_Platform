@@ -60,16 +60,17 @@ import pandas as pd
 from data.data_api import DataAPI
 from ops import alerting
 from research.alpha_type import compute_turnover
+from core.config import DATA_ROOT
 
 #: Snapshot landing spot (``data/`` is gitignored runtime data).
 METRICS_JSONL = Path("logs/ops/metrics.jsonl")
 
 #: Source locations (seam 4). Every one degrades to None when absent.
 JOURNAL_DIR = Path("journal")
-SIGNALS_DIR = Path("data/signals")
+SIGNALS_DIR = DATA_ROOT / "signals"
 JOBS_JSONL = Path("logs/runs/jobs.jsonl")
 RISK_AUDIT_JSONL = Path("logs/audit/risk_audit.jsonl")
-DATA_ROOT = "data_platform/asset"
+DATA_ROOT = str(DATA_ROOT / "asset")
 
 #: The 8 strategy metrics, monitoring.md table order.
 STRATEGY_METRICS = (

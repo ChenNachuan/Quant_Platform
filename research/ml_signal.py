@@ -45,6 +45,7 @@ import pandas as pd
 
 from research.alpha_signal import _cross_zscore  # noqa: PLC2701
 from research.post_processor import standardize_zscore
+from core.config import DATA_ROOT
 
 __all__ = [
     "MLSignalAdapter",
@@ -251,7 +252,7 @@ def build_feature_matrix(
     *,
     start,
     end,
-    factor_base_dir: str = "data_platform/factors",
+    factor_base_dir: str = str(DATA_ROOT / "factors"),
     bars: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the feature matrix from a list of feature specs.
@@ -435,7 +436,7 @@ def write_model(
     metadata: dict,
     *,
     verdict: str = "PASS",
-    base_dir: str = "data/models",
+    base_dir: str = str(DATA_ROOT / "models"),
 ) -> Path:
     """Write a model deployment directory.
 
@@ -489,7 +490,7 @@ def write_experiment(
     metrics: dict,
     config: dict,
     *,
-    base_dir: str = "experiments",
+    base_dir: str = str(DATA_ROOT / "experiments"),
 ) -> Path:
     """Write an experiment record.
 

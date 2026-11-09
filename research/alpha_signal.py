@@ -46,6 +46,7 @@ import numpy as np
 import pandas as pd
 
 from research.post_processor import standardize_zscore
+from core.config import DATA_ROOT
 
 __all__ = [
     "AlphaSignal",
@@ -363,7 +364,7 @@ def write_signal(
     signal: AlphaSignal,
     weights: pd.DataFrame,
     *,
-    base_dir: str = "data_platform/signals",
+    base_dir: str = str(DATA_ROOT / "signals"),
 ) -> dict[str, list[Path]]:
     """Archive *signal* and *weights* under ``cross/`` and ``timeseries/``.
 

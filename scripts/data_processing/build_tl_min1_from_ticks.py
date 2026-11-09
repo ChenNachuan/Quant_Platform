@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from core.config import DATA_ROOT as _QUANT_DATA_ROOT
+
 import duckdb
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_TICK_ROOT = PROJECT_ROOT / "data_lake/future/market_data/tick_l2"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data_lake/future/market_data/1min_tl_rebuilt"
+DEFAULT_TICK_ROOT = _QUANT_DATA_ROOT / "future/market_data/tick_l2"
+DEFAULT_OUTPUT_ROOT = _QUANT_DATA_ROOT / "future/market_data/1min_tl_rebuilt"
 
 
 def month_keys() -> list[tuple[int, int]]:

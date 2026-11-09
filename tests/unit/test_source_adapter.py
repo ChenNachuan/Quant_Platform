@@ -599,7 +599,7 @@ class TestRegressionSdkTimeout:
 class TestRegressionFix6HealthCheck:
     """Fix 6: health_check probes one real call at the asset-calendar trade date.
 
-    The calendar is ``data_platform/asset/calendar/sse.parquet`` — single
+    The calendar is ``DATA_ROOT/asset/calendar/sse.parquet`` — single
     column ``trade_date`` (storage_schema.md).  Every test here fails
     without its fix: the pre-fix base probed ``date.today()``, and the
     pre-fix amazingdata check only built the SDK.
@@ -611,7 +611,7 @@ class TestRegressionFix6HealthCheck:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        cal_dir = root / "data_platform" / "asset" / "calendar"
+        cal_dir = root / "asset" / "calendar"
         cal_dir.mkdir(parents=True)
         max_date = date(2026, 10, 20)
         table = pa.table(
@@ -639,9 +639,7 @@ class TestRegressionFix6HealthCheck:
         return Probe()
 
     def test_latest_trade_date_reads_asset_calendar(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(
-            tmp_path
-        )  # _latest_trade_date resolves the calendar cwd-relative
+        monkeypatch.setattr("data.source_adapter.DATA_ROOT", tmp_path)
         max_date = self._write_calendar(tmp_path)
         assert self._probe_adapter([])._latest_trade_date() == max_date
 
@@ -650,7 +648,7 @@ class TestRegressionFix6HealthCheck:
         assert self._probe_adapter([])._latest_trade_date() == date.today()
 
     def test_base_health_check_probes_calendar_trade_date(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("data.source_adapter.DATA_ROOT", tmp_path)
         max_date = self._write_calendar(tmp_path)
         probed: list = []
         assert self._probe_adapter(probed).health_check() is True
@@ -687,8 +685,8 @@ class TestRegressionFix6HealthCheck:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        monkeypatch.chdir(tmp_path)
-        cal_dir = tmp_path / "data_platform" / "asset" / "calendar"
+        monkeypatch.setattr("data.source_adapter.DATA_ROOT", tmp_path)
+        cal_dir = tmp_path / "asset" / "calendar"
         cal_dir.mkdir(parents=True)
 
         today = date.today()
@@ -716,8 +714,8 @@ class TestRegressionFix6HealthCheck:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        monkeypatch.chdir(tmp_path)
-        cal_dir = tmp_path / "data_platform" / "asset" / "calendar"
+        monkeypatch.setattr("data.source_adapter.DATA_ROOT", tmp_path)
+        cal_dir = tmp_path / "asset" / "calendar"
         cal_dir.mkdir(parents=True)
         future = date.today() + timedelta(days=30)
         table = pa.table({"trade_date": pa.array([future], type=pa.date32())})

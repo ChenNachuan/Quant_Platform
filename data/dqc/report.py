@@ -58,6 +58,7 @@ from data.dqc.severity import severity_config_for
 from data.quarantine import QUARANTINE_ROOT
 from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock
 from data.storage_schema import PARTITION_PATHS
+from core.config import DATA_ROOT
 
 __all__ = [
     "DQC_REPORT_ROOT",
@@ -141,7 +142,7 @@ def _now() -> datetime:
 
 
 def detail_path(
-    data_date: date, data_root: str | os.PathLike[str] = "data_platform"
+    data_date: date, data_root: str | os.PathLike[str] = str(DATA_ROOT)
 ) -> Path:
     """Month-partitioned detail file for *data_date*'s month."""
     month = data_date.strftime("%Y-%m")
@@ -154,7 +155,7 @@ def detail_path(
     )
 
 
-def summary_path(data_root: str | os.PathLike[str] = "data_platform") -> Path:
+def summary_path(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> Path:
     """Single-file batch summary table."""
     return Path(data_root) / DQC_REPORT_ROOT / f"{SUMMARY_TABLE}.parquet"
 
@@ -296,7 +297,7 @@ def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
 
 
 def append_detail(
-    rows: list[dict], data_root: str | os.PathLike[str] = "data_platform"
+    rows: list[dict], data_root: str | os.PathLike[str] = str(DATA_ROOT)
 ) -> list[Path]:
     """Append detail rows to their ``month=YYYY-MM`` partition files."""
     if not rows:
@@ -315,13 +316,13 @@ def append_detail(
 
 
 def append_summary(
-    row: dict, data_root: str | os.PathLike[str] = "data_platform"
+    row: dict, data_root: str | os.PathLike[str] = str(DATA_ROOT)
 ) -> Path:
     """Append one batch row to the summary table."""
     return _append_parquet(summary_path(data_root), [row], SUMMARY_COLUMNS)
 
 
-def load_detail(data_root: str | os.PathLike[str] = "data_platform") -> pd.DataFrame:
+def load_detail(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFrame:
     """Read every detail partition (empty frame when nothing was written)."""
     root = Path(data_root) / DQC_REPORT_ROOT / DETAIL_TABLE
     files = sorted(root.glob("month=*/data.parquet"))
@@ -331,7 +332,7 @@ def load_detail(data_root: str | os.PathLike[str] = "data_platform") -> pd.DataF
     return pd.concat(frames, ignore_index=True)[DETAIL_COLUMNS]
 
 
-def load_summary(data_root: str | os.PathLike[str] = "data_platform") -> pd.DataFrame:
+def load_summary(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFrame:
     """Read the batch summary table (empty frame when nothing was written)."""
     path = summary_path(data_root)
     if not path.exists():
@@ -340,7 +341,7 @@ def load_summary(data_root: str | os.PathLike[str] = "data_platform") -> pd.Data
 
 
 def load_quarantine_batches(
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[dict]:
     """Quarantined batches: ``rejection.json`` records ∪ summary ``rejected``
     rows (the two views can differ after a T+30 quarantine cleanup)."""
@@ -460,7 +461,7 @@ def build_reference_overrides(
 
 
 def run_dashboard(
-    data_root: str | os.PathLike[str] = "data_platform", last: int = 10
+    data_root: str | os.PathLike[str] = str(DATA_ROOT), last: int = 10
 ) -> str:
     """Status counts, recent batches and top failing rules (DuckDB reads)."""
     import duckdb
@@ -512,7 +513,7 @@ def reingest(
     asset_type: str,
     trade_date: date,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
     overrides: dict | None = None,
 ) -> int:
     """Re-download one date and run the full ingest (repair path A).
@@ -559,7 +560,7 @@ def revalidate(
     start: date,
     end: date,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
     overrides: dict | None = None,
 ) -> int:
     """Re-check local raw under the current rules — report rows only.
@@ -639,13 +640,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "quarantine", help="list quarantined batches with reject reasons"
     )
-    p.add_argument("--data-root", default="data_platform")
+    p.add_argument("--data-root", default=str(DATA_ROOT))
     p.add_argument("--json", action="store_true", help="print machine-readable JSON")
 
     p = sub.add_parser(
         "dashboard", help="status counts, recent batches, top failing rules"
     )
-    p.add_argument("--data-root", default="data_platform")
+    p.add_argument("--data-root", default=str(DATA_ROOT))
     p.add_argument("--last", type=int, default=10)
 
     p = sub.add_parser(
@@ -654,7 +655,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", required=True, help="raw source name (akshare/...)")
     p.add_argument("--asset", required=True, help="asset_type (bars_daily/...)")
     p.add_argument("--date", required=True, help="YYYY-MM-DD")
-    p.add_argument("--data-root", default="data_platform")
+    p.add_argument("--data-root", default=str(DATA_ROOT))
 
     p = sub.add_parser(
         "revalidate", help="re-check local raw under current rules (report only)"
@@ -663,7 +664,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--asset", required=True, help="asset_type (bars_daily/...)")
     p.add_argument("--start", required=True, help="YYYY-MM-DD")
     p.add_argument("--end", required=True, help="YYYY-MM-DD")
-    p.add_argument("--data-root", default="data_platform")
+    p.add_argument("--data-root", default=str(DATA_ROOT))
     return parser
 
 

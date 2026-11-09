@@ -29,6 +29,7 @@ import data.dqc.engine
 import data.ingestion
 import data.normalizers
 import data.data_revision as dr
+from core.config import DATA_ROOT
 
 D = date(2024, 6, 14)
 ASSET = "bars_daily"
@@ -769,8 +770,8 @@ class TestDetectDataRoot:
             dr.assess_correction_impact,
             dr.mark_factors_stale,
         ):
-            assert (
-                inspect.signature(fn).parameters["data_root"].default == "data_platform"
+            assert inspect.signature(fn).parameters["data_root"].default == str(
+                DATA_ROOT
             ), fn.__name__
 
 

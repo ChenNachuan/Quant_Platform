@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
+from core.config import DATA_ROOT
 
 # requests exceptions are NOT subclasses of the builtin ConnectionError /
 # TimeoutError — akshare/tushare transients live in the requests family (fix 4).
@@ -291,7 +292,7 @@ class SourceAdapter(ABC):
         has not happened yet.  Clamped to today so ``health_check`` never
         probes a session that does not exist.
         """
-        cal_path = Path("data_platform/asset/calendar/sse.parquet")
+        cal_path = DATA_ROOT / "asset/calendar/sse.parquet"
         if cal_path.exists():
             try:
                 import duckdb

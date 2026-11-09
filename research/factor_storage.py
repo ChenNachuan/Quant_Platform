@@ -53,6 +53,7 @@ import pandas as pd
 
 from data.storage_ops import write_parquet_atomic
 from data.storage_schema import factor_schema
+from core.config import DATA_ROOT
 
 __all__ = [
     "load_factor",
@@ -63,7 +64,7 @@ __all__ = [
 ]
 
 #: Default root of the factor tree.
-DEFAULT_BASE_DIR: str = "data_platform/factors"
+DEFAULT_BASE_DIR: str = str(DATA_ROOT / "factors")
 
 #: Parquet codec — factor_storage.md pins zstd level 3.  Passed through to
 #: :func:`data.storage_ops.write_parquet_atomic`, which owns the tmp+rename.
@@ -286,7 +287,7 @@ def _normalise(result: pd.DataFrame, factor_name: str) -> pd.DataFrame:
     return out
 
 
-def save_factor_append(factor, result, base_dir="data_platform/factors") -> None:
+def save_factor_append(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None:
     """Append *result* to the factor's current version directory.
 
     Incremental daily production: rows are split by the year of their parsed
@@ -326,7 +327,7 @@ def save_factor_append(factor, result, base_dir="data_platform/factors") -> None
     write_metadata(out_dir, factor, data)
 
 
-def save_factor_full(factor, result, base_dir="data_platform/factors") -> None:
+def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None:
     """Write *result* as the complete contents of the current version directory.
 
     Unlike :func:`save_factor_append` there is no concatenation: the directory
@@ -370,7 +371,7 @@ def save_factor_full(factor, result, base_dir="data_platform/factors") -> None:
 
 
 def load_factor(
-    name, start, end, version="1.0", base_dir="data_platform/factors"
+    name, start, end, version="1.0", base_dir=str(DATA_ROOT / "factors")
 ) -> pd.DataFrame:
     """Read one factor's raw values over ``[start, end]`` (inclusive).
 
@@ -410,7 +411,7 @@ def load_factor_matrix(
     start,
     end,
     version="1.0",
-    base_dir="data_platform/factors",
+    base_dir=str(DATA_ROOT / "factors"),
 ) -> pd.DataFrame:
     """Build the logical wide table ``(date, ticker, f1, f2, ...)``.
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from core.config import DATA_ROOT as _QUANT_DATA_ROOT
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -34,8 +36,8 @@ class TLIntradayConfig:
     momentum_reduction: float = 0.20
     er_mean_days: int = 20
     er_stop_quantile: float = 0.25
-    raw_data_root: Path = PROJECT_ROOT / "data_lake/future/market_data/1min_tl_rebuilt"
-    proxy_data_root: Path = PROJECT_ROOT / "data_lake/future/market_data/5min"
+    raw_data_root: Path = _QUANT_DATA_ROOT / "future/market_data/1min_tl_rebuilt"
+    proxy_data_root: Path = _QUANT_DATA_ROOT / "future/market_data/5min"
     artifact_root: Path = PROJECT_ROOT / "artifacts/futures_tl_intraday"
 
     @property

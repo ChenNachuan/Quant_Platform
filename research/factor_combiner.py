@@ -41,6 +41,7 @@ import pandas as pd
 from core.config import config_snapshot
 from research.post_processor import neutralize as neutralize_residual
 from research.post_processor import standardize_zscore, winsorize_mad
+from core.config import DATA_ROOT
 
 __all__ = [
     "DEFAULT_LOOKBACK",
@@ -277,7 +278,7 @@ def write_eval_report(
     metrics: dict,
     config_path: str,
     *,
-    out_dir: str = "data/signals",
+    out_dir: str = str(DATA_ROOT / "signals"),
     period: tuple | None = None,
     walk_forward_folds: list | None = None,
     combiner: dict | None = None,

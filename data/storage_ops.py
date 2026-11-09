@@ -32,6 +32,7 @@ from typing import Any, Iterator
 
 import pandas as pd
 import yaml
+from core.config import DATA_ROOT
 from data.storage_schema import (
     CLEAN,
     PARTITION_PATHS,
@@ -531,7 +532,7 @@ def _match_policy(rel_parts: tuple[str, ...], policies: list[dict]) -> dict:
 
 
 def cleanup_expired(
-    root: str | os.PathLike[str] = "data_platform",
+    root: str | os.PathLike[str] = str(DATA_ROOT),
     *,
     subdir: str | None = None,
     dry_run: bool = True,
@@ -592,7 +593,7 @@ def cleanup_expired(
 # ---------------------------------------------------------------------------
 # Capacity tiers (§51)
 # ---------------------------------------------------------------------------
-def check_capacity(data_root: str | os.PathLike[str] = "data_platform") -> str:
+def check_capacity(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> str:
     """Return the free-space tier for the filesystem holding *data_root*.
 
     ``OK`` above 50 GB free, ``WARNING`` at 10–50 GB, ``CRITICAL`` at or
@@ -619,7 +620,7 @@ def check_capacity(data_root: str | os.PathLike[str] = "data_platform") -> str:
 
 
 def check_daily_growth(
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
     *,
     today: date | None = None,
     baseline_bytes: int = GROWTH_BASELINE_BYTES,

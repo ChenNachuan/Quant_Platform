@@ -220,7 +220,9 @@ class TestSaveFactorAppend:
             save_factor_append(factor, bad, base_dir=str(tmp_path))
 
     def test_default_base_dir_constant(self):
-        assert DEFAULT_BASE_DIR == "data_platform/factors"
+        from core.config import DATA_ROOT
+
+        assert DEFAULT_BASE_DIR == str(DATA_ROOT / "factors")
 
 
 # ---------------------------------------------------------------------------

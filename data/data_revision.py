@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Sequence
+from core.config import DATA_ROOT
 
 __all__ = [
     "CORRECTION_TOLERANCES",
@@ -157,7 +158,7 @@ class CorrectionRecord:
 def correction_log_path(
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """``{data_root}/corrections/{asset_type}/{date}.jsonl`` (§45.3)."""
     date_str = trade_date.strftime("%Y-%m-%d")
@@ -165,7 +166,7 @@ def correction_log_path(
 
 
 def impact_log_path(
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """``{data_root}/corrections/impact_log.jsonl`` (§45.4)."""
     return Path(data_root) / CORRECTIONS_ROOT / IMPACT_LOG_NAME
@@ -229,7 +230,7 @@ def _fetch_normalized(asset_type: str, trade_date: date) -> Any:
 def _load_local(
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Any:
     """Read the asset layer's existing batch for one trade date."""
     import pandas as pd
@@ -430,7 +431,7 @@ def detect_corrections(
     asset_type: str,
     lookback: int = 30,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[FieldChange]:
     """Re-pull the last *lookback* trade dates and diff against the asset layer.
 
@@ -560,7 +561,7 @@ def _daily_ingest(source: str, asset_type: str, trade_date: date) -> None:
 def apply_corrections(
     changes: Sequence[FieldChange],
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[CorrectionRecord]:
     """Group *changes*, log each record, then re-ingest to overwrite.
 
@@ -629,7 +630,7 @@ def _classify(record: CorrectionRecord) -> tuple[str, str, dict[str, Any]]:
 def assess_correction_impact(
     record: CorrectionRecord,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> str:
     """Classify *record*, append ``impact_log.jsonl``, and warn on MEDIUM+.
 
@@ -656,7 +657,7 @@ def assess_correction_impact(
 def mark_factors_stale(
     record: CorrectionRecord,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[str]:
     """Mark factors that depend on the touched table as stale (§45.4).
 

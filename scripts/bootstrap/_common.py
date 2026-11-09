@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from core.config import DATA_ROOT
 
 # Bootstrap fetchers run as `python scripts/bootstrap/fetch_*.py`, which puts
 # this directory on sys.path but not the repo root the `data` package lives in.
@@ -31,8 +32,8 @@ from data.storage_schema import PARTITION_PATHS, SCHEMA  # noqa: E402
 
 #: Root every ``PARTITION_PATHS`` template is relative to.  Authority:
 #: ``data/storage_schema.py`` (partition conventions) and ``data/storage_ops.py``
-#: (``cleanup_expired(root="data_platform")`` / ``check_capacity(data_root=...)``).
-DATA_ROOT = Path("data_platform")
+#: (``cleanup_expired(root=...)`` / ``check_capacity(data_root=...)``).
+# DATA_ROOT imported from core.config above
 
 #: Where ``TUSHARE_TOKEN`` may live.  Read, never printed, never committed.
 _TOKEN_FILES = (Path(".env"), Path("config/secrets"))

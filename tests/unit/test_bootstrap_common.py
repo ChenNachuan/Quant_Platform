@@ -127,15 +127,19 @@ class TestAlignSchema:
 
 
 # ---------------------------------------------------------------------------
-# write paths (AC-A1 — root is data_platform/, per PARTITION_PATHS)
+# write paths (AC-A1 — root is DATA_ROOT/, per PARTITION_PATHS)
 # ---------------------------------------------------------------------------
 class TestWritePaths:
     def test_table_path_uses_data_platform_root(self):
-        assert common.table_path("bars_daily", date="2025-01-15") == Path(
-            "data_platform/asset/bars_daily/2025-01-15.parquet"
+        from core.config import DATA_ROOT
+
+        assert (
+            common.table_path("bars_daily", date="2025-01-15")
+            == DATA_ROOT / "asset/bars_daily/2025-01-15.parquet"
         )
-        assert common.table_path("calendar", exchange="sse") == Path(
-            "data_platform/asset/calendar/sse.parquet"
+        assert (
+            common.table_path("calendar", exchange="sse")
+            == DATA_ROOT / "asset/calendar/sse.parquet"
         )
 
     def test_write_daily_one_file_per_day(self, tmp_path):

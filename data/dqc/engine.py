@@ -44,6 +44,7 @@ import pandas as pd
 import yaml
 from pandera.pandas import DataFrameSchema
 
+from core.config import DATA_ROOT
 from data.dqc import report
 from data.dqc.severity import (
     BatchRejectConfig,
@@ -539,7 +540,7 @@ def ingest_with_dqc(
     overrides: dict | None = None,
     cross_df: pd.DataFrame | None = None,
     batch_config: BatchRejectConfig | None = None,
-    data_root: str | os.PathLike = "data_platform",
+    data_root: str | os.PathLike = str(DATA_ROOT),
     target_path: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
     """Seven-step pre-load ingest (dqc_severity.md §37.6).  Returns df_clean.

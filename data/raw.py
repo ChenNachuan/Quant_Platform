@@ -20,6 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock
+from core.config import DATA_ROOT
 
 __all__ = ["save_raw", "load_raw", "raw_path", "cleanup_raw", "RAW_ROOT"]
 
@@ -32,7 +33,7 @@ def raw_path(
     source: str,
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """Return the raw landing path for *source* / *asset_type* / *trade_date*."""
     date_str = trade_date.strftime("%Y-%m-%d")
@@ -44,7 +45,7 @@ def save_raw(
     source: str,
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """Write *df* to the raw landing path atomically (zstd, no schema validation).
 
@@ -89,7 +90,7 @@ def load_raw(
     source: str,
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> pd.DataFrame | None:
     """Read the raw file for *source* / *asset_type* / *trade_date*.
 
@@ -102,7 +103,7 @@ def load_raw(
 
 
 def cleanup_raw(
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
     *,
     dry_run: bool = True,
     today: date | None = None,

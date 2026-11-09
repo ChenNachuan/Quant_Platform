@@ -3,9 +3,11 @@
 from pathlib import Path
 from typing import Final
 
+from core.config import DATA_ROOT as _QUANT_DATA_ROOT
+
 STRATEGY_NAME: Final = "futures_alstm"
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[3]
-DATA_ROOT: Final = PROJECT_ROOT / "data_lake" / "future" / "market_data"
+DATA_ROOT: Final = _QUANT_DATA_ROOT / "future" / "market_data"
 ARTIFACT_ROOT: Final = PROJECT_ROOT / "artifacts" / STRATEGY_NAME
 PLOT_ROOT: Final = ARTIFACT_ROOT / "plots"
 

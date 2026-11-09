@@ -43,6 +43,7 @@ import pandas as pd
 
 from research.factor_storage import _safe_component, save_factor_full
 from research.post_processor import PIPELINE_STOCK_EVAL, PostProcessor, neutralize
+from core.config import DATA_ROOT
 
 __all__ = [
     "AlphalensAdapter",
@@ -491,7 +492,7 @@ class FactorPipeline:
     def __init__(
         self,
         data_api: Any,
-        base_dir: str | Path = "data_platform",
+        base_dir: str | Path = str(DATA_ROOT),
         reports_dir: str | Path = "research/reports",
     ) -> None:
         self._data_api = data_api

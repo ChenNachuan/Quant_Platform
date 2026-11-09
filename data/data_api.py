@@ -21,6 +21,7 @@ from typing import Iterator
 import duckdb
 import pandas as pd
 import pyarrow as pa
+from core.config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,14 @@ _AGG_INTERVAL: dict[str, str] = {
 # Standard output columns in contract order.  adjfactor is appended when the
 # source table carries it (bars_daily, continuous).
 _STD_COLS: list[str] = [
-    "date", "ticker", "open", "high", "low", "close", "volume", "amount",
+    "date",
+    "ticker",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
 ]
 
 # Price columns that receive the adjustment ratio.
@@ -67,7 +75,7 @@ _PRICE_COLS: list[str] = ["open", "high", "low", "close"]
 ALPHALENS_PERIODS: tuple[int, ...] = (1, 5, 10, 20)
 ALPHALENS_QUANTILES: int = 5
 
-_DEFAULT_DATA_ROOT = "data_platform/asset"
+_DEFAULT_DATA_ROOT = str(DATA_ROOT / "asset")
 _DEFAULT_START = "2020-01-01"
 _DEFAULT_END = "2024-12-31"
 
@@ -229,14 +237,18 @@ class DataAPI:
         logger.log(
             level,
             "[COST] time=%.3fs rows=%d sql=%s",
-            elapsed, len(result), sql[:200],
+            elapsed,
+            len(result),
+            sql[:200],
         )
         return result
 
     def query_arrow(self, sql: str) -> pa.Table:
         """Execute *sql* and return a PyArrow table. Same retry as `query`."""
         result, elapsed = self._run(sql, lambda c: c.to_arrow_table())
-        logger.info("[COST] time=%.3fs rows=%d sql=%s", elapsed, result.num_rows, sql[:200])
+        logger.info(
+            "[COST] time=%.3fs rows=%d sql=%s", elapsed, result.num_rows, sql[:200]
+        )
         return result
 
     # -- lifecycle -----------------------------------------------------------
@@ -346,9 +358,7 @@ def _build_daily_sql(
 
     # Filter by trade_date for date-range (all tables have trade_date);
     # output date_col may be datetime for bars_minute.
-    where = (
-        f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
-    )
+    where = f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
     # One rule for both table shapes. The continuous branch used to
     # reimplement this inline and widened an empty list to "no filter", the
     # very bug `_symbol_filter` exists to prevent.
@@ -358,10 +368,7 @@ def _build_daily_sql(
         where += f" AND {ticker_col} IN ({joined})"
 
     cols_sql = ", ".join(select_parts)
-    return (
-        f"SELECT {cols_sql} FROM {table} {where} "
-        f"ORDER BY date, ticker"
-    )
+    return f"SELECT {cols_sql} FROM {table} {where} ORDER BY date, ticker"
 
 
 def _build_aggregated_sql(
@@ -379,7 +386,11 @@ def _build_aggregated_sql(
     produces no bars, so empty buckets are absent from the output.
     """
     interval = _AGG_INTERVAL[freq]
-    value_cols = fields if fields is not None else ["open", "high", "low", "close", "volume", "amount"]
+    value_cols = (
+        fields
+        if fields is not None
+        else ["open", "high", "low", "close", "volume", "amount"]
+    )
 
     agg_exprs = {
         "open": "first(open ORDER BY datetime)",
@@ -402,9 +413,7 @@ def _build_aggregated_sql(
             )
         select_parts.append(f"{agg_exprs[col]} AS {col}")
 
-    where = (
-        f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
-    )
+    where = f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
     where += _symbol_filter(symbol)
 
     cols_sql = ", ".join(select_parts)
@@ -446,7 +455,9 @@ def _apply_adjustment(
     elif adjust == "backward":
         ratio = m["adjfactor"] / m["adj_first"]
     else:
-        raise ValueError(f"unknown adjust {adjust!r}; expected 'none', 'forward', or 'backward'")
+        raise ValueError(
+            f"unknown adjust {adjust!r}; expected 'none', 'forward', or 'backward'"
+        )
 
     for col in _PRICE_COLS:
         if col in m.columns:
@@ -505,13 +516,20 @@ def load_bars(
     # It is dropped from the result below if the caller did not request it.
     effective_fields = fields
     drop_adj_after = False
-    if adjust != "none" and has_adj and fields is not None and "adjfactor" not in fields:
+    if (
+        adjust != "none"
+        and has_adj
+        and fields is not None
+        and "adjfactor" not in fields
+    ):
         effective_fields = [*fields, "adjfactor"]
         drop_adj_after = True
 
     with DataAPI(data_root) as api:
         if is_agg:
-            sql = _build_aggregated_sql(table, start, end, symbol, effective_fields, freq)
+            sql = _build_aggregated_sql(
+                table, start, end, symbol, effective_fields, freq
+            )
         else:
             sql = _build_daily_sql(table, start, end, symbol, effective_fields)
         df = api.query(sql)
@@ -553,12 +571,19 @@ def load_bars_chunked(
     OOM (≈20 GB/year for one year of minute bars).
     """
     if chunk_by != "month":
-        raise ValueError(f"unsupported chunk_by {chunk_by!r}; only 'month' is implemented")
+        raise ValueError(
+            f"unsupported chunk_by {chunk_by!r}; only 'month' is implemented"
+        )
     for chunk_start, chunk_end in _date_chunks(start, end):
         df = load_bars(
-            symbol, chunk_start, chunk_end,
-            freq=freq, fields=fields, adjust=adjust,
-            asset_type=asset_type, data_root=data_root,
+            symbol,
+            chunk_start,
+            chunk_end,
+            freq=freq,
+            fields=fields,
+            adjust=adjust,
+            asset_type=asset_type,
+            data_root=data_root,
         )
         if not df.empty:
             yield df
@@ -604,9 +629,13 @@ def to_alphalens_prices(
     shape ``(dates, tickers)``.
     """
     df = load_bars(
-        symbols, start, end,
-        freq="daily", adjust="forward",
-        asset_type="equity", data_root=data_root,
+        symbols,
+        start,
+        end,
+        freq="daily",
+        adjust="forward",
+        asset_type="equity",
+        data_root=data_root,
     )
     if df.empty:
         return pd.DataFrame()

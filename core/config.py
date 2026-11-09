@@ -6,6 +6,13 @@ Pure loading and merging; ``load_secrets`` output never enters
 """
 
 import hashlib
+import os
+from pathlib import Path
+
+#: 统一数据根目录。所有数据存储路径由此派生，不在各模块各自硬编码。
+DATA_ROOT = Path(
+    os.environ.get("QUANT_DATA_ROOT", "/Users/nachuan/Documents/Quant_Data")
+)
 
 try:
     import tomllib

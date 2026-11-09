@@ -4,9 +4,9 @@ debug = true
 log_level = "INFO"
 
 [data]
-# data_lake 根目录，确定了市场数据和因子数据的存放的地点
+# data_lake 根目录（相对于 QUANT_DATA_ROOT），确定了市场数据和因子数据的存放的地点
 # 使用相对路径，相对于项目根目录
-data_lake_dir = "data_lake"
+data_lake_dir = "future/market_data"
 factors_dir = "factors"
 
 # DataLake 品种 → 数据类型 → 子类型 定义
@@ -64,11 +64,11 @@ zvt_home = ".zvt"
 # DuckDB 配置
 [duckdb]
 # 持续的 DuckDB 文件路径（可选，如果仅依赖 Parquet，也可以是 :memory:）
-db_path = "data_lake/quant.duckdb"
+db_path = "quant.duckdb"
 
 # Qlib 配置
 [qlib]
-provider_uri = "data_lake/qlib_bin"
+provider_uri = "qlib_bin"
 region = "cn"
 
 [backtest]

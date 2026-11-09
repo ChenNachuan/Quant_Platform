@@ -7,6 +7,8 @@ data_lake/
 # 不是残留；*.parquet 已忽略，但 *.parquet.lock 会被 `git add .` 扫进来。
 *.parquet.lock
 artifacts/
+task/
+.multica/
 期货level2五档数据/
 *.db
 *.parquet

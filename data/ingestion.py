@@ -49,6 +49,7 @@ import yaml
 from data.raw import raw_path
 from data.storage_ops import DiskFullError, FileLock, check_capacity
 from data.storage_schema import PARTITION_PATHS
+from core.config import DATA_ROOT
 
 __all__ = [
     "SOURCE_PRIORITY_PATH",
@@ -75,7 +76,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-SOURCE_PRIORITY_PATH = Path("data_platform/config/source_priority.yaml")
+SOURCE_PRIORITY_PATH = DATA_ROOT / "config" / "source_priority.yaml"
 
 # ---------------------------------------------------------------------------
 # Field classification (§41 open item: NUMERIC_FIELDS was referenced from
@@ -495,7 +496,7 @@ def write_asset(
     trade_date: str | date,
     source_tag: str,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
     target_path: str | os.PathLike[str] | None = None,
 ) -> Path:
     """Land one batch on the asset layer with lineage in Parquet metadata.
@@ -578,7 +579,7 @@ def raw_exists(
     asset_type: str,
     trade_date: str | date,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> bool:
     """Has *source*'s raw batch for (*asset_type*, *trade_date*) landed?
 
@@ -596,7 +597,7 @@ def should_cross_check(
     asset_type: str,
     trade_date: str | date,
     *,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> bool:
     """Hook: is this the moment to cross-check *asset_type* on *trade_date*?
 

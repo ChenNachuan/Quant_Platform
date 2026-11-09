@@ -26,6 +26,7 @@ from typing import Any
 import pandas as pd
 
 from research.alpha_signal import DEFAULT_K, WEIGHT_METHODS, signal_to_weights
+from core.config import DATA_ROOT
 
 __all__ = [
     "REGISTRY_DIR",
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 #: Default registry directory (D5).  Helpers accept ``registry_dir=None``
 #: so tests can point at ``tmp_path``.
-REGISTRY_DIR = Path("data/registry")
+REGISTRY_DIR = DATA_ROOT / "registry"
 
 #: 7-dim closed-enum tag schema (D2).  Every value must be in its dimension's
 #: set; free text is forbidden.  All 7 dims required at create / publish.

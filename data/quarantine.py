@@ -22,6 +22,7 @@ from typing import Any
 import pandas as pd
 
 from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock
+from core.config import DATA_ROOT
 
 __all__ = [
     "save_quarantine",
@@ -41,7 +42,7 @@ QUARANTINE_ROOT = "quarantine"
 def quarantine_path(
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """Return the quarantine parquet path."""
     date_str = trade_date.strftime("%Y-%m-%d")
@@ -51,7 +52,7 @@ def quarantine_path(
 def rejection_path(
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """Return the rejection metadata JSON path."""
     date_str = trade_date.strftime("%Y-%m-%d")
@@ -63,7 +64,7 @@ def save_quarantine(
     asset_type: str,
     trade_date: date,
     rejection_meta: dict[str, Any],
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> tuple[Path, Path]:
     """Save a rejected batch to quarantine (parquet + rejection metadata).
 
@@ -111,7 +112,7 @@ def save_quarantine(
 def load_quarantine(
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
     """Load a quarantined batch. Returns ``(df, rejection_meta)`` or ``None``.
 
@@ -137,7 +138,7 @@ def recheck(
     validator: Any,
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> dict[str, Any]:
     """Re-validate a quarantined batch with a caller-supplied *validator*.
 
@@ -154,7 +155,7 @@ def recheck(
 
 
 def cleanup_quarantine(
-    data_root: str | os.PathLike[str] = "data_platform",
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
     *,
     dry_run: bool = True,
     today: date | None = None,

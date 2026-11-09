@@ -7,5 +7,5 @@ services:
       - /Users/nachuan/AmazingData/docker/.env
     volumes:
       - .:/opt/project
-      - ./data_lake:/data
+      - /Users/nachuan/Documents/Quant_Data:/data
       - ./scripts:/scripts

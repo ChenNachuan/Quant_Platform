@@ -43,8 +43,9 @@ from pathlib import Path
 import pandas as pd
 
 from data.storage_schema import PARTITION_PATHS
+from core.config import DATA_ROOT
 
-_DEFAULT_DATA_ROOT = "data_platform"
+_DEFAULT_DATA_ROOT = str(DATA_ROOT)
 
 
 def _as_date(d: date) -> date:
