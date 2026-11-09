@@ -66,10 +66,10 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 | `source_priority.yaml` 按 asset_type  | 硬编码优先级 | 字段级覆盖 |
 | 跨源对比在 Normalizer 后 | raw 对比 | raw 列名口径不同 |
 | 对比容差按字段类给 | 全局单一容差 | 价格/成交量/比率的误差量纲不同 |
-| 分级响应 + adjfactor 永远告） | 不一致即拒收 | 跨源合理误差存在，硬拒频繁误杀 |
+| 分级响应 + adjfactor 永远告警 | 不一致即拒收 | 跨源合理误差存在，硬拒频繁误杀 |
 | 备源补数写 metadata 不写数据列 | 加 source 列污染 schema | asset 层 schema 稳定，血缘走 Parquet metadata |
 
-**必须规避的坑**：`DLS_Basedata_US` 在 `suspend==1` 时把 `adjfactor` 写死为 1。**每个 SourceAdapter 的字段映射逻辑必须有测试覆盖**，重点边界：停牌、缺值、CA 事件。
+**必须规避的坑**：某数据源在 `suspend==1` 时把 `adjfactor` 写死为 1。**每个 SourceAdapter 的字段映射逻辑必须有测试覆盖**，重点边界：停牌、缺值、CA 事件。
 
 ## 实现要点
 
