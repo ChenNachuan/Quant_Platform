@@ -420,10 +420,15 @@ class TestRawLanding:
         raw_file.write_bytes(b"fake")
 
         (tmp_path / "lifecycle.yaml").write_text(
-            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+            "default: permanent\npolicies:\n  - prefix: raw\n    retention: rolling\n    days: 365\n  - prefix: quarantine\n    retention: rolling\n    days: 30\n",
         )
 
-        cleanup_raw(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        cleanup_raw(
+            data_root=tmp_path,
+            dry_run=False,
+            today=date(2025, 6, 1),
+            config_path=tmp_path / "lifecycle.yaml",
+        )
         assert not raw_file.exists(), "expired raw file should be deleted"
         assert q_file.exists(), "cleanup_raw must NOT delete files outside raw/"
 
@@ -501,10 +506,15 @@ class TestWatermarkIdempotentRerun:
 
         # lifecycle.yaml needed by cleanup_expired
         (tmp_path / "lifecycle.yaml").write_text(
-            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+            "default: permanent\npolicies:\n  - prefix: raw\n    retention: rolling\n    days: 365\n  - prefix: quarantine\n    retention: rolling\n    days: 30\n",
         )
 
-        cleanup_raw(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        cleanup_raw(
+            data_root=tmp_path,
+            dry_run=False,
+            today=date(2025, 6, 1),
+            config_path=tmp_path / "lifecycle.yaml",
+        )
         assert wm_path.exists(), ".watermarks.json must survive cleanup_raw"
 
     def test_watermark_survives_actual_delete(self, tmp_path):
@@ -523,10 +533,15 @@ class TestWatermarkIdempotentRerun:
         new_file.write_bytes(b"fake")
 
         (tmp_path / "lifecycle.yaml").write_text(
-            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+            "default: permanent\npolicies:\n  - prefix: raw\n    retention: rolling\n    days: 365\n  - prefix: quarantine\n    retention: rolling\n    days: 30\n",
         )
 
-        cleanup_raw(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        cleanup_raw(
+            data_root=tmp_path,
+            dry_run=False,
+            today=date(2025, 6, 1),
+            config_path=tmp_path / "lifecycle.yaml",
+        )
         assert not old_file.exists(), "expired raw file should be deleted"
         assert new_file.exists(), "recent raw file should survive"
         assert wm_path.exists(), ".watermarks.json must never be deleted"
@@ -644,10 +659,15 @@ class TestQuarantineSavePath:
 
         lifecycle = tmp_path / "lifecycle.yaml"
         lifecycle.write_text(
-            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+            "default: permanent\npolicies:\n  - prefix: raw\n    retention: rolling\n    days: 365\n  - prefix: quarantine\n    retention: rolling\n    days: 30\n",
         )
 
-        cleanup_quarantine(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        cleanup_quarantine(
+            data_root=tmp_path,
+            dry_run=False,
+            today=date(2025, 6, 1),
+            config_path=tmp_path / "lifecycle.yaml",
+        )
         assert not old_file.exists(), "expired quarantine file should be deleted"
         assert new_file.exists(), "recent quarantine file should survive"
 
@@ -668,10 +688,15 @@ class TestQuarantineSavePath:
         q_file.write_bytes(b"fake")
 
         (tmp_path / "lifecycle.yaml").write_text(
-            "retention:\n  raw/:\n    days: 365\n  quarantine/:\n    days: 30\n",
+            "default: permanent\npolicies:\n  - prefix: raw\n    retention: rolling\n    days: 365\n  - prefix: quarantine\n    retention: rolling\n    days: 30\n",
         )
 
-        cleanup_quarantine(data_root=tmp_path, dry_run=False, today=date(2025, 6, 1))
+        cleanup_quarantine(
+            data_root=tmp_path,
+            dry_run=False,
+            today=date(2025, 6, 1),
+            config_path=tmp_path / "lifecycle.yaml",
+        )
         assert not q_file.exists(), "expired quarantine file should be deleted"
         assert raw_file.exists(), (
             "cleanup_quarantine must NOT delete files outside quarantine/"

@@ -107,6 +107,7 @@ def cleanup_raw(
     *,
     dry_run: bool = True,
     today: date | None = None,
+    config_path: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
     """Delete expired raw ``.parquet`` files (S4: 365d from lifecycle.yaml).
 
@@ -126,4 +127,5 @@ def cleanup_raw(
         subdir=RAW_ROOT,
         dry_run=dry_run,
         today=today,
+        config_path=config_path,
     )
