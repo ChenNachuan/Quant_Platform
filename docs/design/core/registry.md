@@ -48,8 +48,8 @@ status 三态：`draft → production → deprecated`。
 详见[core/registry.py](core/registry.py)
 
 核心约定：
-`@register_factor`装饰器注册因子类，`list_factor_meta()`遍历汇总元数据
 
-血缘不另建存储：`depends_on()` + FactorDAG + depends_hash 三件套已覆盖追踪依赖，血缘图从 DAG 自动生成
-因子侧FactorRegistry + metadata.json，策略侧 alphaType.JSON，两套并存各司其职
+- `@register_factor`装饰器注册因子类，`list_factor_meta()`遍历汇总元数据
+- 血缘不另建存储：`depends_on()` + FactorDAG + depends_hash 三件套已覆盖追踪依赖，血缘图从 DAG 自动生成
+- 因子侧FactorRegistry + metadata.json，策略侧 alphaType.JSON，两套并存各司其职
 
