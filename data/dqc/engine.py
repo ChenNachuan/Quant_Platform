@@ -119,6 +119,7 @@ class CheckResult:
     sample_tickers: list[str]
     sample_values: list[Any]
     rule_version: str = RULE_VERSION
+    data_date: date | None = None  # batch business date stamped by run_all_checks
 
     @property
     def failing_count(self) -> int:
@@ -282,7 +283,9 @@ def _samples(df: pd.DataFrame, mask: pd.Series, rule: dict) -> tuple[list, list]
     return tickers, values
 
 
-def _build_result(rule: dict, df: pd.DataFrame, mask: pd.Series) -> CheckResult:
+def _build_result(
+    rule: dict, df: pd.DataFrame, mask: pd.Series, data_date: date | None = None
+) -> CheckResult:
     cfg = severity_config_for(rule["id"])
     total = len(df)
     failing = int(mask.sum())
@@ -302,6 +305,7 @@ def _build_result(rule: dict, df: pd.DataFrame, mask: pd.Series) -> CheckResult:
         failing_rate=rate,
         sample_tickers=tickers,
         sample_values=values,
+        data_date=data_date,
     )
 
 
@@ -351,7 +355,7 @@ def run_all_checks(
             raw = _evaluate_column_check(df, rule)
         else:
             raw = _evaluate_custom_check(df, rule, overrides)
-        result = _build_result(rule, df, _normalize_mask(raw, df))
+        result = _build_result(rule, df, _normalize_mask(raw, df), data_date)
         (hard if rule["severity"] == "HARD" else soft).append(result)
     return hard, soft
 
