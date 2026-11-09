@@ -1,10 +1,13 @@
 # QDC 落盘布局与字段映射契约（M1）
 
-状态：**binding**。M2–M5 依本契约落盘，互不打架；M6 按 manifest 对账。
-源 `/Users/nachuan/Documents/raw/QDCData` 只读；`data/storage_schema.py` 是 schema 权威，本契约**不修改它**。
+>状态：**binding**。
+>
+>M2–M5 依本契约落盘，互不打架；M6 按 manifest 对账。
+>
+>源 `/Users/nachuan/Documents/Data_raw/QDCData` 只读；`data/storage_schema.py` 是 schema 权威，本契约**不修改它**。
 契约表示不了真实数据时：拒收计数 + 登记 §8 缺口 + 上报，**不静默改口径**。
 
-- 落盘根（下称 `L`）：`/Users/nachuan/Documents/Data`
+- 落盘根（下称 `L`）：`/Users/nachuan/Documents/Data_asset`
 - 源（下称 `QDC`）：154GB、1401 分卷、45 数据集；batch-1 覆盖其中 35 个子表（日/频段，不含分钟与快照行情）
 - 契约版本：`qdc-m1-v1`（manifest 逐表记录该字符串）
 
