@@ -14,11 +14,8 @@ Quant/
 │   ├── adapters/           # 多源适配（QDCData / Amazingdata / StrightFlush / Tushare）
 │   ├── normalizers/        # 源归一化
 │   ├── dqc/                # DQC 规则、检查、引擎、严重度
-│   ├── execution/          # 风险审计产物（risk_audit.jsonl）
-│   └── ops/                # 运行指标/告警产物（不入 Git）
 │ 
-├── dqc/                    # 命名空间垫片（__path__ → data/dqc/）
-│ 
+
 ├── execution/              # 组合、订单、风控、账本、通道
 │   └── router/             # 通道连接器
 │ 
@@ -46,5 +43,9 @@ Quant/
 ├── docs/                   # 项目文档
 │   ├── design/             # 架构总纲与五域模块文档
 │   └── data_source/        # 数据源参考文档
+│ 
 └── logs/                   # 运行日志（不入 Git）
+    ├── runs/               # 策略、因子运行日志
+    ├── ops/                # 监控指标·告警记录·每日报告
+    └── audit/              # 风控审计产物
 ```
