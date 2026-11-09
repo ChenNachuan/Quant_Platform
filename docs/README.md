@@ -28,8 +28,8 @@ design/
 │   ├── dqc_runtime.md           —— DQC 执行时机、报告表结构、性能预算
 │   ├── dqc_severity.md          —— HARD/SOFT 分级处置、QualityFlag 位掩码、批量拒收
 │   ├── ingestion.md             —— 多源数据仲裁与优先级管理（source_priority.yaml）
-│   ├── l2_data.md               —— Level-2 / tick 数据仅作离线因子原料，不进实时链路
-│   ├── qdc_migration_contract.md —— QDCData → Data 落盘布局与字段映射契约（M1 binding）
+│   ├── l2_data.md               —— Level-2 / tick 数据存储因子与数据接口
+│   ├── QDCData_ingestion_contract.md —— QDCData → Data 落盘布局与字段映射契约（M1 binding）
 │   ├── quarantine_raw.md        —— 隔离区与原始层管理、Normalizer 标准化
 │   ├── source_adapter.md        —— 每数据源一个子类，fetch() 返回原始 DataFrame
 │   ├── storage_ops.md           —— 原子写入、FileLock、生命周期管理、备份策略
