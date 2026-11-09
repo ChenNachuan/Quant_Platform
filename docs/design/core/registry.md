@@ -1,6 +1,6 @@
 # registry
 
-> 域：core · 对应代码 core/registry.py · 来源 §62.2 / §68.4（archive/OPEN_QUESTIONS.md）
+> 域：core · 对应代码 [core/registry.py](core/registry.py)
 
 ## 职责与边界
 
@@ -24,8 +24,6 @@ class FactorRegistry:
 def list_factor_meta() -> list[dict]: ...
 ```
 
-（`create_instance` / `list_factor_meta` 等工厂函数名为 API 脚手架——源 §62.3 定注册机制，函数名实施时可调。）
-
 元数据两层载体：
 
 | 层 | 载体 | 内容 |
@@ -37,35 +35,21 @@ status 三态：`draft → production → deprecated`。
 
 ## 关键决策
 
-| 决策 | 否决项 | 一句话理由 |
+| 决策 | 否决项 | 理由 |
 |---|---|---|
-| 代码即注册表（FactorRegistry + 类属性 + metadata.json） | 独立 JSON/SQLite 注册表；公司式散在 usignal XML + UFormula + EB | 因子 <100，`list_all()` 遍历汇总即可；独立注册表引入"代码与注册表不一致"同步问题 |
-| 注册与发现 = 构造函数注入 | ServiceManager 配置扫描 + 名字查找（公司式） | 依赖在 `__init__` 里给全（Python 对象引用），无需运行时发现（§35.4）；启动顺序=代码书写顺序（§35.5） |
-| 元数据从 Factor 类自动提取 | 手工维护元数据表 | 代码即权威定义，提取零成本（§62.2 `META_FIELDS`） |
-| status 三态 | 公司 ProductionStatus 5 色灯 | 5 色灯是数据质量传导机制；个人用 depends_hash 变化触发重算替代 |
-| 与策略侧 alphaType 双表并存 | 合成一个注册表 | 两套各司其职：因子侧代码即注册表（§62.3），策略侧 alphaType JSON（§65） |
-| 不建独立文档文件 | 每因子一个 md | docstring + description 属性即可（compute() 是权威定义；研究笔记写研究日志） |
+| 代码即注册表（FactorRegistry + 类属性 + metadata.json） | 独立 JSON/SQLite 注册表, 遍历汇总即可；独立注册表引入"代码与注册表不一致"同步问题 | 遍历汇总即可，独立注册表可能导致同步问题  | 
+| 注册与发现 = 构造函数注入 | ServiceManager 配置扫描 | 依赖在 `__init__` 里给全，无需运行时发现；启动顺序=代码书写顺序 |
+| 元数据从 Factor 类自动提取 | 手工维护元数据表 | 代码即权威定义，提取零成本 |
+| status 三态 |  5 色灯 | 个人用 depends_hash 变化触发重算替代 |
+| 不建独立文档文件 | 每因子一个 md | docstring + description 属性即可 |
 
 ## 实现要点
 
-```python
-META_FIELDS = [
-    "name", "version", "description", "category", "frequency",
-    "asset_types", "depends_on", "status", "created_at",
-]
+详见[core/registry.py](core/registry.py)
 
-def list_factor_meta() -> list[dict]:
-    """遍历 FactorRegistry 汇总所有因子元数据（因子 <100，遍历足够）。"""
-    result = []
-    for name in FactorRegistry.list_all():
-        cls = FactorRegistry.get_class(name)
-        result.append({f: getattr(cls, f, None) for f in META_FIELDS})
-    return result
-```
+核心约定：
+`@register_factor`装饰器注册因子类，`list_factor_meta()`遍历汇总元数据
 
-血缘不另建存储（§62.5）：`depends_on()` + FactorDAG + depends_hash 三件套已覆盖"依赖了谁/何时算的"，血缘图从 DAG 自动生成（`dag.visualize()`）；per-di 粒度血缘（公司 DependencyLineage）对个人过度。
+血缘不另建存储：`depends_on()` + FactorDAG + depends_hash 三件套已覆盖追踪依赖，血缘图从 DAG 自动生成
+因子侧FactorRegistry + metadata.json，策略侧 alphaType.JSON，两套并存各司其职
 
-## 实施时定稿项
-
-- core/ 各文件的最小内容边界——registry.py 放几个 Registry（FactorRegistry / RuleRegistry 之外还要不要，§68.8）
-- ~~因子注册表形态~~ 已定 → §62.2（代码即注册表，不建独立库）
