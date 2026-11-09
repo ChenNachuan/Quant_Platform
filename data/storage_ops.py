@@ -27,7 +27,7 @@ import os
 import re
 import shutil
 from datetime import date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 import pandas as pd
@@ -558,6 +558,12 @@ def cleanup_expired(
     (``dry_run=True``).
     """
     root = Path(root)
+    if subdir is not None:
+        p = PurePosixPath(subdir)
+        if p.is_absolute() or ".." in p.parts or len(p.parts) != 1:
+            raise ValueError(
+                f"subdir must be a single relative path segment, got {subdir!r}"
+            )
     scan_root = root / subdir if subdir else root
     if not scan_root.exists():
         return []

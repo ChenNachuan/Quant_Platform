@@ -73,9 +73,7 @@ def _bars_daily_df(**overrides) -> pd.DataFrame:
 
 
 def _factor_df(value_column: str = "value", value=0.05) -> pd.DataFrame:
-    return pd.DataFrame(
-        [{"ticker": "600519.SH", "date": D, value_column: value}]
-    )
+    return pd.DataFrame([{"ticker": "600519.SH", "date": D, value_column: value}])
 
 
 def _data_files(root: Path) -> list[Path]:
@@ -157,7 +155,9 @@ class TestAtomicWriteFailureInjection:
         target = tmp_path / "2024-01-15.parquet"
 
         monkeypatch.setattr(
-            os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("replace died"))
+            os,
+            "replace",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("replace died")),
         )
 
         with pytest.raises(OSError, match="replace died"):
@@ -176,7 +176,9 @@ class TestAtomicWriteFailureInjection:
         assert not target.exists()
         assert list(tmp_path.iterdir()) == []
 
-    def test_failed_overwrite_leaves_previous_target_intact(self, tmp_path, monkeypatch):
+    def test_failed_overwrite_leaves_previous_target_intact(
+        self, tmp_path, monkeypatch
+    ):
         """§1: the target is either absent or complete — never half-written.
 
         A failed *overwrite* must not damage the complete file already at
@@ -544,6 +546,23 @@ class TestCleanupExpired:
             os.utime(path, (stamp, stamp))
         return path
 
+    def test_subdir_rejects_traversal(self, tmp_path):
+        with pytest.raises(ValueError, match="single relative path"):
+            cleanup_expired(tmp_path, subdir="raw/../asset")
+
+    def test_subdir_rejects_absolute(self, tmp_path):
+        with pytest.raises(ValueError, match="single relative path"):
+            cleanup_expired(tmp_path, subdir="/etc")
+
+    def test_subdir_rejects_multi_segment(self, tmp_path):
+        with pytest.raises(ValueError, match="single relative path"):
+            cleanup_expired(tmp_path, subdir="raw/src")
+
+    def test_subdir_accepts_single_segment(self, tmp_path):
+        self._make(tmp_path, "raw/src/eq/2020-01-01.parquet", mtime_days=400)
+        removed = cleanup_expired(tmp_path, subdir="raw", today=date(2024, 6, 1))
+        assert len(removed) == 1
+
     def test_dry_run_default_deletes_nothing(self, tmp_path):
         """A bare call must never delete — this pins the *default*, not the kwarg.
 
@@ -559,7 +578,9 @@ class TestCleanupExpired:
         removed = cleanup_expired(tmp_path, today=today)
 
         after = sorted(p.name for p in tmp_path.rglob("*") if p.is_file())
-        assert before == after, "a bare cleanup_expired call must not change the file count"
+        assert before == after, (
+            "a bare cleanup_expired call must not change the file count"
+        )
         assert old.exists() and recent.exists()
         # it still reports what it *would* delete
         assert removed == [old]
@@ -590,7 +611,9 @@ class TestCleanupExpired:
 
     def test_permanent_policy_never_deletes(self, tmp_path):
         today = date(2024, 6, 1)
-        ancient = self._make(tmp_path, "asset/bars_daily/1999-01-01.parquet", mtime_days=9000)
+        ancient = self._make(
+            tmp_path, "asset/bars_daily/1999-01-01.parquet", mtime_days=9000
+        )
         factor = self._make(tmp_path, "factors/mom/v1/1999.parquet", mtime_days=9000)
 
         removed = cleanup_expired(tmp_path, dry_run=False, today=today)
@@ -601,7 +624,9 @@ class TestCleanupExpired:
 
     def test_quarantine_30_day_window(self, tmp_path):
         today = date(2024, 6, 1)
-        expired = self._make(tmp_path, "quarantine/eq/2024-03-01.parquet", mtime_days=100)
+        expired = self._make(
+            tmp_path, "quarantine/eq/2024-03-01.parquet", mtime_days=100
+        )
         fresh = self._make(tmp_path, "quarantine/eq/2024-05-25.parquet", mtime_days=10)
 
         removed = cleanup_expired(tmp_path, dry_run=False, today=today)
@@ -623,9 +648,15 @@ class TestCleanupExpired:
     def test_skips_tmp_and_lock_residue(self, tmp_path):
         """Residue is cleanup_stale_*'s job, not cleanup_expired's."""
         today = date(2024, 6, 1)
-        stale_tmp = self._make(tmp_path, "raw/src/eq/2020-01-01.parquet.tmp", mtime_days=400)
-        stale_lock = self._make(tmp_path, "raw/src/eq/2020-01-01.parquet.lock", mtime_days=400)
-        stale_data = self._make(tmp_path, "raw/src/eq/2020-01-01.parquet", mtime_days=400)
+        stale_tmp = self._make(
+            tmp_path, "raw/src/eq/2020-01-01.parquet.tmp", mtime_days=400
+        )
+        stale_lock = self._make(
+            tmp_path, "raw/src/eq/2020-01-01.parquet.lock", mtime_days=400
+        )
+        stale_data = self._make(
+            tmp_path, "raw/src/eq/2020-01-01.parquet", mtime_days=400
+        )
 
         removed = cleanup_expired(tmp_path, dry_run=False, today=today)
 
@@ -636,7 +667,9 @@ class TestCleanupExpired:
 
     def test_unlisted_prefix_uses_default_permanent(self, tmp_path):
         today = date(2024, 6, 1)
-        odd = self._make(tmp_path, "scratch/whatever/2000-01-01.parquet", mtime_days=9000)
+        odd = self._make(
+            tmp_path, "scratch/whatever/2000-01-01.parquet", mtime_days=9000
+        )
 
         removed = cleanup_expired(tmp_path, dry_run=False, today=today)
 
@@ -885,7 +918,9 @@ class TestDailyGrowth:
 
 
 class TestCapacityMissingPath:
-    def test_missing_path_measures_nearest_existing_ancestor_not_cwd(self, tmp_path, monkeypatch):
+    def test_missing_path_measures_nearest_existing_ancestor_not_cwd(
+        self, tmp_path, monkeypatch
+    ):
         """Probing cwd would report an unrelated filesystem's free space.
 
         A path that does not exist yet must be measured on the filesystem it
@@ -897,9 +932,12 @@ class TestCapacityMissingPath:
         monkeypatch.setattr(
             mod.shutil,
             "disk_usage",
-            lambda p: (probed.append(str(p)) or __import__("collections").namedtuple(
-                "U", "total used free"
-            )(100 * 1024**3, 0, 60 * 1024**3)),
+            lambda p: (
+                probed.append(str(p))
+                or __import__("collections").namedtuple("U", "total used free")(
+                    100 * 1024**3, 0, 60 * 1024**3
+                )
+            ),
         )
 
         missing = tmp_path / "no" / "such" / "dir"
@@ -956,8 +994,12 @@ class TestBackupScript:
         result = _run_backup(src, dest)
 
         assert result.returncode == 0, result.stderr
-        assert (dest / "asset" / "bars_daily" / "2024-01-15.parquet").read_bytes() == b"a"
-        assert (dest / "raw" / "src" / "eq" / "2024-01-15.parquet").read_bytes() == b"bb"
+        assert (
+            dest / "asset" / "bars_daily" / "2024-01-15.parquet"
+        ).read_bytes() == b"a"
+        assert (
+            dest / "raw" / "src" / "eq" / "2024-01-15.parquet"
+        ).read_bytes() == b"bb"
         assert not list(dest.rglob("*.tmp")), "*.tmp must not be backed up"
         assert not list(dest.rglob("*.lock")), "*.lock must not be backed up"
         assert "counts match" in result.stdout
@@ -1383,7 +1425,9 @@ class TestBackupScript:
 
         assert result.returncode == 0, result.stdout + result.stderr
         for name in ("lost+found", ".Spotlight-V100", ".fseventsd", ".Trashes"):
-            assert (dest / name / "os_file.bin").exists(), f"{name} was removed by --delete"
+            assert (dest / name / "os_file.bin").exists(), (
+                f"{name} was removed by --delete"
+            )
 
     def test_fs_metadata_is_not_counted_as_content(self, tmp_path):
         """Metadata on DEST must not break the two-sided count bounds."""
