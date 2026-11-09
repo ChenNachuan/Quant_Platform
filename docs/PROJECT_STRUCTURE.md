@@ -15,7 +15,6 @@ Quant/
 │   ├── normalizers/        # 源归一化
 │   ├── dqc/                # DQC 规则、检查、引擎、严重度
 │ 
-
 ├── execution/              # 组合、订单、风控、账本、通道
 │   └── router/             # 通道连接器
 │ 
