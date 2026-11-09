@@ -302,7 +302,7 @@
 |---|---|
 | `uv run pytest tests/integration/test_ingest_pipeline.py -q` | 干净小样本 44 条 0 failure；每条 HARD 构造恰好触发的脏数据 → 阻断入库；K06–K08 构造不一致 case 被拦；拒收批次落 `quarantine/{asset}/{date}.parquet` + `.rejection.json` |
 | `uv run pytest tests/unit/test_dqc_severity.py -q` | `QualityFlag` 位运算：`quality_flag & 1` 过滤生效；`max_hard_drop_rate > 20%` → 整批拒收；`soft_alarm_rate > 50%` → 告警不拒收 |
-| `python -m dqc.report quarantine` | 可列出隔离区批次，字段齐全 |
+| `python -m data.dqc.report quarantine` | 可列出隔离区批次，字段齐全 |
 | `uv run pytest tests/integration/test_ingest_pipeline.py -q -k watermark` | watermark 幂等重跑安全；`cleanup_raw` 只删 `.parquet`，不误删 `.watermarks.json` |
 | 每个 SourceAdapter 的字段映射 | 停牌 / 缺值 / CA 事件三个边界各有测试（`ingestion.md` §21.3 停牌复权 bug 必须规避） |
 | `uv run ruff check .` | 退出码 0 |

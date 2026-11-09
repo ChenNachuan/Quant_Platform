@@ -1,4 +1,4 @@
-"""DQC report — dual tables + the ``python -m dqc.report`` CLI (S9-T3).
+"""DQC report — dual tables + the ``python -m data.dqc.report`` CLI (S9-T3).
 
 Field authority: ``docs/design/data/dqc_runtime.md`` §38 (report dual tables,
 CLI) and ``docs/design/data/quarantine_raw.md`` (quarantine query).  What to
@@ -630,7 +630,7 @@ def _print_quarantine(batches: list[dict]) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m dqc.report",
+        prog="python -m data.dqc.report",
         description=(
             "DQC dual-table report: quarantine / dashboard / reingest / revalidate."
         ),
@@ -669,7 +669,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry (``python -m dqc.report``).  Returns the exit code."""
+    """CLI entry (``python -m data.dqc.report``).  Returns the exit code."""
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "quarantine":

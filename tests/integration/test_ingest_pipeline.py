@@ -1203,13 +1203,13 @@ class TestDqcReportTables:
         assert not (tmp_path / "quarantine").exists()
 
     def test_module_invocation_resolves(self):
-        """AC4's literal ``python -m dqc.report`` entry point must run."""
+        """AC4's literal ``python -m data.dqc.report`` entry point must run."""
         import subprocess
         import sys
 
         repo_root = Path(__file__).resolve().parents[2]
         proc = subprocess.run(
-            [sys.executable, "-m", "dqc.report", "--help"],
+            [sys.executable, "-m", "data.dqc.report", "--help"],
             capture_output=True,
             text=True,
             cwd=repo_root,

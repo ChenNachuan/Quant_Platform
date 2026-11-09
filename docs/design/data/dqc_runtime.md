@@ -42,10 +42,10 @@ DQC 的**运行时**：何时跑、跑多快、失败了怎么办、结果怎么
 ### CLI
 
 ```text
-python -m dqc.report dashboard          # CLI + DuckDB 看板，不建 Web
-python -m dqc.report quarantine         # 隔离区查询（见 quarantine_raw.md）
-python -m dqc.engine reingest --asset X --date D    # 重下载+全重跑+覆盖写
-python -m dqc.engine revalidate --asset X --start S --end E  # 只重验不重下载
+python -m data.dqc.report dashboard          # CLI + DuckDB 看板，不建 Web
+python -m data.dqc.report quarantine         # 隔离区查询（见 quarantine_raw.md）
+python -m data.dqc.engine reingest --asset X --date D    # 重下载+全重跑+覆盖写
+python -m data.dqc.engine revalidate --asset X --start S --end E  # 只重验不重下载
 ```
 
 ## 关键决策
