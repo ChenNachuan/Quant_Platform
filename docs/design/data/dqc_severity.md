@@ -14,7 +14,8 @@ DQC 检出问题后的**处置判定**：硬/软边界怎么切、硬拒的粒�
 @dataclass
 class DQCSeverityConfig:
     row_action: str                   # "drop" | "flag" | "pass"
-    escalation_threshold: float | None  # 行级异常占比超此值 → 硬拒整批；flag 类恒 None
+    escalation_threshold: float | None  # 异常占比超此值 → 硬拒整批；flag 类恒 None
+                                         # partition 规则比的是展开后的 drop 率（issue #63）
 
 @dataclass
 class BatchRejectConfig:

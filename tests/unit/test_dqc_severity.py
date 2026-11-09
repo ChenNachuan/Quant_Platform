@@ -298,6 +298,41 @@ def test_partition_granularity_expands_drop(tmp_path, monkeypatch):
     assert (tmp_path / "asset" / "bars_minute" / "2024-01-03.parquet").exists()
 
 
+def test_partition_boundary_escalation_uses_post_expansion_rate(tmp_path, monkeypatch):
+    """Issue #63: partition escalation must compare post-expansion drop rate.
+
+    10 tickers × 10 bars = 100 rows.  1 ticker fails 1 bar (C03).
+    raw rate = 1/100 = 1 % — below C03's 5 % escalation_threshold.
+    post-expansion = 10/100 = 10 % — above threshold, so escalation fires.
+    """
+    rows = []
+    for t in range(10):
+        for b in range(10):
+            rows.append(
+                {
+                    "ticker": f"000{t:03d}.SZ",
+                    "trade_date": "2024-01-03",
+                    "datetime": f"2024-01-03 09:{b + 31:02d}:00",
+                    "open": 10.0,
+                    "high": 10.1,
+                    "low": 9.9,
+                    "close": 10.0,
+                    "volume": 500,
+                    "amount": 5000.0,
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    # C03: granularity=partition, escalation_threshold=0.05
+    # Only 1 row out of 100 fails → raw rate 1 % < 5 %, but expansion lifts to 10 %
+    hard = [_fake_result("C03", df, [i == 0 for i in range(100)])]
+    monkeypatch.setattr(engine, "run_all_checks", _fake_runner(hard=hard))
+
+    with pytest.raises(DQCBatchReject) as excinfo:
+        engine.ingest_with_dqc(df, DATA_DATE, "bars_minute", data_root=tmp_path)
+    assert excinfo.value.detail["reject_reason"] == "rule_escalation:C03"
+
+
 # ── real-rule smoke test ──────────────────────────────────────────────
 
 

@@ -436,18 +436,27 @@ def evaluate_batch(
     # step 3a — rule-level escalation (double insurance with the valve).
     # drop/pass rules above threshold reject the batch; flag rules (K06-K08)
     # raise an escalated alarm and keep their rows.
+    # For partition-granularity rules the threshold bounds the post-expansion
+    # drop rate (issue #63: raw per-row rate can be orders of magnitude lower).
     reject_reason: str | None = None
     warnings: list[str] = []
     for r in hard_results + soft_results:
         cfg = severity_config_for(r.rule_id)
         thr = cfg.escalation_threshold
-        if thr is None or not r.failing_count or r.failing_rate <= thr:
+        if thr is None or not r.failing_count:
+            continue
+        if cfg.granularity == "partition":
+            expanded = _expand_to_partitions(df, r.failing_rows)
+            rate = float(expanded.sum()) / len(df) if len(df) else 0.0
+        else:
+            rate = r.failing_rate
+        if rate <= thr:
             continue
         if cfg.row_action == "flag":
             logger.error(
                 "DQC escalated alarm: %s failing rate %.4f > %.4f (%s %s); rows kept",
                 r.rule_id,
-                r.failing_rate,
+                rate,
                 thr,
                 data_date,
                 asset_type,
