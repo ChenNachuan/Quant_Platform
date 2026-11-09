@@ -79,7 +79,10 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
             coerced = sd.map({"S": True, " ": False})
         else:
             coerced = sd.astype("boolean")
-        df["suspend_d"] = coerced.fillna(df["suspend"].astype(bool))
+        fallback = df["suspend"]
+        if fallback.dtype == object or fallback.dtype.name == "string":
+            fallback = fallback.map({"S": True, " ": False})
+        df["suspend_d"] = coerced.fillna(fallback).fillna(False).astype("boolean")
         df = df.drop(columns=["suspend"])
     df = df.rename(columns=_COLUMN_MAP)
 
