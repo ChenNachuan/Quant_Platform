@@ -21,7 +21,7 @@ from typing import Any
 
 import pandas as pd
 
-from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock
+from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock, cleanup_expired
 from core.config import DATA_ROOT
 
 __all__ = [
@@ -80,10 +80,11 @@ def save_quarantine(
     meta_path = rejection_path(asset_type, trade_date, data_root)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write parquet atomically
     tmp = target.with_name(target.name + ".tmp")
+    meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
     with FileLock(target):
         try:
+            # parquet: tmp → fsync → replace
             df.to_parquet(tmp, **PARQUET_WRITE_CONFIG)
             fd = os.open(tmp, os.O_RDONLY)
             try:
@@ -91,20 +92,32 @@ def save_quarantine(
             finally:
                 os.close(fd)
             os.replace(tmp, target)
-        except BaseException:
-            try:
-                os.remove(tmp)
-            except FileNotFoundError:
-                pass
-            raise
 
-    # Write rejection metadata atomically
-    meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
-    meta_tmp.write_text(
-        json.dumps(rejection_meta, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
-    os.replace(meta_tmp, meta_path)
+            # metadata: tmp → fsync → replace (same lock)
+            meta_tmp.write_text(
+                json.dumps(rejection_meta, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            fd = os.open(meta_tmp, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(meta_tmp, meta_path)
+
+            # dir fsync — persist both renames
+            fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except BaseException:
+            for f in (tmp, meta_tmp):
+                try:
+                    os.remove(f)
+                except FileNotFoundError:
+                    pass
+            raise
 
     return target, meta_path
 
@@ -138,7 +151,6 @@ def recheck(
     validator: Any,
     asset_type: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> dict[str, Any]:
     """Re-validate a quarantined batch with a caller-supplied *validator*.
 
@@ -169,8 +181,6 @@ def cleanup_quarantine(
     deletes within this subtree while keeping policy-relative paths rooted at
     *data_root* (finding 1: scoping the deletion, not the returned list).
     """
-    from data.storage_ops import cleanup_expired
-
     q_root = Path(data_root) / QUARANTINE_ROOT
     if not q_root.exists():
         return []

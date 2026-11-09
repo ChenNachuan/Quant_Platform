@@ -628,7 +628,7 @@ class TestQuarantineSavePath:
             calls.append(len(frame))
             return {"passed": True, "reasons": []}
 
-        verdict = recheck(df, fake_validator, "stock", date(2025, 3, 14), tmp_path)
+        verdict = recheck(df, fake_validator, "stock", date(2025, 3, 14))
         assert verdict == {"passed": True, "reasons": []}
         assert calls == [2]
 

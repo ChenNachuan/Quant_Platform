@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock
+from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock, cleanup_expired
 from core.config import DATA_ROOT
 
 __all__ = ["save_raw", "load_raw", "raw_path", "cleanup_raw", "RAW_ROOT"]
@@ -118,8 +118,6 @@ def cleanup_raw(
     within this subtree while keeping policy-relative paths rooted at
     *data_root* (finding 1: scoping the deletion, not the returned list).
     """
-    from data.storage_ops import cleanup_expired
-
     raw_root = Path(data_root) / RAW_ROOT
     if not raw_root.exists():
         return []
