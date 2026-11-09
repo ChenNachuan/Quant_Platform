@@ -40,7 +40,7 @@ def is_stamp_tax_exempt_prefix(ticker: str) -> bool: ...
 | `get_asset_rules()` 未知类型 KeyError | 静默回落默认规则 | 不静默回落——错误配置必须立刻炸 |
 | 与 FeeModel._is_etf 同源一致 | 两处各自判断 | **`STAMP_TAX_EXEMPT_PREFIXES`**是唯一来源，FeeModel从此派生 |
 
-## 实现要点
+## 单源规则与校验
 
 详见core/asset_rules.py
 
