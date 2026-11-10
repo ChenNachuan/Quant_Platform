@@ -1,10 +1,9 @@
 # risk_control
 
-> 域：execution · 对应代码 execution/risk_control.py · 来源 §66.3（archive/OPEN_QUESTIONS.md）
-
+> 域：execution · 对应代码 [execution/risk_control.py](execution/risk_control.py)
 ## 职责与边界
 
-下单前风控（Themis 等价物的个人简化版）：逐规则检查订单列表，返回 PASS/BLOCK 两级结果。目标是防「策略失控 / 操作错误」，**不是防市场风险**（那是策略层的事）。只做 pre-trade，不做盘中 intra-trade 监控。被拦截必须可追溯（审计落盘）。
+下单前风控：逐规则检查订单列表，返回 PASS/BLOCK 两级结果。目标是防「策略失控 / 操作错误」，**不是防市场风险**。只做 pre-trade，不做盘中 intra-trade 监控。
 
 ## 接口签名
 
@@ -37,9 +36,9 @@ def log_risk_audit(check: RiskCheckResult) -> None:
 | 1 | 单标的仓位 | 成交后权重 ≤ 25% | BLOCK |
 | 2 | 总仓位 | ≤ 95%（留 5% 现金） | BLOCK |
 | 3 | 单日换手 | ≤ 150% | 告警（不拦——硬拦破坏信号） |
-| 4 | 单笔金额 | ≥ 5000 元 | SKIP（低于跳过该单） |
+| 4 | 单笔金额 | ≥ 5000 元 | SKIP（跳过该单） |
 | 5 | 禁做空 | 卖出 ≤ 持仓量 | BLOCK |
-| 6 | 禁 ST | 标的池已排除（research filter） | BLOCK |
+| 6 | 禁 ST | 标的池已排除 | BLOCK |
 | 7 | 流动性 | 单笔股数 > 1% 日成交量（股） | 告警（同拆单告警） |
 
 ## 关键决策
@@ -50,34 +49,17 @@ def log_risk_audit(check: RiskCheckResult) -> None:
 | 只 PASS/BLOCK 两级 | 公司 Themis 三态（放行/约束/拦截） | 「约束」态是多策略冲突仲裁需求 |
 | 换手/流动性超限告警不拦截 | 硬拦截 | 硬拦破坏信号 |
 | 单笔金额过小 SKIP 该单 | 拒整批 | 不是错误，是过滤 |
-| 阈值参数来自配置/ASSET_RULES | 散落硬编码 | §69.5 修订：涨跌停/做空规则参数源 = ASSET_RULES |
+| 阈值参数来自配置/ASSET_RULES | 散落硬编码 | 涨跌停/做空规则参数源 = ASSET_RULES |
 | 单标的仓位按**成交后权重**（现持仓+本单）| 只查本单 value/nav | 卖出/加仓场景单笔口径失真 |
 | 审计 risk_audit.jsonl append-only | 只打日志 | 拦截必须可追溯 |
 
 ## 实现要点
 
-```python
-def pre_trade_risk_check(orders, account, nav, config):
-    blocked, warnings = [], []
-    for o in orders:
-        px = o["limit_price"]
-        value = o["shares"] * px
-        held = account.holdings.get(o["ticker"], 0) * px         # V1 用 limit_price 估值现持仓
-        post_value = held + (value if o["side"] == "BUY" else -value)
-        if post_value / nav > config.get("max_single_weight", 0.25):
-            blocked.append(f"single_weight:{o['ticker']}")       # 成交后权重（现持仓+本单）
-        if o["side"] == "SELL" and o["shares"] > account.holdings.get(o["ticker"], 0):
-            blocked.append(f"short_forbidden:{o['ticker']}")     # 禁做空
-        if o["side"] == "BUY" and value < config.get("min_trade_value", 5000):
-            o["skip"] = True                                     # 金额过小跳过
-        if o["shares"] > 0.01 * get_daily_volume(o["ticker"]):
-            warnings.append(f"liquidity:{o['ticker']}")          # 流动性告警：股数比，量纲一致
-    return RiskCheckResult(not blocked, blocked, warnings)
-```
+详见 [execution/risk_control.py](execution/risk_control.py)
 
-## 实施时定稿项
-
-- 总仓位/单日换手两条规则的检查时机（逐单累加 vs 批级汇总）与换手率口径（§66.3 骨架未展开）
-- ~~`get_daily_volume` 数据来源（与 order_generation 的成交量来源同源，§66）~~ **已定稿** → `execution/market_data.py`（QUANT-27 Review 确认）：`get_daily_volume(bars, ticker, asof) -> float | None`。语义：当日成交**股数**（`bars_daily.volume`），停牌/NaN/负值返回 `None`（零成交量返回 `0.0`），重复 `(ticker, date)` 行 raise。
-- S7-T4 适配层结论：`account.holdings` 是 ledger positions 的派生视图（ticker → quantity），`SimAccount` 是适配层非第二本账（QUANT-28 seam 3）。
-- 涨跌停拒单的归属（源内张力照录）：§69.5 差异落层表把「涨跌停/禁做空」落 pre_trade_risk_check、§18.3 六道关② 涨跌停封板拒、§24.6/§24.7 pre_check（`strict_limit` 配置：回测默认拒/实盘可提交）都含涨跌停拒单；但 §66.3 风控七规则表未列该条（七条 = 单标的仓位/总仓位/单日换手/单笔金额/禁做空/禁 ST/流动性）。实施时定稿：七规则外另置涨跌停检查，还是并入 pre_check 序列（§66.3/§69.5/§18.3/§24）
+核心约定:
+- 逐规则检查,一BLOCK即标记该ticker;金额过小SKIP不拒整批
+- 单标的仓位用成交后权重:(现持仓市值+本单市值)/nav
+- 流动性检查用股数比:order_shares/daily_volume,数据从execution/market_data.py获取
+- 审计落盘到 logs/audit/risk_audit.jsonl(时间戳/规则/标的/动作/原因),append-only
+- broker 调用 check.is_blocked(ticker)按 ticker精确匹配,决定逐笔FILLED或REJECTED
