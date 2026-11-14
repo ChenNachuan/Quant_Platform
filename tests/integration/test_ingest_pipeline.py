@@ -1010,7 +1010,9 @@ class TestDqcReportTables:
         )
         assert len(out) == 3
         assert (out["quality_flag"] == 0).all()
-        assert (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+        assert (
+            tmp_path / "asset" / "cn_stock_bars_daily" / "2024-01-03.parquet"
+        ).exists()
 
         detail_file = (
             tmp_path / "dqc" / "_dqc_results" / "month=2024-01" / "data.parquet"
@@ -1176,7 +1178,9 @@ class TestDqcReportTables:
         assert (
             tmp_path / "raw" / "fake" / "bars_daily" / "2024-01-03.parquet"
         ).exists()
-        assert (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+        assert (
+            tmp_path / "asset" / "cn_stock_bars_daily" / "2024-01-03.parquet"
+        ).exists()
         assert report.load_summary(tmp_path).iloc[0]["batch_status"] == "accepted"
         detail = report.load_detail(tmp_path)
         assert set(detail["action_taken"]) == {"pass"}
@@ -1223,7 +1227,9 @@ class TestDqcReportTables:
         assert (detail["action_taken"] == "reject_batch").any()
         assert (detail["rule_version"] == engine.RULE_VERSION).all()
         # report only: no landing write, no summary rows, no quarantine
-        assert not (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+        assert not (
+            tmp_path / "asset" / "cn_stock_bars_daily" / "2024-01-03.parquet"
+        ).exists()
         assert report.load_summary(tmp_path).empty
         assert not (tmp_path / "quarantine").exists()
 

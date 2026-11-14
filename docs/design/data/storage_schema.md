@@ -6,7 +6,7 @@
 
 存储的**结构契约**：两层职责划分、11 张核心表 schema、通用列约定、字段精度、schema 演进规则。
 
-- **两层**：Parquet = 持久化唯一真相；DuckDB = 纯视图查询引擎（`read_parquet`，**无 .duckdb 文件**）。
+- **两层**：Parquet = 持久化唯一真相；DuckDB = 持久化 `catalog.duckdb` 视图与统计缓存引擎（基于 `read_parquet`，否决纯内存模式）。
 - **11 张核心表**：bars_daily / bars_minute / bars_daily_futures / tick_futures_l2 / fundamental / factor / calendar / contract_specs / industry / corporate_actions / continuous。
 - **精度与演进**：一开始选上限类型（DOUBLE/INT64），schema 只增列不改类型/列名。
 
@@ -16,7 +16,7 @@
 
 扁平一层,资产类型编码在文件夹名前缀:`{nation}_{asset_type}_{data_type}`
 ```text
-$DATA_ROOT/
+$QUANT_DATA_ROOT/
 ├──catalog.duckdb                              #DuckDB视图定义+统计缓存
 ├──asset/        
 │   ├──cn_stock_bars_daily/{date}.parquet
@@ -55,17 +55,17 @@ $DATA_ROOT/
 |---|---|---|
 | bars_daily | `asset/cn_stock_bars_daily/{date}.parquet` | 14 列：ticker/trade_date/OHLCV（float64 **未复权**）/volume（int64 股）/amount/adjfactor/turnover(Y)/suspend/is_limit_up/is_limit_down/quality_flag；PK(ticker, trade_date)；**不含** prev_close/pct_change/close_adj |
 | fundamental | `asset/cn_stock_fundamental/{date}.parquet` | total/float_market_cap，pe_ttm/pe_lyr/pb/ps_ttm（**可空**），total/float_shares |
-| calendar | `asset/cn_calendar/{exchange}.parquet` | 单列 trade_date；6 交易所文件（sse/szse/cffex/shfe/dce/czce） |
+| calendar | `asset/cn_calendar/{exchange}.parquet` | 单列 trade_date；9 交易所文件（sse/szse/bse/cffex/shfe/dce/czce/ine/gfex） |
 | industry | `asset/cn_reference/industry.parquet` | industry_l1/l2/l3(Y)/classification(citics/sw)/effective_date；初版只存最新 |
 | corporate_actions | `asset/cn_reference/corporate_actions.parquet` | 10 字段；PK(ticker, ex_date, event_type)；event_type 4 类：dividend/split/rights/bonus |
 | bars_minute | `asset/cn_stock_bars_minute/{date}.parquet` | 10 列**无 adjfactor**；PK(ticker, trade_date, datetime)；datetime = bar 结束时间 |
 |-|-|-|
-| factor | `factors/{name}/v{version}/{year}.parquet` | 3 列 ticker/date/{name}(Y)；版本目录+metadata.json |
+| factor | `factors/cn_stock_factors/{name}_v{version}/{year}.parquet` | 3 列 ticker/date/{name}(Y)；版本目录+metadata.json |
 |-|-|-|
-| bars_daily_futures | `asset/bars_daily_futures/{date}.parquet` | 同日线 + settle/open_interest；volume 单位手；无 adjfactor |
-| tick_futures_l2 | Phase 2 预留 | 27 列 = bid/ask 各 5 档 20 列 + 7 基础 |
-| contract_specs | `asset/reference/contract_specs.parquet` | 12 列：multiplier/tick/list_date/expire_date/delivery_month/price_limit_pct/margin_rate(Y)/trading_hours/is_active… |
-| continuous | `asset/continuous/{symbol}.parquet` | **不存 close_adj**（§47.13），+settle/open_interest；adjfactor = 换月累积 |
+| bars_daily_futures | `asset/cn_futures_bars_daily/{date}.parquet` | 同日线 + settle/open_interest；volume 单位手；无 adjfactor |
+| tick_futures_l2 | `asset/cn_futures_tick_l2/{date}.parquet` | Phase 2 预留：27 列 = bid/ask 各 5 档 20 列 + 7 基础 |
+| contract_specs | `asset/cn_reference/contract_specs.parquet` | 12 列：multiplier/tick/list_date/expire_date/delivery_month/price_limit_pct/margin_rate(Y)/trading_hours/is_active… |
+| continuous | `asset/cn_futures_continuous/{symbol}.parquet` | **不存 close_adj**（§47.13），+settle/open_interest；adjfactor = 换月累积 |
 
 ## 通用约定
 
@@ -102,4 +102,4 @@ $DATA_ROOT/
 - PARTITION_PATHS字典定义每张表的落盘路径模板
 - schema验证在写入前(ingest_with_dqc step7)和读回后双重校验
 - 写入配置与原子写→storage_ops.PARQUET_WRITE_CONFIG/ write_parquet_atomic
-- catalog.duckdb存放于$DATA_ROOT/下,跟数据走不跟项目走
+- catalog.duckdb存放于$QUANT_DATA_ROOT/下,跟数据走不跟项目走

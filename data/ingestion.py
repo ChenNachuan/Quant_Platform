@@ -76,7 +76,19 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+_REPO_CONFIG_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "source_priority.yaml"
+)
 SOURCE_PRIORITY_PATH = DATA_ROOT / "config" / "source_priority.yaml"
+
+
+def _resolve_source_priority_path(path: str | os.PathLike[str] | None = None) -> Path:
+    if path:
+        return Path(path)
+    if SOURCE_PRIORITY_PATH.is_file():
+        return SOURCE_PRIORITY_PATH
+    return _REPO_CONFIG_PATH
+
 
 # ---------------------------------------------------------------------------
 # Field classification (§41 open item: NUMERIC_FIELDS was referenced from
@@ -158,7 +170,8 @@ def load_source_priority(
     sub-table for ``reference``), and every ``field_override`` source appears
     in the same entry's ``priority`` list.  Raises ``ValueError`` otherwise.
     """
-    cfg = yaml.safe_load(Path(path or SOURCE_PRIORITY_PATH).read_text(encoding="utf-8"))
+    resolved = _resolve_source_priority_path(path)
+    cfg = yaml.safe_load(resolved.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError(f"{SOURCE_PRIORITY_PATH}: top level must be a mapping")
     for asset_type, entry in cfg.items():

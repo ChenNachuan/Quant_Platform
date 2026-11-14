@@ -7,7 +7,7 @@
 >源 `/Users/nachuan/Documents/Data_raw/QDCData` 只读；`data/storage_schema.py` 是 schema 权威，本契约**不修改它**。
 契约表示不了真实数据时：拒收计数 + 登记 §8 缺口 + 上报，**不静默改口径**。
 
-- 落盘根（下称 `L`）：`/Users/nachuan/Documents/Data_asset`
+- 落盘根（下称 `L`）：环境变量 `$QUANT_DATA_ROOT`（默认 `/Users/nachuan/Documents/Quant_Data`）
 - 源（下称 `QDC`）：154GB、1401 分卷、45 数据集；batch-1 覆盖其中 35 个子表（日/频段，不含分钟与快照行情）
 - 契约版本：`qdc-m1-v1`（manifest 逐表记录该字符串）
 
@@ -35,11 +35,11 @@
 
 | 平台表 | 落盘路径（相对 `L`） | batch-1 写者 | 源 |
 |---|---|---|---|
-| bars_daily | `asset/bars_daily/{date}.parquet` | M2（价量）+ M3（adjfactor 更新） | cn_daily_full、cn_etf_1d、cn_adj_factor |
-| fundamental | `asset/fundamental/{date}.parquet` | M5（股票域）+ M2（基金域） | cn_valuation_1d、imai_etf、cn_etf_1d（close 派生） |
-| calendar | `asset/calendar/{exchange}.parquet` | M4（**只写 manifest，不落行**） | ——（§5 I-2） |
-| industry | `asset/reference/industry.parquet` | M4 | cn_sw_index/index_member_history |
-| corporate_actions | `asset/reference/corporate_actions.parquet` | M3 | cn_dividend |
+| bars_daily | `asset/cn_stock_bars_daily/{date}.parquet` | M2（价量）+ M3（adjfactor 更新） | cn_daily_full、cn_etf_1d、cn_adj_factor |
+| fundamental | `asset/cn_stock_fundamental/{date}.parquet` | M5（股票域）+ M2（基金域） | cn_valuation_1d、imai_etf、cn_etf_1d（close 派生） |
+| calendar | `asset/cn_calendar/{exchange}.parquet` | M4（**只写 manifest，不落行**） | ——（§5 I-2） |
+| industry | `asset/cn_reference/industry.parquet` | M4 | cn_sw_index/index_member_history |
+| corporate_actions | `asset/cn_reference/corporate_actions.parquet` | M3 | cn_dividend |
 | bars_minute / bars_daily_futures / tick_futures_l2 / factor / contract_specs / continuous | 同 `PARTITION_PATHS` | 非 batch-1 | —— |
 
 `{date}` 为交易日 `YYYY-MM-DD`；一文件一交易日（bars_daily / fundamental）。

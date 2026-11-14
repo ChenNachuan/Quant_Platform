@@ -80,7 +80,11 @@ class TradingCalendar:
         rel = PARTITION_PATHS["calendar"].format(exchange=exchange)
         path = Path(data_root) / rel
         if not path.exists():
-            raise FileNotFoundError(f"calendar file not found: {path}")
+            legacy = Path(data_root) / "asset" / "calendar" / f"{exchange}.parquet"
+            if legacy.exists():
+                path = legacy
+            else:
+                raise FileNotFoundError(f"calendar file not found: {path}")
         trade_date = pd.read_parquet(path)["trade_date"]
         self._days: list[date] = sorted(
             set(pd.to_datetime(trade_date).dt.date.tolist())

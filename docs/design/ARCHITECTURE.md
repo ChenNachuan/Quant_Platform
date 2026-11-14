@@ -87,7 +87,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 | 维度 | 选型 | 否决项 | 详情 |
 |---|---|---|---|
 | 回测引擎 | pandas自研 SimBroker/QmtBroker | backtrader/vnpy（事件驱动不需要）；VectorBT 留 V2 备选 | [execution/broker.md](execution/broker.md) |
-| 存储 | Parquet + DuckDB | ClickHouse（单机 <10GB，独立部署违反零外部依赖） | [data/storage_schema.md](data/storage_schema.md) |
+| 存储 | Parquet + DuckDB 持久化 catalog.duckdb | ClickHouse、DuckDB 纯内存模式 | [data/storage_schema.md](data/storage_schema.md) |
 | 数据接入 | SourceAdapter 四方法 + watermark | - | [data/source_adapter.md](data/source_adapter.md) |
 | 因子评价 | alphalens-reloaded 0.4.6 | alphalens 原版（不维护） | [research/factor_evaluation.md](research/factor_evaluation.md) |
 | 配置 | TOML 三层 + .env + git | YAML（on→True 陷阱）；配置中心（单机不需要） | [core/config.md](core/config.md) |

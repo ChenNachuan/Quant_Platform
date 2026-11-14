@@ -177,19 +177,31 @@ def asset_root(tmp_path: Path) -> Path:
 
     d1, d2, d3 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
 
-    _write_daily(root, d1, [
-        _bars_daily_row("600519.SH", d1, close=10.0, adjfactor=1.0),
-        _bars_daily_row("000001.SZ", d1, close=20.0, adjfactor=1.0),
-    ])
-    _write_daily(root, d2, [
-        _bars_daily_row("600519.SH", d2, close=11.0, adjfactor=1.0),
-        _bars_daily_row("000001.SZ", d2, close=21.0, adjfactor=1.0),
-    ])
-    _write_daily(root, d3, [
-        # 2:1 split → adjfactor jumps to 2.0
-        _bars_daily_row("600519.SH", d3, close=5.5, adjfactor=2.0),
-        _bars_daily_row("000001.SZ", d3, close=22.0, adjfactor=1.0),
-    ])
+    _write_daily(
+        root,
+        d1,
+        [
+            _bars_daily_row("600519.SH", d1, close=10.0, adjfactor=1.0),
+            _bars_daily_row("000001.SZ", d1, close=20.0, adjfactor=1.0),
+        ],
+    )
+    _write_daily(
+        root,
+        d2,
+        [
+            _bars_daily_row("600519.SH", d2, close=11.0, adjfactor=1.0),
+            _bars_daily_row("000001.SZ", d2, close=21.0, adjfactor=1.0),
+        ],
+    )
+    _write_daily(
+        root,
+        d3,
+        [
+            # 2:1 split → adjfactor jumps to 2.0
+            _bars_daily_row("600519.SH", d3, close=5.5, adjfactor=2.0),
+            _bars_daily_row("000001.SZ", d3, close=22.0, adjfactor=1.0),
+        ],
+    )
     return root
 
 
@@ -200,16 +212,24 @@ def minute_root(tmp_path: Path) -> Path:
     (root / "bars_minute").mkdir(parents=True)
     d = date(2024, 1, 2)
     rows = []
-    for i, (h, m, c) in enumerate([
-        (9, 31, 10.0), (9, 32, 10.2), (9, 33, 10.1), (9, 34, 10.3),
-    ]):
-        rows.append(_bars_minute_row(
-            "600519.SH", d,
-            dt=datetime(2024, 1, 2, h, m),
-            close=c,
-            volume=100 + i,
-            amount=(100 + i) * c,
-        ))
+    for i, (h, m, c) in enumerate(
+        [
+            (9, 31, 10.0),
+            (9, 32, 10.2),
+            (9, 33, 10.1),
+            (9, 34, 10.3),
+        ]
+    ):
+        rows.append(
+            _bars_minute_row(
+                "600519.SH",
+                d,
+                dt=datetime(2024, 1, 2, h, m),
+                close=c,
+                volume=100 + i,
+                amount=(100 + i) * c,
+            )
+        )
     _write_minute(root, d, rows)
     return root
 
@@ -245,14 +265,26 @@ class TestDataAPI:
         assert len(df) == 6  # 2 tickers × 3 days
         assert "close" in df.columns
 
+    def test_persistent_catalog_duckdb_created_and_dual_alias(self, asset_root):
+        with DataAPI(asset_root) as api:
+            assert api.catalog_path.is_file()
+            assert api.catalog_path.name == "catalog.duckdb"
+            df = api.query(
+                "SELECT * FROM cn_stock_bars_daily ORDER BY trade_date, ticker"
+            )
+            assert len(df) == 6
+
     def test_query_returns_dataframe(self, asset_root):
         with DataAPI(asset_root) as api:
-            df = api.query("SELECT ticker, close FROM bars_daily WHERE trade_date = '2024-01-02'")
+            df = api.query(
+                "SELECT ticker, close FROM bars_daily WHERE trade_date = '2024-01-02'"
+            )
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 2
 
     def test_query_arrow_returns_arrow_table(self, asset_root):
         import pyarrow as pa
+
         with DataAPI(asset_root) as api:
             table = api.query_arrow("SELECT * FROM bars_daily")
         assert isinstance(table, pa.Table)
@@ -302,6 +334,7 @@ class TestDataAPI:
 
         class _SpyConn:
             """Proxy that records SQL per connection generation."""
+
             def __init__(self, real, gen, log):
                 self._real = real
                 self._gen = gen
@@ -334,7 +367,9 @@ class TestDataAPI:
         assert df["n"].iloc[0] == 6
 
         # gen 1 = original (dead), gen 2 = reconnected
-        assert gen_counter[0] == 2, f"expected 2 connection generations, got {gen_counter[0]}"
+        assert gen_counter[0] == 2, (
+            f"expected 2 connection generations, got {gen_counter[0]}"
+        )
         new_gen_stmts = stmts_per_gen.get(2, [])
         assert any("enable_profiling" in s for s in new_gen_stmts), (
             f"enable_profiling not re-issued on reconnected connection; "
@@ -349,7 +384,17 @@ class TestDataAPI:
 class TestLoadBarsColumns:
     def test_default_columns_exact(self, asset_root):
         df = load_bars(start="2024-01-02", end="2024-01-04", data_root=asset_root)
-        expected = ["date", "ticker", "open", "high", "low", "close", "volume", "amount", "adjfactor"]
+        expected = [
+            "date",
+            "ticker",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "adjfactor",
+        ]
         assert list(df.columns) == expected
 
     def test_sorted_by_date_ticker(self, asset_root):
@@ -359,16 +404,29 @@ class TestLoadBarsColumns:
 
     def test_no_adjfactor_for_minute(self, minute_root):
         df = load_bars(
-            start="2024-01-02", end="2024-01-02",
-            freq="minute", data_root=minute_root,
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="minute",
+            data_root=minute_root,
         )
-        expected = ["date", "ticker", "open", "high", "low", "close", "volume", "amount"]
+        expected = [
+            "date",
+            "ticker",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+        ]
         assert list(df.columns) == expected
 
     def test_fields_subset(self, asset_root):
         df = load_bars(
-            start="2024-01-02", end="2024-01-04",
-            fields=["close"], data_root=asset_root,
+            start="2024-01-02",
+            end="2024-01-04",
+            fields=["close"],
+            data_root=asset_root,
         )
         assert "close" in df.columns
         assert "open" not in df.columns
@@ -376,7 +434,8 @@ class TestLoadBarsColumns:
     def test_symbol_filter(self, asset_root):
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
+            start="2024-01-02",
+            end="2024-01-04",
             data_root=asset_root,
         )
         assert set(df["ticker"]) == {"600519.SH"}
@@ -385,7 +444,8 @@ class TestLoadBarsColumns:
     def test_symbol_list_filter(self, asset_root):
         df = load_bars(
             symbol=["600519.SH", "000001.SZ"],
-            start="2024-01-02", end="2024-01-04",
+            start="2024-01-02",
+            end="2024-01-04",
             data_root=asset_root,
         )
         assert set(df["ticker"]) == {"600519.SH", "000001.SZ"}
@@ -416,8 +476,10 @@ class TestAdjustment:
         """
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
-            adjust="forward", data_root=asset_root,
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="forward",
+            data_root=asset_root,
         )
         expected_closes = [5.0, 5.5, 5.5]
         for i, expected in enumerate(expected_closes):
@@ -428,8 +490,10 @@ class TestAdjustment:
     def test_forward_all_price_cols_adjusted(self, asset_root):
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
-            adjust="forward", data_root=asset_root,
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="forward",
+            data_root=asset_root,
         )
         # day1: open=10.0, high=11.0, low=9.0 → all × 1.0/2.0
         assert abs(df["open"].iloc[0] - 5.0) < 1e-6
@@ -445,8 +509,10 @@ class TestAdjustment:
         """
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
-            adjust="backward", data_root=asset_root,
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="backward",
+            data_root=asset_root,
         )
         assert abs(df["close"].iloc[0] - 10.0) < 1e-6
         assert abs(df["close"].iloc[2] - 11.0) < 1e-6
@@ -460,8 +526,10 @@ class TestAdjustment:
         """
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-03",
-            adjust="forward", data_root=asset_root,
+            start="2024-01-02",
+            end="2024-01-03",
+            adjust="forward",
+            data_root=asset_root,
         )
         # Full-history adj_latest = 2.0 (from day3), so:
         # day1: 10.0 × 1.0 / 2.0 = 5.0  (NOT 10.0 — window-limited would give 10.0)
@@ -470,8 +538,10 @@ class TestAdjustment:
     def test_no_adjustment_leaves_prices_raw(self, asset_root):
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
-            adjust="none", data_root=asset_root,
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="none",
+            data_root=asset_root,
         )
         assert abs(df["close"].iloc[0] - 10.0) < 1e-6
         assert abs(df["close"].iloc[2] - 5.5) < 1e-6
@@ -479,8 +549,11 @@ class TestAdjustment:
     def test_adjust_without_adjfactor_raises(self, minute_root):
         with pytest.raises(ValueError, match="adjfactor"):
             load_bars(
-                start="2024-01-02", end="2024-01-02",
-                freq="minute", adjust="forward", data_root=minute_root,
+                start="2024-01-02",
+                end="2024-01-02",
+                freq="minute",
+                adjust="forward",
+                data_root=minute_root,
             )
 
     def test_fields_with_forward_adjustment(self, asset_root):
@@ -492,8 +565,10 @@ class TestAdjustment:
         """
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
-            fields=["close"], adjust="forward",
+            start="2024-01-02",
+            end="2024-01-04",
+            fields=["close"],
+            adjust="forward",
             data_root=asset_root,
         )
         assert "close" in df.columns
@@ -508,8 +583,10 @@ class TestAdjustment:
         """fields including adjfactor + adjust: adjfactor stays in output."""
         df = load_bars(
             symbol="600519.SH",
-            start="2024-01-02", end="2024-01-04",
-            fields=["close", "adjfactor"], adjust="forward",
+            start="2024-01-02",
+            end="2024-01-04",
+            fields=["close", "adjfactor"],
+            adjust="forward",
             data_root=asset_root,
         )
         assert "close" in df.columns
@@ -533,16 +610,20 @@ class TestAssetTypeMapping:
 
     def test_futures_load(self, futures_root):
         df = load_bars(
-            start="2024-01-02", end="2024-01-02",
-            asset_type="futures", data_root=futures_root,
+            start="2024-01-02",
+            end="2024-01-02",
+            asset_type="futures",
+            data_root=futures_root,
         )
         assert len(df) == 1
         assert df["ticker"].iloc[0] == "IF2406.CFFEX"
 
     def test_continuous_load(self, continuous_root):
         df = load_bars(
-            start="2024-01-02", end="2024-01-03",
-            asset_type="continuous", data_root=continuous_root,
+            start="2024-01-02",
+            end="2024-01-03",
+            asset_type="continuous",
+            data_root=continuous_root,
         )
         assert len(df) == 2
         # dominant_contract is mapped to ticker
@@ -565,8 +646,10 @@ class TestAggregation:
     def test_5min_aggregation(self, minute_root):
         """4 minute bars at 09:31–09:34 → one 5min bucket at 09:30."""
         df = load_bars(
-            start="2024-01-02", end="2024-01-02",
-            freq="5min", data_root=minute_root,
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="5min",
+            data_root=minute_root,
         )
         assert len(df) == 1
         row = df.iloc[0]
@@ -583,8 +666,10 @@ class TestAggregation:
 
     def test_60min_aggregation(self, minute_root):
         df = load_bars(
-            start="2024-01-02", end="2024-01-02",
-            freq="60min", data_root=minute_root,
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="60min",
+            data_root=minute_root,
         )
         assert len(df) == 1
         # Same 4 bars all fall in the 09:00 bucket
@@ -592,20 +677,26 @@ class TestAggregation:
 
     def test_minute_returns_datetime_as_date(self, minute_root):
         df = load_bars(
-            start="2024-01-02", end="2024-01-02",
-            freq="minute", data_root=minute_root,
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="minute",
+            data_root=minute_root,
         )
         assert len(df) == 4
         # date column carries the bar timestamp
         first = df.iloc[0]["date"]
-        assert first == datetime(2024, 1, 2, 9, 31) or first == pd.Timestamp("2024-01-02 09:31:00")
+        assert first == datetime(2024, 1, 2, 9, 31) or first == pd.Timestamp(
+            "2024-01-02 09:31:00"
+        )
 
     def test_aggregated_rejects_unsupported_field(self, minute_root):
         """Unsupported field in 5min/60min must fail loudly, not be silently dropped."""
         with pytest.raises(ValueError, match="not available"):
             load_bars(
-                start="2024-01-02", end="2024-01-02",
-                freq="5min", fields=["close", "settle"],
+                start="2024-01-02",
+                end="2024-01-02",
+                freq="5min",
+                fields=["close", "settle"],
                 data_root=minute_root,
             )
 
@@ -616,7 +707,8 @@ class TestAggregation:
 class TestAlphalensAdapters:
     def test_to_alphalens_prices_shape(self, asset_root):
         result = to_alphalens_prices(
-            start="2024-01-02", end="2024-01-04",
+            start="2024-01-02",
+            end="2024-01-04",
             symbols=["600519.SH", "000001.SZ"],
             data_root=asset_root,
         )
@@ -627,7 +719,8 @@ class TestAlphalensAdapters:
 
     def test_to_alphalens_prices_is_forward_adjusted(self, asset_root):
         result = to_alphalens_prices(
-            start="2024-01-02", end="2024-01-04",
+            start="2024-01-02",
+            end="2024-01-04",
             symbols=["600519.SH"],
             data_root=asset_root,
         )
@@ -636,11 +729,13 @@ class TestAlphalensAdapters:
         assert abs(val - 5.0) < 1e-6
 
     def test_to_alphalens_factor_multiindex(self):
-        factor_df = pd.DataFrame({
-            "date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3)],
-            "ticker": ["600519.SH", "000001.SZ", "600519.SH"],
-            "momentum": [0.05, 0.03, 0.07],
-        })
+        factor_df = pd.DataFrame(
+            {
+                "date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3)],
+                "ticker": ["600519.SH", "000001.SZ", "600519.SH"],
+                "momentum": [0.05, 0.03, 0.07],
+            }
+        )
         result = to_alphalens_factor(factor_df)
         assert isinstance(result, pd.Series)
         assert result.index.names == ["date", "ticker"]
@@ -652,20 +747,24 @@ class TestAlphalensAdapters:
 
     def test_to_alphalens_factor_rejects_multiple_value_columns(self):
         """Multiple value columns must raise, not silently pick the first."""
-        df = pd.DataFrame({
-            "date": [date(2024, 1, 2)],
-            "ticker": ["600519.SH"],
-            "momentum": [0.05],
-            "reversal": [0.02],
-        })
+        df = pd.DataFrame(
+            {
+                "date": [date(2024, 1, 2)],
+                "ticker": ["600519.SH"],
+                "momentum": [0.05],
+                "reversal": [0.02],
+            }
+        )
         with pytest.raises(ValueError, match="exactly one value column"):
             to_alphalens_factor(df)
 
     def test_to_alphalens_factor_rejects_zero_value_columns(self):
-        df = pd.DataFrame({
-            "date": [date(2024, 1, 2)],
-            "ticker": ["600519.SH"],
-        })
+        df = pd.DataFrame(
+            {
+                "date": [date(2024, 1, 2)],
+                "ticker": ["600519.SH"],
+            }
+        )
         with pytest.raises(ValueError, match="exactly one value column"):
             to_alphalens_factor(df)
 
@@ -675,10 +774,13 @@ class TestAlphalensAdapters:
 # ---------------------------------------------------------------------------
 class TestLoadBarsChunked:
     def test_monthly_chunks(self, asset_root):
-        chunks = list(load_bars_chunked(
-            start="2024-01-02", end="2024-01-04",
-            data_root=asset_root,
-        ))
+        chunks = list(
+            load_bars_chunked(
+                start="2024-01-02",
+                end="2024-01-04",
+                data_root=asset_root,
+            )
+        )
         assert len(chunks) == 1  # all in one month
         assert len(chunks[0]) == 6
 
@@ -687,13 +789,20 @@ class TestLoadBarsChunked:
         (root / "bars_daily").mkdir(parents=True)
         # Write one day per month for 2 months
         for d in [date(2024, 1, 15), date(2024, 2, 15)]:
-            _write_daily(root, d, [
-                _bars_daily_row("600519.SH", d, adjfactor=1.0),
-            ])
-        chunks = list(load_bars_chunked(
-            start="2024-01-01", end="2024-02-28",
-            data_root=root,
-        ))
+            _write_daily(
+                root,
+                d,
+                [
+                    _bars_daily_row("600519.SH", d, adjfactor=1.0),
+                ],
+            )
+        chunks = list(
+            load_bars_chunked(
+                start="2024-01-01",
+                end="2024-02-28",
+                data_root=root,
+            )
+        )
         assert len(chunks) == 2
         assert all(len(c) == 1 for c in chunks)
 
@@ -701,13 +810,20 @@ class TestLoadBarsChunked:
         root = tmp_path / "asset"
         (root / "bars_daily").mkdir(parents=True)
         # Only write in January
-        _write_daily(root, date(2024, 1, 15), [
-            _bars_daily_row("600519.SH", date(2024, 1, 15)),
-        ])
-        chunks = list(load_bars_chunked(
-            start="2024-01-01", end="2024-03-31",
-            data_root=root,
-        ))
+        _write_daily(
+            root,
+            date(2024, 1, 15),
+            [
+                _bars_daily_row("600519.SH", date(2024, 1, 15)),
+            ],
+        )
+        chunks = list(
+            load_bars_chunked(
+                start="2024-01-01",
+                end="2024-03-31",
+                data_root=root,
+            )
+        )
         assert len(chunks) == 1  # only January has data
 
 
@@ -733,7 +849,8 @@ class TestPerformance:
         t0 = time.perf_counter()
         df = load_bars(
             symbol=etfs,
-            start="2024-01-02", end="2024-01-21",
+            start="2024-01-02",
+            end="2024-01-21",
             data_root=root,
         )
         elapsed = time.perf_counter() - t0

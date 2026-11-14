@@ -3,6 +3,7 @@
 # =============================================
 .zvt/
 data_lake/
+data_platform/
 # write_parquet_atomic 的锁文件是常驻 inode（storage_ops.FileLock 故意不 unlink），
 # 不是残留；*.parquet 已忽略，但 *.parquet.lock 会被 `git add .` 扫进来。
 *.parquet.lock
@@ -11,6 +12,8 @@ task/
 .multica/
 期货level2五档数据/
 *.db
+*.duckdb
+*.duckdb.wal
 *.parquet
 *.csv
 *.h5
@@ -51,6 +54,7 @@ dist/
 build/
 *.egg
 .pytest_cache/
+.hypothesis/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -116,8 +120,8 @@ sslkeys.log
 *.bak
 
 # =============================================
-# Docker 敏感文件
+# 辅助工具与测试报告
 # =============================================
-# Test Reports
 results/*.html
 .claude
+skills/

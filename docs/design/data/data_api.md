@@ -16,7 +16,7 @@
 
 ```python
 class DataAPI:
-    def __init__(self, data_root="data_platform/asset", threads=None,
+    def __init__(self, data_root=None, catalog_path=None, threads=None,
                  memory_limit=None, statement_timeout=60.0): ...
     def query(self, sql: str, profile: bool = False) -> pd.DataFrame
     def query_arrow(self, sql: str) -> pa.Table
@@ -43,7 +43,7 @@ def to_alphalens_factor(factor_df) -> pd.Series                     # MultiIndex
 | 决策 | 否决项 | 一句话理由 |
 |---|---|---|
 | SQL-only DataAPI | DataFrame API/对象 API | read_parquet 一样快；SQL 最通用 |
-| `duckdb.connect()` 持久化链接 | 内存模式 | 视图和统计缓存免重建 |
+| `duckdb.connect(catalog.duckdb)` 持久化链接 | 纯内存模式 | 视图和统计缓存免重建 |
 | `register_views` + `read_parquet` glob | sqlglot 预过滤 | DuckDB 原生优化已含 |
 | `union_by_name=true`、`hive_partitioning=false` | 默认 | schema 演进按列名对齐；扁平文件显式关 Hive |
 | 不做应用层缓存 | DataPool 懒加载 | OS page cache 零代码；缓存失效是坑 |
@@ -57,7 +57,7 @@ def to_alphalens_factor(factor_df) -> pd.Series                     # MultiIndex
 详见[data/data_api.py](data/data_api.py)
 
 核心约定:
-- catalog.duckdb存放于$DATA_ROOT/,视图持久化免重建
+- catalog.duckdb 存放于 $QUANT_DATA_ROOT/，持久化存储视图与统计缓存
 - register_views为每个asset子目录创建 CREATE OR REPLACE VIEW... AS read_parquet(glob)
 - Load_bars 返回列:date/ticker/OHLCV/amount/[adjfacttor],按(date,ticker)排序
 -复权基准必须用全历史arg_max(adjfactor, trade_date)/arg_min(...),不能用窗口内 transform--截断窗口会导致复权尺度错误

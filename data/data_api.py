@@ -22,6 +22,7 @@ import duckdb
 import pandas as pd
 import pyarrow as pa
 from core.config import DATA_ROOT
+from data.storage_schema import TABLE_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,16 @@ logger = logging.getLogger(__name__)
 # use core.types.EQUITY_TYPES when per-asset rules are needed downstream.
 TABLE_MAP: dict[tuple[str, str], str] = {
     ("equity", "daily"): "bars_daily",
+    ("stock", "daily"): "bars_daily",
+    ("etf", "daily"): "cn_etf_bars_daily",
     ("equity", "minute"): "bars_minute",
+    ("stock", "minute"): "bars_minute",
     ("futures", "daily"): "bars_daily_futures",
     ("continuous", "daily"): "continuous",
+    ("cn_stock", "daily"): "cn_stock_bars_daily",
+    ("cn_equity", "daily"): "cn_stock_bars_daily",
+    ("cn_futures", "daily"): "cn_futures_bars_daily",
+    ("cn_continuous", "daily"): "cn_futures_continuous",
 }
 
 # freq → base freq for table lookup (5min/60min aggregate from minute bars)
@@ -94,23 +102,27 @@ def _resolve_table(asset_type: str, freq: str) -> str:
     """Return the storage table for (*asset_type*, *freq*)."""
     base = _base_freq(freq)
     key = (asset_type, base)
-    try:
+    if key in TABLE_MAP:
         return TABLE_MAP[key]
-    except KeyError:
-        valid = sorted(TABLE_MAP)
-        raise ValueError(
-            f"no table for asset_type={asset_type!r} freq={freq!r}; "
-            f"valid (asset_type, base_freq) pairs: {valid}"
-        ) from None
+    for (k_asset, k_freq), v in TABLE_MAP.items():
+        if k_freq == base:
+            legacy_or_alias = TABLE_ALIASES.get(v, "")
+            if asset_type in (v, legacy_or_alias):
+                return v
+    valid = sorted(TABLE_MAP)
+    raise ValueError(
+        f"no table for asset_type={asset_type!r} freq={freq!r}; "
+        f"valid (asset_type, base_freq) pairs: {valid}"
+    ) from None
 
 
 # ---------------------------------------------------------------------------
-# DataAPI — in-memory DuckDB, SQL-only (~80 lines by design)
+# DataAPI — persistent DuckDB (catalog.duckdb), SQL-only
 # ---------------------------------------------------------------------------
 class DataAPI:
     """SQL-only query layer over Parquet files via DuckDB ``read_parquet``.
 
-    In-memory connection (no ``.duckdb`` file).  One instance per process;
+    Persistent catalog connection (catalog.duckdb).  One instance per process;
     DuckDB connections are not process-safe.  Threads within one process may
     share an instance — DuckDB is thread-safe and uses all available CPUs.
     Connection *lifecycle* is not free-threaded though: ``reconnect`` replaces
@@ -121,16 +133,38 @@ class DataAPI:
         self,
         data_root: str | Path = _DEFAULT_DATA_ROOT,
         *,
+        catalog_path: str | Path | None = None,
         statement_timeout: float = 60.0,
+        read_only: bool = False,
     ) -> None:
         self._root = Path(data_root)
         self._statement_timeout = statement_timeout
+        self._read_only = read_only
+
+        if catalog_path is not None:
+            self._catalog_path = Path(catalog_path)
+        elif self._root.name == "asset":
+            self._catalog_path = self._root.parent / "catalog.duckdb"
+        elif self._root.parent.name == "asset":
+            self._catalog_path = self._root.parent.parent / "catalog.duckdb"
+        else:
+            self._catalog_path = self._root / "catalog.duckdb"
+
+        self._catalog_path.parent.mkdir(parents=True, exist_ok=True)
         # RLock, not Lock: the retry path in `_run` holds the lock and then
         # calls `reconnect()`, which takes it again.
         self._conn_lock = threading.RLock()
-        self._conn: duckdb.DuckDBPyConnection = duckdb.connect()
+        self._conn: duckdb.DuckDBPyConnection = duckdb.connect(
+            database=str(self._catalog_path),
+            read_only=self._read_only,
+        )
         self._apply_timeout()
         self._views_registered = False
+
+    @property
+    def catalog_path(self) -> Path:
+        """Return the Path to the underlying catalog.duckdb file."""
+        return self._catalog_path
 
     def _apply_timeout(self) -> None:
         """Apply statement timeout if supported by the DuckDB build."""
@@ -179,11 +213,18 @@ class DataAPI:
             # `bars-daily` / `my data` would otherwise be a syntax error, and
             # because `__enter__` calls this, one odd directory under the root
             # breaks every `load_bars()` on it.
+            view_name = _validate_identifier(entry.name)
             self._conn.execute(
-                f"CREATE OR REPLACE VIEW {_validate_identifier(entry.name)} AS "
+                f"CREATE OR REPLACE VIEW {view_name} AS "
                 f"SELECT * FROM read_parquet({_sql_literal(str(glob))}, "
                 f"union_by_name=true, hive_partitioning=false)"
             )
+            alias = TABLE_ALIASES.get(entry.name)
+            if alias:
+                alias_name = _validate_identifier(alias)
+                self._conn.execute(
+                    f"CREATE OR REPLACE VIEW {alias_name} AS SELECT * FROM {view_name}"
+                )
         self._views_registered = True
 
     # -- query ---------------------------------------------------------------
@@ -265,7 +306,10 @@ class DataAPI:
                 self._conn.close()
             except Exception:
                 logger.debug("error closing stale DuckDB connection", exc_info=True)
-            self._conn = duckdb.connect()
+            self._conn = duckdb.connect(
+                database=str(self._catalog_path),
+                read_only=self._read_only,
+            )
             self._apply_timeout()
             if self._views_registered:
                 self.register_views()
@@ -333,7 +377,13 @@ def _build_daily_sql(
     fields: list[str] | None,
 ) -> str:
     """Build the SELECT for a non-aggregated table (daily or raw minute)."""
-    has_adj = table in ("bars_daily", "continuous")
+    has_adj = table in (
+        "bars_daily",
+        "continuous",
+        "cn_stock_bars_daily",
+        "cn_etf_bars_daily",
+        "cn_futures_continuous",
+    )
     ticker_col = "dominant_contract" if table == "continuous" else "ticker"
     # bars_minute uses datetime as the bar timestamp; all other tables use trade_date
     date_col = "datetime" if table == "bars_minute" else "trade_date"
@@ -494,7 +544,13 @@ def load_bars(
     asset_type : **table family** — ``equity`` / ``futures`` / ``continuous``.
     """
     table = _resolve_table(asset_type, freq)
-    has_adj = table in ("bars_daily", "continuous")
+    has_adj = table in (
+        "bars_daily",
+        "continuous",
+        "cn_stock_bars_daily",
+        "cn_etf_bars_daily",
+        "cn_futures_continuous",
+    )
     is_agg = freq in _AGG_INTERVAL
 
     # Validate the literal here, before any query. Leaving it to

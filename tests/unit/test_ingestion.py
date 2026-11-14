@@ -279,7 +279,7 @@ class TestFallbackSourceTag:
         df = _bars_frame(n=5)
         tag = backfill_source_tag("akshare")
         path = write_asset(df, "bars_daily", TRADE_DATE, tag, data_root=tmp_path)
-        assert path == tmp_path / "asset" / "bars_daily" / "2024-06-14.parquet"
+        assert path == tmp_path / "asset" / "cn_stock_bars_daily" / "2024-06-14.parquet"
         assert path.exists()
 
         written = pd.read_parquet(path)

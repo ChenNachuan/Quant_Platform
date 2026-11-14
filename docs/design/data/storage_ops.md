@@ -22,10 +22,10 @@ class FileLock:                      # flock LOCK_EX | LOCK_NB，拿不到抛 Co
 
 def cleanup_stale_tmp(root, max_age_hours=1): ...     # 清 >1h 的 .tmp
 def cleanup_stale_locks(root, max_age_hours=1): ...   # flock 随进程退出自动释放，仅整洁
-def cleanup_expired(root="data_platform", dry_run=True): ...  # lifecycle.yaml 滚动清理
-def check_capacity(data_root="data_platform") -> str: ...     # OK | WARNING | CRITICAL
+def cleanup_expired(data_root=DATA_ROOT, dry_run=True): ...  # lifecycle.yaml 滚动清理
+def check_capacity(data_root=DATA_ROOT) -> str: ...     # OK | WARNING | CRITICAL
 
-# scripts/backup.sh —— rsync 全量 data_platform → 外置盘，每月手动
+# scripts/backup.sh —— rsync 全量 $QUANT_DATA_ROOT → 外置盘，每月手动
 ```
 
 **保留策略**（`lifecycle.yaml`）：
@@ -54,7 +54,7 @@ def check_capacity(data_root="data_platform") -> str: ...     # OK | WARNING | C
 | 全部覆盖写 | Parquet 追加 | Parquet 不支持原生追加 |
 | `cleanup_expired` 默认 `dry_run=True` | 直删 | cron 先报告后执行 |
 | asset/research 永久，raw 1 年，quarantine 30 天 | 统一保留期 | Class 分级映射|
-| 备份**全量** data_platform，rsync 月度 → 外置盘 | 只备份 research+config | 45 GB 8min 可回拷；Parquet 文件级粒度天然最细 |
+| 备份**全量** $QUANT_DATA_ROOT，rsync 月度 → 外置盘 | 只备份 research+config | 45 GB 8min 可回拷；Parquet 文件级粒度天然最细 |
 | RPO 1 个月 / RTO 4 小时 | 更高频 | 研究系统可重建 |
 
 ## 实现要点

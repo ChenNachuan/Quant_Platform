@@ -260,7 +260,7 @@ def test_soft_flag_rate_above_alarm_rate_alarms_only(tmp_path, monkeypatch, capl
     assert (out["quality_flag"] != 0).sum() == 6
     # SOFT never rejects: nothing quarantined, batch written
     assert not quarantine_path("bars_daily", DATA_DATE, tmp_path).exists()
-    assert (tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet").exists()
+    assert (tmp_path / "asset" / "cn_stock_bars_daily" / "2024-01-03.parquet").exists()
 
 
 def test_rule_escalation_rejects_batch(tmp_path, monkeypatch):
@@ -295,7 +295,7 @@ def test_partition_granularity_expands_drop(tmp_path, monkeypatch):
     assert len(out) == 18
     gone = (out["ticker"] == "000001.SZ") & (out["trade_date"] == "2024-01-03")
     assert not gone.any()  # the sibling bar was expanded away too
-    assert (tmp_path / "asset" / "bars_minute" / "2024-01-03.parquet").exists()
+    assert (tmp_path / "asset" / "cn_stock_bars_minute" / "2024-01-03.parquet").exists()
 
 
 def test_partition_boundary_escalation_uses_post_expansion_rate(tmp_path, monkeypatch):
@@ -355,6 +355,8 @@ def test_ingest_clean_daily_smoke(tmp_path):
     )
     assert len(out) == 2
     assert (out["quality_flag"] == 0).all()
-    written = pd.read_parquet(tmp_path / "asset" / "bars_daily" / "2024-01-03.parquet")
+    written = pd.read_parquet(
+        tmp_path / "asset" / "cn_stock_bars_daily" / "2024-01-03.parquet"
+    )
     assert len(written) == 2
     assert set(written.columns) == set(engine.build_schema("bars_daily").columns)

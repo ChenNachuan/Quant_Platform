@@ -244,7 +244,14 @@ def _load_local(
         )
     path = Path(data_root) / template.format(date=trade_date.strftime("%Y-%m-%d"))
     if not path.exists():
-        return None
+        legacy_path = (
+            Path(data_root)
+            / f"asset/{asset_type}/{trade_date.strftime('%Y-%m-%d')}.parquet"
+        )
+        if legacy_path.exists():
+            path = legacy_path
+        else:
+            return None
     return pd.read_parquet(path)
 
 

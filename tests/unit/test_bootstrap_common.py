@@ -135,11 +135,11 @@ class TestWritePaths:
 
         assert (
             common.table_path("bars_daily", date="2025-01-15")
-            == DATA_ROOT / "asset/bars_daily/2025-01-15.parquet"
+            == DATA_ROOT / "asset/cn_stock_bars_daily/2025-01-15.parquet"
         )
         assert (
             common.table_path("calendar", exchange="sse")
-            == DATA_ROOT / "asset/calendar/sse.parquet"
+            == DATA_ROOT / "asset/cn_calendar/sse.parquet"
         )
 
     def test_write_daily_one_file_per_day(self, tmp_path):
@@ -148,13 +148,13 @@ class TestWritePaths:
         assert len(written) == 2
         for path in written:
             assert path.exists()
-            assert path.parent == tmp_path / "asset" / "bars_daily"
+            assert path.parent == tmp_path / "asset" / "cn_stock_bars_daily"
         assert {p.name for p in written} == {"2025-01-15.parquet", "2025-01-16.parquet"}
 
     def test_write_reference_single_file(self, tmp_path):
         df = pd.DataFrame([{"trade_date": D}])
         path = common.write_reference(df, "calendar", tmp_path, exchange="sse")
-        assert path == tmp_path / "asset" / "calendar" / "sse.parquet"
+        assert path == tmp_path / "asset" / "cn_calendar" / "sse.parquet"
         assert path.exists()
         assert len(pd.read_parquet(path)) == 1
 

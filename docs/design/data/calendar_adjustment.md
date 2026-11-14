@@ -21,7 +21,7 @@
 
 ```python
 class TradingCalendar:
-    def __init__(self, exchange: str): ...          # 读 asset/calendar/{exchange}.parquet
+    def __init__(self, exchange: str): ...          # 读 asset/cn_calendar/{exchange}.parquet
     def is_trading_day(self, d: date) -> bool
     def prev(self, d: date, n: int = 1) -> date
     def next(self, d: date, n: int = 1) -> date
@@ -45,7 +45,7 @@ class PriceAccessor:
 
 **复权公式**：`hfq = raw × adj`；`qfq = raw × adj / adj_latest`。returns 公式里基准日消掉，回测/实盘零差异。
 
-**日历存储**：`asset/cn_calendar/{exchange}.parquet` 单列 `trade_date: date`。
+**日历存储**：`asset/cn_calendar/{exchange}.parquet` 单列 `trade_date: date`（对齐 `{nation}_{asset_type}_{data_type}`）。
 
 ## 关键决策
 

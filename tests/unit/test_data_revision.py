@@ -721,7 +721,7 @@ class TestDetectDataRoot:
     """find.2 — detection reads the tree it is told to, like the other stages."""
 
     def test_local_read_accepts_a_custom_data_root(self, tmp_path):
-        day_dir = tmp_path / "asset" / "bars_daily"
+        day_dir = tmp_path / "asset" / "cn_stock_bars_daily"
         day_dir.mkdir(parents=True)
         pd.DataFrame(
             [{"ticker": "000001.SZ", "trade_date": str(D), "close": 10.0}]

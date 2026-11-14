@@ -45,7 +45,11 @@ import pandas as pd
 import pandera.pandas as pa
 from pandera.pandas import Check, Column, DataFrameSchema, Parser
 
-from core.asset_rules import EXCHANGE_MAP, validate_equity_ticker, validate_futures_ticker
+from core.asset_rules import (
+    EXCHANGE_MAP,
+    validate_equity_ticker,
+    validate_futures_ticker,
+)
 from core.types import QualityFlag
 
 # ---------------------------------------------------------------------------
@@ -81,9 +85,20 @@ def _quality_flag_column() -> Column:
 # these to NaT ("" / "NaN" / "nan" / "NaT"), while "null" / "  " raise.  Both
 # halves of that split are wrong: garbage is an error, only real nulls pass.
 # QUANT-15 #3.
-_MISSING_LOOKING_TOKENS = frozenset({
-    "", "nan", "nat", "none", "null", "na", "n/a", "n.a.", "<na>", "<nat>",
-})
+_MISSING_LOOKING_TOKENS = frozenset(
+    {
+        "",
+        "nan",
+        "nat",
+        "none",
+        "null",
+        "na",
+        "n/a",
+        "n.a.",
+        "<na>",
+        "<nat>",
+    }
+)
 
 
 def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
@@ -176,7 +191,9 @@ def _safe_datetime_parser(series: pd.Series) -> pd.Series:
         except (ValueError, TypeError) as exc:
             raise ValueError(f"cannot parse datetime column: {exc}") from exc
         if getattr(converted.dtype, "tz", None) is not None:
-            raise ValueError("tz-aware timestamps not allowed (design uses naive Beijing time)")
+            raise ValueError(
+                "tz-aware timestamps not allowed (design uses naive Beijing time)"
+            )
         result[~mask] = converted
     return result
 
@@ -205,21 +222,28 @@ def _datetime_column(nullable: bool = False) -> Column:
 # Shared checks
 # ---------------------------------------------------------------------------
 _equity_ticker_check = Check(
-    validate_equity_ticker, element_wise=True, name="equity_ticker",
+    validate_equity_ticker,
+    element_wise=True,
+    name="equity_ticker",
 )
 _futures_ticker_check = Check(
-    validate_futures_ticker, element_wise=True, name="futures_ticker",
+    validate_futures_ticker,
+    element_wise=True,
+    name="futures_ticker",
 )
 _ohlcv_checks = [Check.gt(0, name="positive")]
 _non_negative_checks = [Check.ge(0, name="non_negative")]
 _event_type_check = Check.isin(
-    ["dividend", "split", "rights", "bonus"], name="event_type",
+    ["dividend", "split", "rights", "bonus"],
+    name="event_type",
 )
 _classification_check = Check.isin(
-    ["citics", "sw"], name="classification",
+    ["citics", "sw"],
+    name="classification",
 )
 _exchange_check = Check.isin(
-    sorted(EXCHANGE_MAP), name="exchange_code",
+    sorted(EXCHANGE_MAP),
+    name="exchange_code",
 )
 
 
@@ -231,17 +255,34 @@ _exchange_check = Check.isin(
 # per-symbol files; factors use year-partitioned files under a version dir.
 # No Hive partitioning — flat names, ``hive_partitioning=false``.
 PARTITION_PATHS: dict[str, str] = {
-    "bars_daily": "asset/bars_daily/{date}.parquet",
-    "bars_minute": "asset/bars_minute/{date}.parquet",
-    "bars_daily_futures": "asset/bars_daily_futures/{date}.parquet",
-    "tick_futures_l2": "asset/tick_futures_l2/{date}.parquet",
-    "fundamental": "asset/fundamental/{date}.parquet",
-    "factor": "factors/{name}/v{version}/{year}.parquet",
-    "calendar": "asset/calendar/{exchange}.parquet",
-    "contract_specs": "asset/reference/contract_specs.parquet",
-    "industry": "asset/reference/industry.parquet",
-    "corporate_actions": "asset/reference/corporate_actions.parquet",
-    "continuous": "asset/continuous/{symbol}.parquet",
+    "bars_daily": "asset/cn_stock_bars_daily/{date}.parquet",
+    "bars_minute": "asset/cn_stock_bars_minute/{date}.parquet",
+    "bars_daily_futures": "asset/cn_futures_bars_daily/{date}.parquet",
+    "tick_futures_l2": "asset/cn_futures_tick_l2/{date}.parquet",
+    "fundamental": "asset/cn_stock_fundamental/{date}.parquet",
+    "factor": "factors/cn_stock_factors/{name}_v{version}/{year}.parquet",
+    "calendar": "asset/cn_calendar/{exchange}.parquet",
+    "contract_specs": "asset/cn_reference/contract_specs.parquet",
+    "industry": "asset/cn_reference/industry.parquet",
+    "corporate_actions": "asset/cn_reference/corporate_actions.parquet",
+    "continuous": "asset/cn_futures_continuous/{symbol}.parquet",
+}
+
+TABLE_ALIASES: dict[str, str] = {
+    "bars_daily": "cn_stock_bars_daily",
+    "bars_minute": "cn_stock_bars_minute",
+    "bars_daily_futures": "cn_futures_bars_daily",
+    "tick_futures_l2": "cn_futures_tick_l2",
+    "fundamental": "cn_stock_fundamental",
+    "continuous": "cn_futures_continuous",
+    "calendar": "cn_calendar",
+    "cn_stock_bars_daily": "bars_daily",
+    "cn_stock_bars_minute": "bars_minute",
+    "cn_futures_bars_daily": "bars_daily_futures",
+    "cn_futures_tick_l2": "tick_futures_l2",
+    "cn_stock_fundamental": "fundamental",
+    "cn_futures_continuous": "continuous",
+    "cn_calendar": "calendar",
 }
 
 # Table family for selection (gap #12 ruling): equity tables serve stock + ETF
@@ -266,6 +307,7 @@ TABLE_FAMILY: dict[str, str] = {
 # Pandera schemas — 11 tables
 # ---------------------------------------------------------------------------
 
+
 def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSchema:
     """Build a table schema with the standard coerce / strict / unique policy.
 
@@ -274,7 +316,11 @@ def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSche
     combination must be unique (the table's PK per §47.14).
     """
     return DataFrameSchema(
-        columns, coerce=False, strict=True, unique=unique or [], **kwargs,
+        columns,
+        coerce=False,
+        strict=True,
+        unique=unique or [],
+        **kwargs,
     )
 
 
@@ -348,10 +394,18 @@ _tick_base: dict = {
 }
 _tick_book: dict = {}
 for _i in range(1, 6):
-    _tick_book[f"bid_price_{_i}"] = Column(float, checks=_non_negative_checks, nullable=False)
-    _tick_book[f"bid_volume_{_i}"] = Column(int, checks=_non_negative_checks, nullable=False)
-    _tick_book[f"ask_price_{_i}"] = Column(float, checks=_non_negative_checks, nullable=False)
-    _tick_book[f"ask_volume_{_i}"] = Column(int, checks=_non_negative_checks, nullable=False)
+    _tick_book[f"bid_price_{_i}"] = Column(
+        float, checks=_non_negative_checks, nullable=False
+    )
+    _tick_book[f"bid_volume_{_i}"] = Column(
+        int, checks=_non_negative_checks, nullable=False
+    )
+    _tick_book[f"ask_price_{_i}"] = Column(
+        float, checks=_non_negative_checks, nullable=False
+    )
+    _tick_book[f"ask_volume_{_i}"] = Column(
+        int, checks=_non_negative_checks, nullable=False
+    )
 
 TICK_FUTURES_L2_SCHEMA = _table(
     {
