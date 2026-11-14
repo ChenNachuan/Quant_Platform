@@ -62,10 +62,12 @@ design/
 
 ## 三、数据源（data_source/）
 
-### 1. **AmazingData**
-  - [SDK API Reference](data_source/AmazingData/AmazingData.md)
-  - [开发指南摘要](data_source/AmazingData/AmazingData开发指南摘要.md)
-  - [技术指标整理](data_source/AmazingData/AmazingData技术指标.md)
+### 1. **AmazingData（银河星耀数智）**
+  - [总目录与平台接入约定](data_source/AmazingData/README.md)
+  - [01. 认证、本地缓存与 Docker 执行](data_source/AmazingData/01-auth-cache-and-docker.md) · [02. 基础数据与全量枚举](data_source/AmazingData/02-base-data-and-enums.md)
+  - [03. 行情查询与实时订阅](data_source/AmazingData/03-market-data-and-subscribe.md) · [04. A 股基本面、股本与交易异动](data_source/AmazingData/04-a-share-financials-and-corporate.md)
+  - [05. ETF、指数、可转债、国债与期权](data_source/AmazingData/05-etf-index-kzz-and-options.md) · [06. 技术指标库（57 项）](data_source/AmazingData/06-technical-indicators.md)
+  - [07. 量化算子库（108 项）](data_source/AmazingData/07-quant-operators.md) · [08. MCP Server 工具清单（26 项）](data_source/AmazingData/08-mcp-server.md)
 
 ### 2. **QDCData** — 待补充
 
