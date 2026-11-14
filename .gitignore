@@ -118,4 +118,4 @@ sslkeys.log
 # =============================================
 results/*.html
 .claude
-skills/
+skills
