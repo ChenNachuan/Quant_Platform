@@ -69,6 +69,12 @@ design/
 
 ### 2. **QDCData** — 待补充
 
-### 3. **StraightFlush** — 待补充
+### 3. **StraightFlush（同花顺 Fuyao）**
+  - [总目录与平台接入约定](data_source/StrightFlush/README.md)
+  - [01. 鉴权、通用协议与限流](data_source/StrightFlush/01-auth-and-protocol.md) · [02. 元信息与交易日历](data_source/StrightFlush/02-meta-and-calendar.md)
+  - [03. A 股行情、全市场导出与除复权](data_source/StrightFlush/03-a-share-market.md) · [04. A 股财务、估值与新股 IPO](data_source/StrightFlush/04-a-share-financials-ipo.md)
+  - [05. A 股指数与同花顺板块](data_source/StrightFlush/05-a-share-index.md) · [06. A 股集合竞价与特色数据](data_source/StrightFlush/06-a-share-special-data.md)
+  - [07. 公募基金（ETF / LOF / OTC）](data_source/StrightFlush/07-funds.md) · [08. 期货与期权](data_source/StrightFlush/08-futures-and-options.md)
+  - [09. 资讯、公告与快讯](data_source/StrightFlush/09-news-and-events.md) · [10. MCP 服务与开发工具](data_source/StrightFlush/10-mcp-and-dev-tools.md) · [11. AI 客户端专属与规划中接口](data_source/StrightFlush/11-ai-client-only.md)
 
 ### 4. **Tushare** — 待补充
