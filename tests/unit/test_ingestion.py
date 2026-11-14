@@ -442,7 +442,7 @@ class TestShouldCrossCheckHook:
 
 
 # ---------------------------------------------------------------------------
-# ocr findings 1/2/3/7 (task/ocr-report.json) — regression cases
+# Cross-check edge-case regression cases
 # ---------------------------------------------------------------------------
 class TestOcrRegressions:
     def test_should_cross_check_unarbitrated_types_return_false(self, tmp_path):

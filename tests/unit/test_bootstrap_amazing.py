@@ -30,7 +30,7 @@ D1, D2 = date(2024, 12, 2), date(2024, 12, 3)
 
 
 def _kline() -> pd.DataFrame:
-    # Shapes and units copied from task/probe_amazing_quant35.log: 510300.SH
+    # Measured AmazingData kline shapes and units: 510300.SH
     # 2024-12-02 close 4.031, volume 981634781 股, amount 3.948067e9 元.
     return pd.DataFrame(
         {

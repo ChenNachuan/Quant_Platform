@@ -2,7 +2,7 @@
 
 ``fetch_bars_daily.build_frame`` / ``fetch_fundamental.build_frame`` need
 network; everything here drives them from a fake ``pro`` whose column shapes
-and units are the measured tushare ones (``task/probe_tushare_quant35*.log``).
+and units match the measured tushare API responses.
 The load targets are the real fetchers (PAS-849 — no copy beside this test).
 
 Three regressions these pin, each of which previously landed silently or

@@ -199,8 +199,7 @@ tushare 路径下 `daily_basic` 只覆盖股票，ETF 的 `turnover` 仍是 NaN 
 空表。**两条路径都拿不到，所以都写 `False`。**
 
 > **这是数据源限制，不是市场事实。** ETF 当日可能真实涨停/跌停，本列的 `False` 只
-> 表示"没拿到数据"，不能拿来做涨跌停相关的推理。原始探测日志：
-> `task/probe_tushare_quant35*.log`、`task/probe_amazing_quant35.log`。
+> 表示"没拿到数据"，不能拿来做涨跌停相关的推理。
 
 `suspend` 同理写 `False`。有 bar 的行就是有成交的行，停牌日根本不会产生
 `(ticker, trade_date)` 行，所以这个列在当前写入方式下恒为 `False`。
@@ -260,7 +259,7 @@ backward hfq = raw × adj / adj_first
 
 ## 已知的 tushare 接口限制（实测）
 
-探测日志在 `task/probe_tushare_quant35*.log`。这张表是拉数前必须知道的事：
+以下为当前账号权限与接口覆盖实测结果，拉数前需注意：
 
 | 接口 | 状态 | 影响 |
 | --- | --- | --- |

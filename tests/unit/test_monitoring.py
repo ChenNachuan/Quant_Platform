@@ -2,9 +2,9 @@
 
 ac-5: the 8 strategy metrics judge 3 tiers and the 4 system metrics 2 tiers per
 ``docs/design/ops/monitoring.md`` — band tables verbatim, gap bands per
-``task/plan_qu49.md`` seam 5, missing sources per seam 6 (value null + warning /
-MEDIUM, never an alert). The readers are exercised against the real on-disk
-formats (execution.ledger.Journal parquet, factor_combiner's eval_report.json,
+design thresholds, with missing sources returning value=None + warning / MEDIUM
+(never an alert). The readers are exercised against the real on-disk formats
+(execution.ledger.Journal parquet, factor_combiner's eval_report.json,
 scheduler run records, risk_audit.jsonl, DataAPI bars_daily); the
 ``daily_pipeline`` end-to-end snapshot case lives in
 ``tests/integration/test_daily_pipeline.py`` (ac-6).
