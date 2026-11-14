@@ -1,94 +1,49 @@
+# =============================================================
+# 量化平台全局配置
+# 架构规范：docs/design/core/config.md
+# =============================================================
+
 [project]
 # 开启调试模式，输出堆栈信息
 debug = true
 log_level = "INFO"
 
-[data]
-# data_lake 根目录（相对于 QUANT_DATA_ROOT），确定了市场数据和因子数据的存放的地点
-# 使用相对路径，相对于项目根目录
-data_lake_dir = "future/market_data"
+[paths]
+# 统一数据根目录通过环境变量 QUANT_DATA_ROOT 配置（见 config/.env）
+# 以下为相对于 QUANT_DATA_ROOT 的标准子目录约定
+asset_dir = "asset"
 factors_dir = "factors"
+signals_dir = "signals"
+models_dir = "models"
+logs_dir = "logs"
 
-# DataLake 品种 → 数据类型 → 子类型 定义
-# 路径格式: data_lake/{asset_type}/{category}/{sub_type}/year=YYYY/*.parquet
-# 视图命名: {asset_type}_{category}_{sub_type}
-# 覆盖 AmazingData 全部可获取数据
-[data.asset_types]
-
-[data.asset_types.stock]
-market_data = ["1d", "min1", "min3", "min5", "min15", "min30", "min60", "snapshot", "week", "month", "year"]
-financials = ["balance_sheet", "cash_flow", "income", "profit_express", "profit_notice", "share_holder", "holder_num", "equity_structure", "equity_pledge_freeze", "equity_restricted", "dividend", "right_issue"]
-margin = ["summary", "detail"]
-trading_activity = ["long_hu_bang", "block_trading"]
-reference = ["stock_basic", "backward_factor", "adj_factor", "code_list", "history_stock_status"]
-
-[data.asset_types.index]
-market_data = ["1d", "min1", "min5", "snapshot"]
-reference = ["code_list"]
-
-[data.asset_types.etf]
-market_data = ["1d", "min1", "min5", "snapshot"]
-reference = ["code_list"]
-
-[data.asset_types.bond]
-market_data = ["1d", "min1", "min5", "snapshot"]
-reference = ["code_list"]
-
-[data.asset_types.convertible_bond]
-market_data = ["1d", "min1", "min5", "snapshot"]
-reference = ["code_list"]
-
-[data.asset_types.future]
-market_data = ["1d", "min1", "min5", "min15", "min30", "min60", "tick_l2", "snapshot", "week", "month", "year"]
-reference = ["code_list"]
-
-[data.asset_types.option]
-market_data = ["1d", "min1", "min5", "min15", "min30", "min60", "snapshot", "snapshot_option"]
-reference = ["basic_info", "std_specs", "mon_ctr_specs", "code_list"]
-
-[data.asset_types.hk_connect]
-market_data = ["snapshot"]
-
-
-# Tushare 配置
-# Token 严禁明文写入此文件
-# 请在项目根目录的 .env 文件中设置：TUSHARE_TOKEN=<your_token>
-# ConfigLoader 会自动从环境变量读取并注入
-[tushare]
-
-# ZVT 配置
-[zvt]
-# zvt的家目录，储存元数据、缓存文件或默认的 SQLite 数据库
-zvt_home = ".zvt"
-
-# DuckDB 配置
-[duckdb]
-# 持续的 DuckDB 文件路径（可选，如果仅依赖 Parquet，也可以是 :memory:）
-db_path = "quant.duckdb"
-
-# Qlib 配置
-[qlib]
-provider_uri = "qlib_bin"
-region = "cn"
-
-[backtest]
-# 回测基础配置
-initial_capital = 1000000.0   # 初始资金：100 万
-
-[backtest.cost]
-# 交易成本（A 股标准）
-# 将 apply_cost=True 传入 BatchBacktestRunner 时生效
-commission_rate = 0.0003   # 双边佣金率：万三（买卖各收）
-stamp_duty      = 0.0005   # 印花税：卖出单边 0.05%
-slippage        = 0.0002   # 滑点估算：万二
-min_commission  = 5.0      # 单笔最低佣金：5 元
+[data]
+# DuckDB 持久化 catalog 文件名（位于 QUANT_DATA_ROOT 下）
+catalog_file = "catalog.duckdb"
+# 多源仲裁与质量容差配置
+source_priority_config = "config/source_priority.yaml"
+# 敏感 Token（如 TUSHARE_TOKEN、STRIGHT_FLUSH_TOKEN）严禁明文写入此文件
+# 请在 config/.env 文件中配置
 
 [execution]
-# 交易网关配置
-gateway = "ctp" # or xtquant
-sim_mode = true
+# 运行模式：sim（模拟/回测） | qmt（实盘）
+mode = "sim"
+# 撮合价格基准：t1_open（次日开盘价，验收门禁口径） | decision_close（当日收盘价，对拍参考）
+fill_basis = "t1_open"
+# 默认初始资金：100 万
+initial_cash = 1000000.0
 
-[prefect]
-# Flow 配置
-parallel_execution = true
-max_workers = 12
+[execution.cost]
+# A 股标准交易费率（对齐 execution/fee_model.py）
+commission_rate   = 0.00025  # 双边佣金率：万 2.5
+min_commission    = 5.0      # 单笔最低佣金：5 元
+stamp_tax_rate    = 0.0005   # 印花税：卖出单边万 5（场内基金/ETF 豁免）
+transfer_fee_rate = 0.00001  # 过户费：双边万 0.1
+slippage_rate     = 0.001    # 滑点估算：双边千 1（0.1%）
+
+[ops]
+# 调度与运行记录（APScheduler）
+timezone = "Asia/Shanghai"
+jobs_log = "logs/runs/jobs.jsonl"
+metrics_log = "logs/ops/metrics.jsonl"
+risk_audit_log = "logs/audit/risk_audit.jsonl"
