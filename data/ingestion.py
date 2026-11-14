@@ -47,8 +47,13 @@ import pyarrow.parquet as pq
 import yaml
 
 from data.raw import raw_path
-from data.storage_ops import DiskFullError, FileLock, check_capacity
-from data.storage_schema import PARTITION_PATHS
+from data.storage_ops import (
+    DiskFullError,
+    FileLock,
+    check_capacity,
+    is_monthly_partition,
+    partition_path,
+)
 from core.config import DATA_ROOT
 
 __all__ = [
@@ -532,11 +537,7 @@ def write_asset(
         if target_path is not None
         else _landing_path(asset_type, trade_date, data_root)
     )
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    meta = dict(table.schema.metadata or {})
-    meta[b"source_tag"] = str(source_tag).encode("utf-8")
-    meta[b"ingest_time"] = datetime.now().isoformat(timespec="seconds").encode("utf-8")
-    table = table.replace_schema_metadata(meta)
+    merge_monthly = target_path is None and is_monthly_partition(asset_type)
 
     if check_capacity(path.parent if path.parent.exists() else path) == "CRITICAL":
         raise DiskFullError(
@@ -545,6 +546,42 @@ def write_asset(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with FileLock(path):
+        frame_to_write = df
+        if merge_monthly and path.exists() and "trade_date" in df.columns:
+            existing = pd.read_parquet(path)
+            if len(existing) and "trade_date" in existing.columns:
+                replace_dates = {date.fromisoformat(_as_date_str(trade_date)[:10])}
+                inc_dates = pd.to_datetime(
+                    df["trade_date"], errors="coerce"
+                ).dt.date.dropna()
+                replace_dates.update(inc_dates.tolist())
+                ext_dates = pd.to_datetime(
+                    existing["trade_date"], errors="coerce"
+                ).dt.date
+                kept = existing[~ext_dates.isin(replace_dates)]
+                if not kept.empty:
+                    combined = (
+                        pd.concat([kept, df], ignore_index=True)
+                        if not df.empty
+                        else kept.reset_index(drop=True)
+                    )
+                    sort_cols = [
+                        c for c in ("trade_date", "ticker") if c in combined.columns
+                    ]
+                    frame_to_write = (
+                        combined.sort_values(sort_cols, kind="mergesort").reset_index(
+                            drop=True
+                        )
+                        if sort_cols
+                        else combined
+                    )
+        table = pa.Table.from_pandas(frame_to_write, preserve_index=False)
+        meta = dict(table.schema.metadata or {})
+        meta[b"source_tag"] = str(source_tag).encode("utf-8")
+        meta[b"ingest_time"] = (
+            datetime.now().isoformat(timespec="seconds").encode("utf-8")
+        )
+        table = table.replace_schema_metadata(meta)
         try:
             pq.write_table(table, tmp, compression="zstd")
             fd = os.open(tmp, os.O_RDONLY)
@@ -575,13 +612,7 @@ def write_asset(
 def _landing_path(
     asset_type: str, trade_date: str | date, data_root: str | os.PathLike[str]
 ) -> Path:
-    template = PARTITION_PATHS.get(asset_type)
-    if template is None or "{date}" not in template:
-        raise NotImplementedError(
-            f"landing layout for {asset_type!r} is not a date partition; "
-            f"pass target_path explicitly (layouts: {PARTITION_PATHS})"
-        )
-    return Path(data_root) / template.format(date=_as_date_str(trade_date))
+    return partition_path(asset_type, trade_date, data_root)
 
 
 # ---------------------------------------------------------------------------

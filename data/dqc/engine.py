@@ -53,8 +53,14 @@ from data.dqc.severity import (
     severity_config_for,
 )
 from data.quarantine import save_quarantine
-from data.storage_ops import normalize_missing_floats, write_parquet_atomic
-from data.storage_schema import PARTITION_PATHS, SCHEMA
+from data.storage_ops import (
+    is_monthly_partition,
+    normalize_missing_floats,
+    partition_path,
+    upsert_parquet_atomic,
+    write_parquet_atomic,
+)
+from data.storage_schema import SCHEMA
 
 __all__ = [
     "RULES_DIR",
@@ -381,13 +387,7 @@ def build_schema(table: str) -> DataFrameSchema:
 
 
 def _landing_path(table: str, data_date: date, data_root: str | os.PathLike) -> Path:
-    template = PARTITION_PATHS.get(table)
-    if template is None or "{date}" not in template:
-        raise NotImplementedError(
-            f"landing layout for table {table!r} is not a date partition; "
-            f"pass target_path explicitly (layouts: {PARTITION_PATHS})"
-        )
-    return Path(data_root) / template.format(date=data_date.strftime("%Y-%m-%d"))
+    return partition_path(table, data_date, data_root)
 
 
 def _expand_to_partitions(df: pd.DataFrame, mask: pd.Series) -> pd.Series:
@@ -645,7 +645,10 @@ def ingest_with_dqc(
         if target_path is not None
         else _landing_path(table, data_date, data_root)
     )
-    write_parquet_atomic(validated, path, table=table)
+    if target_path is None and is_monthly_partition(table):
+        upsert_parquet_atomic(validated, path, table=table, partition_dates=[data_date])
+    else:
+        write_parquet_atomic(validated, path, table=table)
 
     flagged_rate = (
         float((df_clean["quality_flag"] != 0).mean()) if len(df_clean) else 0.0

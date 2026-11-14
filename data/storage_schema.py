@@ -250,16 +250,18 @@ _exchange_check = Check.isin(
 # ---------------------------------------------------------------------------
 # Directory / partition conventions (relative to ``data_platform/``)
 # ---------------------------------------------------------------------------
-# Dual-track partitioning (§47.14): market / fundamental tables use one file
-# per day (``{YYYY-MM-DD}.parquet``); reference / continuous use full or
-# per-symbol files; factors use year-partitioned files under a version dir.
+# Dual-track partitioning (§47.14): high-volume market tables use one file
+# per day (``{YYYY-MM-DD}.parquet``); compact daily tables (``fundamental``)
+# use one file per month (``{YYYY-MM}.parquet``) to avoid <1 MB small files;
+# reference / continuous use full or per-symbol files; factors use
+# year-partitioned files under a version dir.
 # No Hive partitioning — flat names, ``hive_partitioning=false``.
 PARTITION_PATHS: dict[str, str] = {
     "bars_daily": "asset/cn_stock_bars_daily/{date}.parquet",
     "bars_minute": "asset/cn_stock_bars_minute/{date}.parquet",
     "bars_daily_futures": "asset/cn_futures_bars_daily/{date}.parquet",
     "tick_futures_l2": "asset/cn_futures_tick_l2/{date}.parquet",
-    "fundamental": "asset/cn_stock_fundamental/{date}.parquet",
+    "fundamental": "asset/cn_stock_fundamental/{month}.parquet",
     "factor": "factors/cn_stock_factors/{name}_v{version}/{year}.parquet",
     "calendar": "asset/cn_calendar/{exchange}.parquet",
     "contract_specs": "asset/cn_reference/contract_specs.parquet",

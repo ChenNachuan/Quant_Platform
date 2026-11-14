@@ -21,10 +21,10 @@ $QUANT_DATA_ROOT/
 ├──asset/        
 │   ├──cn_stock_bars_daily/{date}.parquet
 │   ├──cn_stock_bars_minute/{date}.parquet
-│   ├──cn_stock_fundamental/{date}.parquet
+│   ├──cn_stock_fundamental/{month}.parquet
 │   │
 │   ├──cn_etf_bars_daily/{date}.parquet
-│   ├──cn_etf_fundamental/{date}.parquet
+│   ├──cn_etf_fundamental/{month}.parquet
 │   │
 │   ├──cn_calendar/{exchange}.parquet           #全量一文件
 │   └──cn_reference/
@@ -40,7 +40,8 @@ $QUANT_DATA_ROOT/
 └── manifest/
 ```
 分区策略:
-- 行情/基本面:按日一文件{YYYY-MM-DD}.parquet,资产类型在目录名区分
+- 行情:按日一文件{YYYY-MM-DD}.parquet,资产类型在目录名区分
+- 小文件每日截面表（`cn_stock_fundamental` / `cn_etf_fundamental`）:按月一文件{YYYY-MM}.parquet（按交易日原子合并写入,避免 <1MB 碎文件）
 - reference:全量一文件
 - 因子:v{version}/{year}.parquet 年分区+metadata.json
 - V3+扩展:futures_bars_daily/、futures_tick_l2/等直接加目录,不改现有结构
@@ -54,7 +55,7 @@ $QUANT_DATA_ROOT/
 | 表 | 文件 | 关键列 / 约束 |
 |---|---|---|
 | bars_daily | `asset/cn_stock_bars_daily/{date}.parquet` | 14 列：ticker/trade_date/OHLCV（float64 **未复权**）/volume（int64 股）/amount/adjfactor/turnover(Y)/suspend/is_limit_up/is_limit_down/quality_flag；PK(ticker, trade_date)；**不含** prev_close/pct_change/close_adj |
-| fundamental | `asset/cn_stock_fundamental/{date}.parquet` | total/float_market_cap，pe_ttm/pe_lyr/pb/ps_ttm（**可空**），total/float_shares |
+| fundamental | `asset/cn_stock_fundamental/{month}.parquet` | total/float_market_cap，pe_ttm/pe_lyr/pb/ps_ttm（**可空**），total/float_shares |
 | calendar | `asset/cn_calendar/{exchange}.parquet` | 单列 trade_date；9 交易所文件（sse/szse/bse/cffex/shfe/dce/czce/ine/gfex） |
 | industry | `asset/cn_reference/industry.parquet` | industry_l1/l2/l3(Y)/classification(citics/sw)/effective_date；初版只存最新 |
 | corporate_actions | `asset/cn_reference/corporate_actions.parquet` | 10 字段；PK(ticker, ex_date, event_type)；event_type 4 类：dividend/split/rights/bonus |

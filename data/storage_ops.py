@@ -28,7 +28,7 @@ import re
 import shutil
 from datetime import date, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 import pandas as pd
 import yaml
@@ -57,6 +57,9 @@ __all__ = [
     "DiskFullError",
     "FileLock",
     "write_parquet_atomic",
+    "upsert_parquet_atomic",
+    "partition_path",
+    "is_monthly_partition",
     "normalize_missing_floats",
     "parse_date_from_filename",
     "cleanup_stale_tmp",
@@ -240,6 +243,49 @@ def _resolve_schema(table: str, value_column: str | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Partition resolution helpers (supports both {date} and {month} layouts)
+# ---------------------------------------------------------------------------
+def _coerce_date(value: date | datetime | str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def is_monthly_partition(table: str) -> bool:
+    """Return ``True`` when *table* lands at a ``{month}`` (YYYY-MM) partition."""
+    template = PARTITION_PATHS.get(table, "")
+    return "{month}" in template
+
+
+def partition_path(
+    table: str,
+    data_date: date | datetime | str,
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+) -> Path:
+    """Resolve *table*'s landing path for *data_date* (``{date}`` or ``{month}``).
+
+    Raises :class:`NotImplementedError` for tables whose ``PARTITION_PATHS``
+    template is not date- or month-partitioned (e.g. reference / factor).
+    """
+    template = PARTITION_PATHS.get(table)
+    if template is None:
+        raise NotImplementedError(
+            f"landing layout for table {table!r} is unknown (layouts: {PARTITION_PATHS})"
+        )
+    day = _coerce_date(data_date)
+    if "{date}" in template:
+        return Path(data_root) / template.format(date=day.strftime("%Y-%m-%d"))
+    if "{month}" in template:
+        return Path(data_root) / template.format(month=day.strftime("%Y-%m"))
+    raise NotImplementedError(
+        f"landing layout for table {table!r} is neither a date nor month partition; "
+        f"pass target_path explicitly (layouts: {PARTITION_PATHS})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Atomic write (§1) — lock → tmp → rename
 # ---------------------------------------------------------------------------
 def write_parquet_atomic(
@@ -312,6 +358,105 @@ def write_parquet_atomic(
         # purpose — the target is already atomically committed at this point,
         # and a raise here would make callers record a successful write as a
         # failed one.
+        try:
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            logger.warning(
+                "wrote %s but could not fsync %s; committed but not durable",
+                target,
+                target.parent,
+            )
+
+
+def upsert_parquet_atomic(
+    df: pd.DataFrame,
+    path: str | os.PathLike[str],
+    *,
+    table: str,
+    partition_dates: Sequence[date | datetime | str] | None = None,
+    value_column: str | None = None,
+    check_disk: bool = True,
+    **parquet_kwargs: Any,
+) -> None:
+    """Atomically merge *df* into a multi-day partition file (e.g. ``{month}.parquet``).
+
+    Under :class:`FileLock`, any existing rows at *path* whose ``trade_date``
+    matches *partition_dates* or incoming rows' ``trade_date`` are replaced by
+    *df* while preserving all other dates in the same partition file.  The
+    combined frame is sorted by ``(trade_date, ticker)`` and validated against
+    ``SCHEMA[table]`` before the atomic ``tmp -> fsync -> os.replace`` commit.
+    """
+    target = Path(path)
+    schema = _resolve_schema(table, value_column=value_column)
+    prepared = _normalize_for_schema(df, schema)
+    validated = schema.validate(prepared)
+
+    if check_disk:
+        status = check_capacity(target.parent if target.parent.exists() else target)
+        if status == "CRITICAL":
+            raise DiskFullError(
+                f"free space is at the CRITICAL tier; refusing to write {target}"
+            )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + _TMP_SUFFIX)
+
+    with FileLock(target):
+        to_write = validated
+        if target.exists() and "trade_date" in schema.columns:
+            existing = pd.read_parquet(target)
+            replace_dates: set[date] = {
+                _coerce_date(d) for d in (partition_dates or ())
+            }
+            if "trade_date" in validated.columns and len(validated):
+                inc_dates = pd.to_datetime(
+                    validated["trade_date"], errors="coerce"
+                ).dt.date.dropna()
+                replace_dates.update(inc_dates.tolist())
+
+            if replace_dates and "trade_date" in existing.columns and len(existing):
+                ext_dates = pd.to_datetime(
+                    existing["trade_date"], errors="coerce"
+                ).dt.date
+                kept = existing[~ext_dates.isin(replace_dates)]
+            else:
+                kept = existing
+
+            if not kept.empty:
+                combined = (
+                    pd.concat([kept, validated], ignore_index=True)
+                    if not validated.empty
+                    else kept.reset_index(drop=True)
+                )
+                sort_cols = [
+                    c for c in ("trade_date", "ticker") if c in combined.columns
+                ]
+                if sort_cols:
+                    combined = combined.sort_values(
+                        sort_cols, kind="mergesort"
+                    ).reset_index(drop=True)
+                to_write = schema.validate(_normalize_for_schema(combined, schema))
+
+        try:
+            kwargs = {**PARQUET_WRITE_CONFIG, **parquet_kwargs}
+            to_write.to_parquet(tmp, **kwargs)
+            fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+
         try:
             dir_fd = os.open(target.parent, os.O_RDONLY)
             try:

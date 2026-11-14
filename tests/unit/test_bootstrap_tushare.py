@@ -190,12 +190,34 @@ class TestFundamentalFrame:
         assert "ts_code" not in frame.columns
         assert frame["ticker"].tolist() == [TS, TS]
 
-    def test_write_daily_lands_one_file_per_day(self, frame, tmp_path):
+    def test_write_daily_lands_one_file_per_month(self, frame, tmp_path):
         written = fetch_fund.write_daily(frame, "fundamental", tmp_path)
-        assert {p.name for p in written} == {
-            "2025-01-15.parquet",
-            "2025-01-16.parquet",
-        }
+        assert {p.name for p in written} == {"2025-01.parquet"}
+        landed = pd.read_parquet(written[0])
+        assert len(landed) == 2
+        assert [str(d)[:10] for d in landed["trade_date"]] == [
+            "2025-01-15",
+            "2025-01-16",
+        ]
+
+    def test_write_daily_single_day_rerun_preserves_other_days_in_month(
+        self, frame, tmp_path
+    ):
+        fetch_fund.write_daily(frame, "fundamental", tmp_path)
+        day2 = frame.iloc[[1]].copy()
+        day2["pe_ttm"] = 99.0
+        written = fetch_fund.write_daily(day2, "fundamental", tmp_path)
+        assert {p.name for p in written} == {"2025-01.parquet"}
+        landed = (
+            pd.read_parquet(written[0]).sort_values("trade_date").reset_index(drop=True)
+        )
+        assert len(landed) == 2
+        assert [str(d)[:10] for d in landed["trade_date"]] == [
+            "2025-01-15",
+            "2025-01-16",
+        ]
+        assert float(landed.loc[0, "pe_ttm"]) == pytest.approx(15.0)
+        assert float(landed.loc[1, "pe_ttm"]) == pytest.approx(99.0)
 
     def test_passes_schema_validation(self, frame):
         aligned = _common.align_schema(frame, "fundamental")

@@ -235,14 +235,15 @@ def _load_local(
     """Read the asset layer's existing batch for one trade date."""
     import pandas as pd
 
-    from data.storage_schema import PARTITION_PATHS
+    from data.storage_ops import is_monthly_partition, partition_path
 
-    template = PARTITION_PATHS.get(asset_type)
-    if template is None or "{date}" not in template:
+    try:
+        path = partition_path(asset_type, trade_date, data_root)
+    except NotImplementedError as exc:
         raise NotImplementedError(
-            f"no date-partitioned layout for {asset_type!r} ({PARTITION_PATHS})"
-        )
-    path = Path(data_root) / template.format(date=trade_date.strftime("%Y-%m-%d"))
+            f"no date-partitioned layout for {asset_type!r}"
+        ) from exc
+
     if not path.exists():
         legacy_path = (
             Path(data_root)
@@ -252,7 +253,13 @@ def _load_local(
             path = legacy_path
         else:
             return None
-    return pd.read_parquet(path)
+    df = pd.read_parquet(path)
+    if is_monthly_partition(asset_type) and "trade_date" in df.columns:
+        td = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+        df = df[td == trade_date].reset_index(drop=True)
+        if df.empty:
+            return None
+    return df
 
 
 def _no_rows(frame: Any) -> bool:

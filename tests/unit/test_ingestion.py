@@ -10,12 +10,13 @@ Run: ``uv run pytest tests/unit/test_ingestion.py -q``
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
+from data.dqc.engine import ingest_with_dqc
 from data.ingestion import (
     NUMERIC_FIELDS,
     backfill_source_tag,
@@ -462,3 +463,57 @@ def test_numeric_fields_cover_the_multi_source_asset_types():
         assert asset_type in NUMERIC_FIELDS
     assert "adjfactor" in NUMERIC_FIELDS["bars_daily"]
     assert "adjfactor" not in NUMERIC_FIELDS["bars_minute"]
+
+
+class TestMonthlyPartitionWrite:
+    def test_write_asset_merges_monthly_fundamental_and_preserves_metadata(
+        self, tmp_path
+    ):
+        d1 = date(2024, 6, 14)
+        d2 = date(2024, 6, 17)
+        f1 = _fundamental_frame(n=2, trade_date=d1, pe_ttm=20.0)
+        f1["ticker"] = ["000001.SZ", "600519.SH"]
+        f2 = _fundamental_frame(n=2, trade_date=d2, pe_ttm=22.0)
+        f2["ticker"] = ["000001.SZ", "600519.SH"]
+
+        p1 = write_asset(f1, "fundamental", d1, "akshare", data_root=tmp_path)
+        p2 = write_asset(f2, "fundamental", d2, "tushare", data_root=tmp_path)
+
+        assert p1 == p2
+        assert p1 == tmp_path / "asset" / "cn_stock_fundamental" / "2024-06.parquet"
+        table = pq.read_table(p1)
+        assert table.schema.metadata[b"source_tag"] == b"tushare"
+        stored = table.to_pandas()
+        assert len(stored) == 4
+
+        # Re-writing d1 replaces only d1 rows, keeping d2 intact.
+        f1_updated = _fundamental_frame(n=2, trade_date=d1, pe_ttm=35.0)
+        f1_updated["ticker"] = ["000001.SZ", "600519.SH"]
+        write_asset(f1_updated, "fundamental", d1, "akshare", data_root=tmp_path)
+        stored2 = pd.read_parquet(p1)
+        assert len(stored2) == 4
+        d1_rows = stored2[pd.to_datetime(stored2["trade_date"]).dt.date == d1]
+        d2_rows = stored2[pd.to_datetime(stored2["trade_date"]).dt.date == d2]
+        assert d1_rows["pe_ttm"].tolist() == pytest.approx([35.0, 35.0])
+        assert d2_rows["pe_ttm"].tolist() == pytest.approx([22.0, 22.0])
+
+    def test_ingest_with_dqc_lands_fundamental_in_monthly_parquet(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "data.dqc.engine.run_all_checks", lambda *args, **kwargs: ([], [])
+        )
+        d1 = date(2024, 6, 14)
+        d2 = d1 + timedelta(days=3)
+        for day, pe in ((d1, 20.0), (d2, 21.0), (d1, 25.0)):
+            df = _fundamental_frame(n=2, trade_date=day, pe_ttm=pe)
+            df["ticker"] = ["000001.SZ", "600519.SH"]
+            ingest_with_dqc(df, day, "fundamental", data_root=tmp_path)
+        month_file = tmp_path / "asset" / "cn_stock_fundamental" / "2024-06.parquet"
+        assert month_file.exists()
+        stored = pd.read_parquet(month_file)
+        assert len(stored) == 4
+        d1_rows = stored[pd.to_datetime(stored["trade_date"]).dt.date == d1]
+        d2_rows = stored[pd.to_datetime(stored["trade_date"]).dt.date == d2]
+        assert d1_rows["pe_ttm"].tolist() == pytest.approx([25.0, 25.0])
+        assert d2_rows["pe_ttm"].tolist() == pytest.approx([21.0, 21.0])

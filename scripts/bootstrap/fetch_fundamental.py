@@ -1,7 +1,7 @@
-"""Fundamentals -> ``data_platform/asset/fundamental/{date}.parquet``.
+"""Fundamentals -> ``data_platform/asset/cn_stock_fundamental/{month}.parquet``.
 
 Source: tushare ``daily_basic`` (valuation ratios + share counts).  One file
-per day, 11 columns per ``FUNDAMENTAL_SCHEMA``.
+per month, 11 columns per ``FUNDAMENTAL_SCHEMA``.
 
 Unit conversions into the storage schema (``test_storage_schema`` fixtures:
 Maotai ``total_market_cap=2.0e12`` 元, ``total_shares=1_256_000_000`` 股):
@@ -78,7 +78,9 @@ def main() -> int:
     written = write_daily(
         pd.concat(frames, ignore_index=True), "fundamental", args.data_root
     )
-    print(f"wrote {sum(len(f) for f in frames)} rows across {len(written)} day files")
+    print(
+        f"wrote {sum(len(f) for f in frames)} rows across {len(written)} partition files"
+    )
     return 0
 
 

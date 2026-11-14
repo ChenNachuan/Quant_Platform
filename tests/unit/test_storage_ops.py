@@ -35,9 +35,12 @@ from data.storage_ops import (
     cleanup_expired,
     cleanup_stale_locks,
     cleanup_stale_tmp,
+    is_monthly_partition,
     load_lifecycle,
     normalize_missing_floats,
     parse_date_from_filename,
+    partition_path,
+    upsert_parquet_atomic,
     write_parquet_atomic,
 )
 
@@ -1325,6 +1328,96 @@ class TestBackupScript:
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert "OK — counts match" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Monthly partitioning + atomic upsert (§47.14)
+# ---------------------------------------------------------------------------
+def _fundamental_row(
+    trade_date: date = D, ticker: str = "600519.SH", pe_ttm: float = 25.0
+) -> dict:
+    return {
+        "ticker": ticker,
+        "trade_date": trade_date,
+        "total_market_cap": 1.0e12,
+        "float_market_cap": 8.0e11,
+        "pe_ttm": pe_ttm,
+        "pe_lyr": 24.0,
+        "pb": 8.0,
+        "ps_ttm": 10.0,
+        "total_shares": 1_256_000_000,
+        "float_shares": 1_256_000_000,
+        "quality_flag": 0,
+    }
+
+
+class TestMonthlyPartitionAndUpsert:
+    def test_partition_path_and_monthly_flag(self, tmp_path):
+        assert is_monthly_partition("fundamental") is True
+        assert is_monthly_partition("bars_daily") is False
+
+        assert (
+            partition_path("bars_daily", D, tmp_path)
+            == tmp_path / "asset" / "cn_stock_bars_daily" / "2024-01-15.parquet"
+        )
+        assert (
+            partition_path("fundamental", D, tmp_path)
+            == tmp_path / "asset" / "cn_stock_fundamental" / "2024-01.parquet"
+        )
+        with pytest.raises(NotImplementedError):
+            partition_path("industry", D, tmp_path)
+
+    def test_upsert_parquet_atomic_merges_and_overwrites_idempotently(self, tmp_path):
+        target = partition_path("fundamental", D, tmp_path)
+        d1 = date(2024, 1, 15)
+        d2 = date(2024, 1, 16)
+
+        # Day 1 write
+        upsert_parquet_atomic(
+            pd.DataFrame([_fundamental_row(d1, "600519.SH", 25.0)]),
+            target,
+            table="fundamental",
+            partition_dates=[d1],
+        )
+        # Day 2 upsert preserves Day 1
+        upsert_parquet_atomic(
+            pd.DataFrame([_fundamental_row(d2, "000001.SZ", 6.0)]),
+            target,
+            table="fundamental",
+            partition_dates=[d2],
+        )
+        # Re-run Day 1 with updated valuation; Day 2 preserved, no duplicates
+        upsert_parquet_atomic(
+            pd.DataFrame([_fundamental_row(d1, "600519.SH", 27.5)]),
+            target,
+            table="fundamental",
+            partition_dates=[d1],
+        )
+
+        stored = pd.read_parquet(target)
+        assert len(stored) == 2
+        assert [str(x)[:10] for x in stored["trade_date"]] == [
+            "2024-01-15",
+            "2024-01-16",
+        ]
+        assert stored["ticker"].tolist() == ["600519.SH", "000001.SZ"]
+        assert float(stored.loc[0, "pe_ttm"]) == pytest.approx(27.5)
+        assert float(stored.loc[1, "pe_ttm"]) == pytest.approx(6.0)
+
+    def test_upsert_parquet_atomic_rejects_invalid_schema_without_corrupting(
+        self, tmp_path
+    ):
+        target = partition_path("fundamental", D, tmp_path)
+        upsert_parquet_atomic(
+            pd.DataFrame([_fundamental_row(D, "600519.SH", 25.0)]),
+            target,
+            table="fundamental",
+            partition_dates=[D],
+        )
+        bad = pd.DataFrame([_fundamental_row(date(2024, 1, 16), "BAD", 10.0)])
+        with pytest.raises(pa.errors.SchemaError):
+            upsert_parquet_atomic(bad, target, table="fundamental")
+        assert len(pd.read_parquet(target)) == 1
 
     def test_rsync_source_vanished_status_is_not_fatal(self, tmp_path):
         src = _make_data_platform(tmp_path)

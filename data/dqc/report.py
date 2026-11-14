@@ -56,7 +56,12 @@ import pandas as pd
 
 from data.dqc.severity import severity_config_for
 from data.quarantine import QUARANTINE_ROOT
-from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock
+from data.storage_ops import (
+    PARQUET_WRITE_CONFIG,
+    FileLock,
+    is_monthly_partition,
+    partition_path,
+)
 from data.storage_schema import PARTITION_PATHS
 from core.config import DATA_ROOT
 
@@ -448,10 +453,13 @@ def build_reference_overrides(
                 overrides["daily_tickers"] = sorted(set(prev["ticker"].astype(str)))
 
     template = PARTITION_PATHS.get(asset_type)
-    if template and "{date}" in template:
-        target = root / template.format(date=data_date.strftime("%Y-%m-%d"))
+    if template and ("{date}" in template or "{month}" in template):
+        target = partition_path(asset_type, data_date, root)
         if target.exists():
             stored = pd.read_parquet(target)
+            if is_monthly_partition(asset_type) and "trade_date" in stored.columns:
+                td = pd.to_datetime(stored["trade_date"], errors="coerce").dt.date
+                stored = stored[td == data_date].reset_index(drop=True)
             if {"ticker", "adjfactor"} <= set(stored.columns):
                 overrides["previous_adjfactor"] = stored
     return overrides

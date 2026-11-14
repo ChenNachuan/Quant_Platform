@@ -27,7 +27,11 @@ if str(_REPO_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from data.storage_ops import write_parquet_atomic  # noqa: E402
+from data.storage_ops import (  # noqa: E402
+    is_monthly_partition,
+    upsert_parquet_atomic,
+    write_parquet_atomic,
+)
 from data.storage_schema import PARTITION_PATHS, SCHEMA  # noqa: E402
 
 #: Root every ``PARTITION_PATHS`` template is relative to.  Authority:
@@ -307,13 +311,20 @@ def write_daily(
     table_name: str,
     data_root: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
-    """Align *df*, split on ``trade_date``, write one parquet file per day."""
+    """Align *df* and write to day or month partitions per ``PARTITION_PATHS``."""
     aligned = align_schema(df, table_name)
     written: list[Path] = []
     if aligned.empty:
         return written
     if "trade_date" not in aligned.columns:
         raise ValueError(f"{table_name}: write_daily needs a trade_date column")
+    if is_monthly_partition(table_name):
+        months = pd.to_datetime(aligned["trade_date"]).dt.strftime("%Y-%m")
+        for month, group in aligned.groupby(months, sort=True):
+            path = table_path(table_name, data_root, month=month)
+            upsert_parquet_atomic(group.reset_index(drop=True), path, table=table_name)
+            written.append(path)
+        return written
     for day, group in aligned.groupby("trade_date", sort=True):
         path = table_path(table_name, data_root, date=_iso(day))
         write_parquet_atomic(group.reset_index(drop=True), path, table=table_name)

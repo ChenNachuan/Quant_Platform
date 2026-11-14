@@ -735,6 +735,34 @@ class TestDetectDataRoot:
     def test_missing_batch_in_the_custom_root_reads_as_none(self, tmp_path):
         assert dr._load_local(ASSET, D, data_root=tmp_path) is None
 
+    def test_local_read_filters_monthly_partition_by_trade_date(self, tmp_path):
+        month_dir = tmp_path / "asset" / "cn_stock_fundamental"
+        month_dir.mkdir(parents=True)
+        d1 = date(2024, 6, 14)
+        d2 = date(2024, 6, 17)
+        d_missing = date(2024, 6, 18)
+        pd.DataFrame(
+            [
+                {
+                    "ticker": "000001.SZ",
+                    "trade_date": d1,
+                    "pe_ttm": 10.0,
+                },
+                {
+                    "ticker": "000001.SZ",
+                    "trade_date": d2,
+                    "pe_ttm": 11.0,
+                },
+            ]
+        ).to_parquet(month_dir / "2024-06.parquet")
+
+        f1 = dr._load_local("fundamental", d1, data_root=tmp_path)
+        assert f1 is not None
+        assert len(f1) == 1
+        assert float(f1.iloc[0]["pe_ttm"]) == pytest.approx(10.0)
+
+        assert dr._load_local("fundamental", d_missing, data_root=tmp_path) is None
+
     def test_detect_threads_data_root_to_calendar_and_local(
         self, monkeypatch, tmp_path
     ):
