@@ -11,7 +11,12 @@ from core.asset_rules import (
     get_asset_rules,
     is_stamp_tax_exempt_prefix,
     validate_equity_ticker,
+    validate_etf_ticker,
+    validate_fund_ticker,
     validate_futures_ticker,
+    validate_index_ticker,
+    validate_otc_fund_ticker,
+    validate_stock_ticker,
 )
 from core.types import AssetType
 
@@ -35,7 +40,7 @@ class TestGetAssetRules:
         assert rules["price_limits"]["main"] == 0.10  # 60/00
         assert rules["price_limits"]["gem"] == 0.20  # 30
         assert rules["price_limits"]["star"] == 0.20  # 68
-        assert rules["price_limits"]["bse"] == 0.30  # 8
+        assert rules["price_limits"]["bse"] == 0.30  # 8/4/92
 
     def test_fund_price_limits(self):
         rules = get_asset_rules("fund")
@@ -73,7 +78,7 @@ class TestStampTaxExemptPrefixes:
             )
 
     def test_stock_prefixes_not_exempt(self):
-        for p in ("60", "00", "30", "68", "83", "87", "43"):
+        for p in ("60", "00", "30", "68", "92", "83", "87", "43"):
             assert p not in STAMP_TAX_EXEMPT_PREFIXES
 
 
@@ -93,7 +98,9 @@ class TestStampTaxCrossCheck:
     def test_predicate_agrees_with_derived_set(self):
         for p in ASSET_PREFIXES:
             ticker = f"{p}00000"  # fake 6-digit code with that prefix
-            assert is_stamp_tax_exempt_prefix(ticker) == (p in STAMP_TAX_EXEMPT_PREFIXES)
+            assert is_stamp_tax_exempt_prefix(ticker) == (
+                p in STAMP_TAX_EXEMPT_PREFIXES
+            )
 
 
 class TestIsStampTaxExemptPrefix:
@@ -101,10 +108,16 @@ class TestIsStampTaxExemptPrefix:
     # predicate only reads [:2], so a 6-char code and a 2-char prefix give
     # the same answer. Callers (e.g. FeeModel) pass CODE.EXCH.
     def test_exempt_prefixes(self):
-        assert is_stamp_tax_exempt_prefix("510300") is True  # ETF
-        assert is_stamp_tax_exempt_prefix("560000") is True  # ETF
-        assert is_stamp_tax_exempt_prefix("588000") is True  # ETF
-        assert is_stamp_tax_exempt_prefix("159915") is True  # ETF
+        for code in (
+            "510300",
+            "520000",
+            "530000",
+            "550000",
+            "560000",
+            "588000",
+            "159915",
+        ):
+            assert is_stamp_tax_exempt_prefix(code) is True  # ETF
         assert is_stamp_tax_exempt_prefix("160119") is True  # LOF
         assert is_stamp_tax_exempt_prefix("501050") is True  # Shanghai LOF (prefix 50)
 
@@ -113,10 +126,8 @@ class TestIsStampTaxExemptPrefix:
         assert is_stamp_tax_exempt_prefix("501050.SH") is True
 
     def test_stock_not_exempt(self):
-        assert is_stamp_tax_exempt_prefix("600000") is False
-        assert is_stamp_tax_exempt_prefix("000001") is False
-        assert is_stamp_tax_exempt_prefix("300750") is False
-        assert is_stamp_tax_exempt_prefix("688001") is False
+        for code in ("600000", "000001", "300750", "688001", "920001"):
+            assert is_stamp_tax_exempt_prefix(code) is False
 
 
 class TestAssetRulesKeys:
@@ -126,11 +137,16 @@ class TestAssetRulesKeys:
 
 
 class TestValidateEquityTicker:
-    # Representative ETF tickers (validator smoke test) + representative stocks.
-    # Not the platform golden-sample pool — gap #4 is still open (its third
-    # ticker is 518880 gold ETF; this smoke list uses 588000 STAR50).
     def test_golden_sample_tickers_pass(self):
-        for t in ("510300.SH", "510500.SH", "588000.SH", "511010.SH", "159915.SZ"):
+        for t in (
+            "510300.SH",
+            "520500.SH",
+            "530500.SH",
+            "550500.SH",
+            "588000.SH",
+            "511010.SH",
+            "159915.SZ",
+        ):
             assert validate_equity_ticker(t), f"{t} should pass"
 
     def test_shanghai_lof_passes_as_fund(self):
@@ -141,15 +157,98 @@ class TestValidateEquityTicker:
         assert validate_equity_ticker("999999.SH") is False  # unknown prefix
         assert validate_equity_ticker("510300.XX") is False  # unknown exchange
         assert validate_equity_ticker("510300") is False  # missing exchange
+        assert validate_equity_ticker("920001.SH") is False  # BJ prefix with SH venue
 
     def test_various_stocks_pass(self):
-        for t in ("600000.SH", "000001.SZ", "300750.SZ", "688001.SH", "830799.BJ"):
+        for t in (
+            "600000.SH",
+            "000001.SZ",
+            "300750.SZ",
+            "688001.SH",
+            "830799.BJ",
+            "920001.BJ",
+        ):
             assert validate_equity_ticker(t), f"{t} should pass"
+
+
+class TestDomainSpecificValidators:
+    def test_validate_stock_ticker_excludes_etf_and_fund(self):
+        for t in (
+            "600519.SH",
+            "000001.SZ",
+            "300750.SZ",
+            "688001.SH",
+            "920001.BJ",
+            "430047.BJ",
+        ):
+            assert validate_stock_ticker(t) is True
+        for non_stock in (
+            "510300.SH",
+            "520010.SH",
+            "159915.SZ",
+            "501050.SH",
+            "160119.SZ",
+            "000001.OF",
+        ):
+            assert validate_stock_ticker(non_stock) is False
+
+    def test_validate_etf_ticker_accepts_all_etf_prefixes_only(self):
+        for t in (
+            "510300.SH",
+            "520100.SH",
+            "530100.SH",
+            "550100.SH",
+            "560000.SH",
+            "588000.SH",
+            "159915.SZ",
+        ):
+            assert validate_etf_ticker(t) is True
+        for non_etf in (
+            "600519.SH",
+            "501050.SH",
+            "160119.SZ",
+            "159915.SH",
+            "510300.SZ",
+        ):
+            assert validate_etf_ticker(non_etf) is False
+
+    def test_validate_otc_and_public_fund_tickers(self):
+        assert validate_otc_fund_ticker("110011.OF") is True
+        assert validate_otc_fund_ticker("501050.SH") is False
+        assert validate_fund_ticker("110011.OF") is True
+        assert validate_fund_ticker("501050.SH") is True
+        assert validate_fund_ticker("160119.SZ") is True
+        assert validate_fund_ticker("510300.SH") is False
+        assert validate_fund_ticker("600519.SH") is False
+
+    def test_validate_index_ticker(self):
+        for t in (
+            "000300.SH",
+            "399001.SZ",
+            "899050.BJ",
+            "932000.CSI",
+            "980001.CNI",
+            "801010.SI",
+            "CI005001.CI",
+            "886042.TI",
+            "BK0420.DC",
+            "880301.TS",
+        ):
+            assert validate_index_ticker(t) is True, t
+        assert validate_index_ticker("000300") is False
+        assert validate_index_ticker("000300.XX") is False
+        assert validate_index_ticker("000300.SH\n") is False
 
 
 class TestValidateFuturesTicker:
     def test_futures_shapes_pass(self):
-        for t in ("IF2406.CFFEX", "SC2412.INE", "AU2412.SHFE", "T2406.CFFEX"):
+        for t in (
+            "IF2406.CFFEX",
+            "SC2412.INE",
+            "AU2412.SHFE",
+            "T2406.CFFEX",
+            "SI2406.GFEX",
+        ):
             assert validate_futures_ticker(t), f"{t} should pass"
 
     def test_futures_not_in_equity_prefixes(self):
@@ -196,14 +295,17 @@ class TestExchangeMap:
 
 class TestAssetPrefixes:
     def test_b_share_prefixes_absent(self):
-        # 90/20 deliberately excluded (V1 scope is stock + ETF)
+        # 90/20 deliberately excluded (V1 scope is stock + ETF + fund)
         assert "90" not in ASSET_PREFIXES
         assert "20" not in ASSET_PREFIXES
+
+    def test_bse_92_prefix_present(self):
+        assert ASSET_PREFIXES["92"] is AssetType.STOCK
 
     def test_fund_prefixes(self):
         assert ASSET_PREFIXES["50"] is AssetType.FUND
         assert ASSET_PREFIXES["16"] is AssetType.FUND
 
     def test_etf_prefixes(self):
-        for p in ("51", "56", "58", "15"):
+        for p in ("51", "52", "53", "55", "56", "58", "15"):
             assert ASSET_PREFIXES[p] is AssetType.ETF

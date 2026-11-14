@@ -1,39 +1,27 @@
-"""Storage schema contract — the 11 core tables as pandera DataFrameSchemas.
+"""Storage schema contract — Pandera DataFrameSchemas for all 52 canonical tables.
 
 Pure schema definitions, no IO (red line 3).  This module defines *what a
 table looks like*; write paths (T2) and read paths (T3) consume these schemas.
 
-Field-level authority: ``docs/archive/OPEN_QUESTIONS.md`` §47.
-Settled rulings on QUANT-12 override stale wording in the design docs:
-
-1. ``quality_flag`` is an ``int64`` bitmask with 5 bits (§47.15 wins over the
-   ``INT8 (0/1/2)`` line in §55.2, which is the :class:`QualitySeverity` scale).
-2. Calendar exchanges = 9, sourced from :data:`core.asset_rules.CALENDAR_EXCHANGES`.
-   The "6 exchanges" line in the docs misses INE and GFEX.
-3. ``bars_daily`` holds stock + ETF + LOF together.  Table selection is by
-   family (equity / futures / continuous), not by the 6-member ``AssetType``.
+Canonical layout under ``$QUANT_DATA_ROOT/``:
+- ``asset/``   — 47 A-share tables (calendar + stock + index/board + 7 PIT
+  ``cn_stock_fundamental_*`` + special flows/sentiment + split holder/event
+  tables + tick/L2 + 5 independent ``cn_etf_*`` + 5 OTC/LOF ``cn_fund_*``)
+  and 4 futures tables (``cn_futures_*``).  Former ``ext/`` datasets land
+  directly inside ``asset/``.
+- ``factors/`` — sibling to ``asset/``, per-factor versioned yearly Parquet.
 
 Schema evolution: **add-column only**.  To keep pre-addition frames passing
-validation, a new column must set **both** ``nullable=True`` (values may be
-null when ``union_by_name=true`` fills them) **and** ``required=False`` (the
-column may be entirely absent from older frames).  ``strict=True`` rejects
-unexpected columns on write.
+validation, a new column must set **both** ``nullable=True`` and
+``required=False``.  ``strict=True`` rejects unexpected columns on write.
 
-Implementation decisions (QUANT-12 §5, documented in the PR description):
-
-- ``trade_date`` datetime→date conversion happens **before** validation via
-  a custom parser that accepts only datetime64 / date / string dates and
-  rejects integer input (which pandera would treat as epoch seconds).
-  Datetime columns likewise reject tz-aware timestamps (design uses naive
-  Beijing time).  Numeric columns use ``coerce=False`` so non-integral floats
-  in integer columns raise instead of silently truncating.
-- Dates are ``datetime.date`` / Parquet ``DATE``, **not** VARCHAR.
-- Schema changes are recorded in ``schema_changelog.jsonl`` alongside git log.
-- Factor value column is named per-factor via :func:`factor_schema`;
-  ``SCHEMA["factor"]`` uses the canonical placeholder ``"value"``.
-- Factor DuckDB view names: ``factor_{sanitized}`` — non-alphanumerics → ``_``.
-  Use :class:`FactorViewRegistry` to detect collisions between distinct factor
-  names that sanitize to the same view.
+Implementation decisions (QUANT-12 §5):
+- ``trade_date`` / date columns convert via ``_safe_date_parser`` accepting
+  datetime64 / date / ISO string and rejecting integers & tz-aware inputs.
+- Datetime columns reject tz-aware timestamps (naive Beijing time).
+- Numeric columns use ``coerce=False`` so non-integral floats in integer
+  columns raise instead of silently truncating.
+- Factor DuckDB view names: ``factor_{sanitized}`` via ``FactorViewRegistry``.
 """
 
 from __future__ import annotations
@@ -48,7 +36,11 @@ from pandera.pandas import Check, Column, DataFrameSchema, Parser
 from core.asset_rules import (
     EXCHANGE_MAP,
     validate_equity_ticker,
+    validate_etf_ticker,
+    validate_fund_ticker,
     validate_futures_ticker,
+    validate_index_ticker,
+    validate_stock_ticker,
 )
 from core.types import QualityFlag
 
@@ -63,7 +55,7 @@ QUALITY_FLAG_BITS: dict[str, int] = {
     "K01_OVERNIGHT_GAP": int(QualityFlag.K01_OVERNIGHT_GAP),
 }
 CLEAN: int = int(QualityFlag.CLEAN)
-QUALITY_FLAG_MAX: int = 31  # 5 bits → value < 32
+QUALITY_FLAG_MAX: int = 31  # 5 bits -> value < 32
 
 
 def _quality_flag_column() -> Column:
@@ -79,12 +71,8 @@ def _quality_flag_column() -> Column:
 
 
 # ---------------------------------------------------------------------------
-# Safe date / datetime coercion (code-review findings 1 & 2)
+# Safe date / datetime coercion
 # ---------------------------------------------------------------------------
-# Strings that look like missing values.  pandas' date parser silently maps
-# these to NaT ("" / "NaN" / "nan" / "NaT"), while "null" / "  " raise.  Both
-# halves of that split are wrong: garbage is an error, only real nulls pass.
-# QUANT-15 #3.
 _MISSING_LOOKING_TOKENS = frozenset(
     {
         "",
@@ -102,23 +90,10 @@ _MISSING_LOOKING_TOKENS = frozenset(
 
 
 def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
-    """Reject numeric dtypes, tz-aware elements, and missing-looking strings
-    in object columns.
-
-    Pandera's built-in ``coerce=True`` treats integer values as epoch
-    seconds, so ``20240115`` silently becomes ``date(1970, 1, 1)``.  The
-    first iteration of this guard only checked ``dtype.kind in "iub"``,
-    which missed float64 (``20240115.0``) and object-dtype integers.
-    Reject *values*, not just dtypes.
-
-    QUANT-15 #3: strings like ``""`` / ``"NaN"`` / ``"nan"`` / ``"NaT"``
-    silently became ``NaT`` while ``"null"`` / ``"  "`` raised.  All
-    missing-looking garbage is now rejected uniformly; real nulls
-    (``None`` / ``NaN`` / ``NaT``) still pass through ``dropna()``.
-    """
+    """Reject numeric dtypes, tz-aware elements, and missing-looking strings."""
     if series.dtype.kind in "iufb":
         if series.isna().all():
-            return  # all-null column: accept and let the caller emit NaT
+            return
         raise ValueError(
             f"numeric input to {kind} column not allowed (got dtype {series.dtype}); "
             "pass datetime64, date, or ISO string"
@@ -144,18 +119,7 @@ def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
 
 
 def _safe_date_parser(series: pd.Series) -> pd.Series:
-    """Convert to ``datetime.date``, rejecting numeric, tz-aware and
-    missing-looking input.
-
-    Accepts only datetime64 / date / string.  Nulls are preserved as
-    ``NaT`` so ``nullable=True`` columns pass through unchanged.
-
-    QUANT-15 #1: tz-annotated strings (``"2024-01-15 23:00:00+00:00"``) must
-    not silently take the literal date part — that is 2024-01-16 in Beijing.
-    We reject rather than convert: the design uses naive Beijing time, and
-    silently picking a timezone is exactly the kind of coercion this module
-    exists to prevent.
-    """
+    """Convert to ``datetime.date``, rejecting numeric, tz-aware, and garbage strings."""
     _reject_numeric_and_bad_objects(series, "date")
     mask = series.isna()
     result = pd.Series(index=series.index, dtype="object")
@@ -176,12 +140,7 @@ def _safe_date_parser(series: pd.Series) -> pd.Series:
 
 
 def _safe_datetime_parser(series: pd.Series) -> pd.Series:
-    """Convert to naive ``datetime64``, rejecting numeric and tz-aware input.
-
-    The design uses naive Beijing time.  Pandera's built-in coercion silently
-    shifts tz-aware timestamps (e.g. ``09:31+0800`` → ``01:31``).
-    Nulls are preserved as ``NaT``.
-    """
+    """Convert to naive ``datetime64``, rejecting numeric and tz-aware input."""
     _reject_numeric_and_bad_objects(series, "datetime")
     mask = series.isna()
     result = pd.Series(index=series.index, dtype="datetime64[ns]")
@@ -226,11 +185,32 @@ _equity_ticker_check = Check(
     element_wise=True,
     name="equity_ticker",
 )
+_stock_ticker_check = Check(
+    validate_stock_ticker,
+    element_wise=True,
+    name="stock_ticker",
+)
+_etf_ticker_check = Check(
+    validate_etf_ticker,
+    element_wise=True,
+    name="etf_ticker",
+)
+_fund_ticker_check = Check(
+    validate_fund_ticker,
+    element_wise=True,
+    name="fund_ticker",
+)
+_index_ticker_check = Check(
+    validate_index_ticker,
+    element_wise=True,
+    name="index_ticker",
+)
 _futures_ticker_check = Check(
     validate_futures_ticker,
     element_wise=True,
     name="futures_ticker",
 )
+
 _ohlcv_checks = [Check.gt(0, name="positive")]
 _non_negative_checks = [Check.ge(0, name="non_negative")]
 _event_type_check = Check.isin(
@@ -238,85 +218,18 @@ _event_type_check = Check.isin(
     name="event_type",
 )
 _classification_check = Check.isin(
-    ["citics", "sw"],
+    ["citics", "sw", "ths", "tdx"],
     name="classification",
 )
 _exchange_check = Check.isin(
     sorted(EXCHANGE_MAP),
     name="exchange_code",
 )
-
-
-# ---------------------------------------------------------------------------
-# Directory / partition conventions (relative to ``data_platform/``)
-# ---------------------------------------------------------------------------
-# Dual-track partitioning (§47.14): high-volume market tables use one file
-# per day (``{YYYY-MM-DD}.parquet``); compact daily tables (``fundamental``)
-# use one file per month (``{YYYY-MM}.parquet``) to avoid <1 MB small files;
-# reference / continuous use full or per-symbol files; factors use
-# year-partitioned files under a version dir.
-# No Hive partitioning — flat names, ``hive_partitioning=false``.
-PARTITION_PATHS: dict[str, str] = {
-    "bars_daily": "asset/cn_stock_bars_daily/{date}.parquet",
-    "bars_minute": "asset/cn_stock_bars_minute/{date}.parquet",
-    "bars_daily_futures": "asset/cn_futures_bars_daily/{date}.parquet",
-    "tick_futures_l2": "asset/cn_futures_tick_l2/{date}.parquet",
-    "fundamental": "asset/cn_stock_fundamental/{month}.parquet",
-    "factor": "factors/cn_stock_factors/{name}_v{version}/{year}.parquet",
-    "calendar": "asset/cn_calendar/{exchange}.parquet",
-    "contract_specs": "asset/cn_reference/contract_specs.parquet",
-    "industry": "asset/cn_reference/industry.parquet",
-    "corporate_actions": "asset/cn_reference/corporate_actions.parquet",
-    "continuous": "asset/cn_futures_continuous/{symbol}.parquet",
-}
-
-TABLE_ALIASES: dict[str, str] = {
-    "bars_daily": "cn_stock_bars_daily",
-    "bars_minute": "cn_stock_bars_minute",
-    "bars_daily_futures": "cn_futures_bars_daily",
-    "tick_futures_l2": "cn_futures_tick_l2",
-    "fundamental": "cn_stock_fundamental",
-    "continuous": "cn_futures_continuous",
-    "calendar": "cn_calendar",
-    "cn_stock_bars_daily": "bars_daily",
-    "cn_stock_bars_minute": "bars_minute",
-    "cn_futures_bars_daily": "bars_daily_futures",
-    "cn_futures_tick_l2": "tick_futures_l2",
-    "cn_stock_fundamental": "fundamental",
-    "cn_futures_continuous": "continuous",
-    "cn_calendar": "calendar",
-}
-
-# Table family for selection (gap #12 ruling): equity tables serve stock + ETF
-# + LOF together; the 6-member ``AssetType`` is for fee / limit rules, not for
-# picking a table.
-TABLE_FAMILY: dict[str, str] = {
-    "bars_daily": "equity",
-    "bars_minute": "equity",
-    "bars_daily_futures": "futures",
-    "tick_futures_l2": "futures",
-    "fundamental": "equity",
-    "factor": "equity",
-    "calendar": "reference",
-    "contract_specs": "futures",
-    "industry": "equity",
-    "corporate_actions": "equity",
-    "continuous": "continuous",
-}
-
-
-# ---------------------------------------------------------------------------
-# Pandera schemas — 11 tables
-# ---------------------------------------------------------------------------
+_bs_flag_check = Check.isin(["B", "S", "N", "A"], name="bs_flag")
 
 
 def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSchema:
-    """Build a table schema with the standard coerce / strict / unique policy.
-
-    Schema-level coercion is **off**.  Date/datetime columns carry safe
-    parsers individually (§5 decision 1).  *unique* lists column names whose
-    combination must be unique (the table's PK per §47.14).
-    """
+    """Build a table schema with standard coerce=False / strict=True / unique."""
     return DataFrameSchema(
         columns,
         coerce=False,
@@ -326,7 +239,88 @@ def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSche
     )
 
 
-# --- 1. bars_daily — 14 cols, PK(ticker, trade_date) ------------------------
+# ---------------------------------------------------------------------------
+# Legacy <-> Canonical alias resolution
+# ---------------------------------------------------------------------------
+LEGACY_TO_CANONICAL: dict[str, str] = {
+    "bars_daily": "cn_stock_bars_daily",
+    "bars_minute": "cn_stock_bars_minute",
+    "fundamental": "cn_stock_fundamental",
+    "calendar": "cn_calendar",
+    "industry": "cn_stock_industry",
+    "corporate_actions": "cn_stock_corporate_actions",
+    "bars_daily_futures": "cn_futures_bars_daily",
+    "tick_futures_l2": "cn_futures_tick_l2",
+    "contract_specs": "cn_futures_contract_specs",
+    "continuous": "cn_futures_continuous",
+}
+
+CANONICAL_TO_LEGACY: dict[str, str] = {v: k for k, v in LEGACY_TO_CANONICAL.items()}
+
+TABLE_ALIASES: dict[str, str] = {
+    **LEGACY_TO_CANONICAL,
+    **CANONICAL_TO_LEGACY,
+}
+
+
+def resolve_table_name(name: str) -> str:
+    """Resolve legacy short table names (e.g. ``bars_daily``) to canonical."""
+    return LEGACY_TO_CANONICAL.get(name, name)
+
+
+class _AliasedDict(dict):
+    """Dict storing only canonical keys while transparently resolving legacy names.
+
+    ``len(d)``, ``iter(d)``, ``set(d)`` yield canonical keys only; ``d[legacy]``,
+    ``legacy in d``, ``d.get(legacy)`` resolve via ``LEGACY_TO_CANONICAL``.
+    """
+
+    def __contains__(self, key: object) -> bool:
+        if super().__contains__(key):
+            return True
+        if isinstance(key, str) and key in LEGACY_TO_CANONICAL:
+            return super().__contains__(LEGACY_TO_CANONICAL[key])
+        return False
+
+    def __getitem__(self, key: str):
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key in LEGACY_TO_CANONICAL:
+            return super().__getitem__(LEGACY_TO_CANONICAL[key])
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        if key in self:
+            return self[key]
+        return default
+
+
+# ===========================================================================
+# 1. Calendar (1 table)
+# ===========================================================================
+CALENDAR_SCHEMA = _table(
+    {"trade_date": _date_column()},
+    unique=["trade_date"],
+)
+
+# ===========================================================================
+# 2. A-share Stock Core & Status (6 tables)
+# ===========================================================================
+CN_STOCK_BASIC_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "name": Column(str, nullable=False),
+        "exchange": Column(str, checks=_exchange_check, nullable=False),
+        "market": Column(str, nullable=False),
+        "list_status": Column(str, nullable=False),
+        "list_date": _date_column(),
+        "delist_date": _date_column(nullable=True),
+        "is_hs": Column(str, nullable=True),
+        "old_code": Column(str, nullable=True),
+    },
+    unique=["ticker"],
+)
+
 BARS_DAILY_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
@@ -347,7 +341,6 @@ BARS_DAILY_SCHEMA = _table(
     unique=["ticker", "trade_date"],
 )
 
-# --- 2. bars_minute — 10 cols, no adjfactor, PK(ticker, trade_date, datetime)
 BARS_MINUTE_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
@@ -364,7 +357,787 @@ BARS_MINUTE_SCHEMA = _table(
     unique=["ticker", "trade_date", "datetime"],
 )
 
-# --- 3. bars_daily_futures — 11 cols, settle/open_interest, no adjfactor ----
+FUNDAMENTAL_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "total_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
+        "float_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
+        "pe_ttm": Column(float, nullable=True),
+        "pe_lyr": Column(float, nullable=True),
+        "pb": Column(float, nullable=True),
+        "ps_ttm": Column(float, nullable=True),
+        "total_shares": Column(int, checks=_non_negative_checks, nullable=False),
+        "float_shares": Column(int, checks=_non_negative_checks, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CN_STOCK_DAILY_STATUS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "pre_close": Column(float, checks=_ohlcv_checks, nullable=True),
+        "up_limit": Column(float, checks=_ohlcv_checks, nullable=True),
+        "down_limit": Column(float, checks=_ohlcv_checks, nullable=True),
+        "limit_pct": Column(float, checks=_non_negative_checks, nullable=True),
+        "is_st": Column(bool, nullable=False),
+        "is_suspend": Column(bool, nullable=False),
+        "is_limit_up": Column(bool, nullable=False),
+        "is_limit_down": Column(bool, nullable=False),
+        "touched_limit_up": Column(bool, nullable=False),
+        "touched_limit_down": Column(bool, nullable=False),
+        "is_xr": Column(bool, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CORPORATE_ACTIONS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "ex_date": _date_column(),
+        "event_type": Column(str, checks=_event_type_check, nullable=False),
+        "announce_date": _date_column(nullable=True),
+        "record_date": _date_column(nullable=True),
+        "detail": Column(str, nullable=False),
+        "cash_dividend": Column(float, checks=_non_negative_checks, nullable=True),
+        "stock_dividend": Column(float, checks=_non_negative_checks, nullable=True),
+        "rights_price": Column(float, checks=_non_negative_checks, nullable=True),
+        "rights_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+    },
+    unique=["ticker", "ex_date", "event_type"],
+)
+
+# ===========================================================================
+# 3. Stock Index / Industry / Concept (4 tables)
+# ===========================================================================
+CN_STOCK_INDEX_BASIC_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_index_ticker_check, nullable=False),
+        "name": Column(str, nullable=False),
+        "category": Column(str, nullable=False),
+        "publisher": Column(str, nullable=True),
+        "base_date": _date_column(nullable=True),
+        "base_point": Column(float, checks=_ohlcv_checks, nullable=True),
+        "list_date": _date_column(nullable=True),
+    },
+    unique=["ticker"],
+)
+
+CN_STOCK_INDEX_BARS_DAILY_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_index_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "pe": Column(float, nullable=True),
+        "pb": Column(float, nullable=True),
+        "turnover": Column(float, checks=_non_negative_checks, nullable=True),
+        "total_market_cap": Column(float, checks=_non_negative_checks, nullable=True),
+        "float_market_cap": Column(float, checks=_non_negative_checks, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+INDUSTRY_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "industry_l1": Column(str, nullable=False),
+        "industry_l2": Column(str, nullable=False),
+        "industry_l3": Column(str, nullable=True),
+        "classification": Column(str, checks=_classification_check, nullable=False),
+        "effective_date": _date_column(),
+    },
+    unique=["ticker", "classification"],
+)
+
+CN_STOCK_INDEX_WEIGHTS_SCHEMA = _table(
+    {
+        "index_code": Column(str, checks=_index_ticker_check, nullable=False),
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "weight": Column(float, checks=_non_negative_checks, nullable=True),
+        "in_date": _date_column(nullable=True),
+        "out_date": _date_column(nullable=True),
+    },
+    unique=["index_code", "ticker", "trade_date"],
+)
+
+# ===========================================================================
+# 4. Stock Fundamental PIT Tables (7 tables — unified cn_stock_fundamental_*)
+# ===========================================================================
+CN_STOCK_FUNDAMENTAL_INCOME_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "report_date": _date_column(),
+        "ann_date": _date_column(),
+        "f_ann_date": _date_column(nullable=True),
+        "statement_type": Column(str, nullable=False),
+        "comp_type": Column(str, nullable=True),
+        "basic_eps": Column(float, nullable=True),
+        "diluted_eps": Column(float, nullable=True),
+        "total_revenue": Column(float, nullable=True),
+        "revenue": Column(float, nullable=True),
+        "total_cogs": Column(float, nullable=True),
+        "operate_profit": Column(float, nullable=True),
+        "total_profit": Column(float, nullable=True),
+        "net_profit": Column(float, nullable=True),
+        "net_profit_attr_p": Column(float, nullable=True),
+        "net_profit_dedt": Column(float, nullable=True),
+        "rd_exp": Column(float, nullable=True),
+        "ebit": Column(float, nullable=True),
+        "ebitda": Column(float, nullable=True),
+    },
+    unique=["ticker", "report_date", "ann_date", "statement_type"],
+)
+
+CN_STOCK_FUNDAMENTAL_BALANCE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "report_date": _date_column(),
+        "ann_date": _date_column(),
+        "f_ann_date": _date_column(nullable=True),
+        "statement_type": Column(str, nullable=False),
+        "comp_type": Column(str, nullable=True),
+        "total_assets": Column(float, nullable=True),
+        "total_cur_assets": Column(float, nullable=True),
+        "total_nca": Column(float, nullable=True),
+        "money_cap": Column(float, nullable=True),
+        "accounts_receiv": Column(float, nullable=True),
+        "inventories": Column(float, nullable=True),
+        "total_liab": Column(float, nullable=True),
+        "total_cur_liab": Column(float, nullable=True),
+        "total_ncl": Column(float, nullable=True),
+        "total_hldr_eqy_exc_min_int": Column(float, nullable=True),
+        "total_hldr_eqy_inc_min_int": Column(float, nullable=True),
+        "total_share": Column(float, nullable=True),
+    },
+    unique=["ticker", "report_date", "ann_date", "statement_type"],
+)
+
+CN_STOCK_FUNDAMENTAL_CASHFLOW_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "report_date": _date_column(),
+        "ann_date": _date_column(),
+        "f_ann_date": _date_column(nullable=True),
+        "statement_type": Column(str, nullable=False),
+        "comp_type": Column(str, nullable=True),
+        "n_cashflow_act": Column(float, nullable=True),
+        "n_cashflow_inv_act": Column(float, nullable=True),
+        "n_cash_flows_fnc_act": Column(float, nullable=True),
+        "c_fr_sale_sg": Column(float, nullable=True),
+        "c_paid_to_for_empl": Column(float, nullable=True),
+        "c_pay_acq_const_fiolta": Column(float, nullable=True),
+        "free_cashflow": Column(float, nullable=True),
+        "n_incr_cash_cash_equ": Column(float, nullable=True),
+    },
+    unique=["ticker", "report_date", "ann_date", "statement_type"],
+)
+
+CN_STOCK_FUNDAMENTAL_INDICATOR_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "report_date": _date_column(),
+        "ann_date": _date_column(),
+        "roe": Column(float, nullable=True),
+        "roe_waa": Column(float, nullable=True),
+        "roe_dt": Column(float, nullable=True),
+        "roa": Column(float, nullable=True),
+        "roic": Column(float, nullable=True),
+        "grossprofit_margin": Column(float, nullable=True),
+        "netprofit_margin": Column(float, nullable=True),
+        "debt_to_assets": Column(float, nullable=True),
+        "current_ratio": Column(float, nullable=True),
+        "quick_ratio": Column(float, nullable=True),
+        "assets_turn": Column(float, nullable=True),
+        "netprofit_yoy": Column(float, nullable=True),
+        "or_yoy": Column(float, nullable=True),
+        "audit_result": Column(str, nullable=True),
+    },
+    unique=["ticker", "report_date", "ann_date"],
+)
+
+CN_STOCK_FUNDAMENTAL_SEGMENT_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "report_date": _date_column(),
+        "ann_date": _date_column(nullable=True),
+        "segment_type": Column(str, nullable=False),
+        "segment_name": Column(str, nullable=False),
+        "bz_sales": Column(float, nullable=True),
+        "bz_profit": Column(float, nullable=True),
+        "bz_cost": Column(float, nullable=True),
+        "sales_ratio": Column(float, nullable=True),
+        "gross_margin": Column(float, nullable=True),
+    },
+    unique=["ticker", "report_date", "segment_type", "segment_name"],
+)
+
+CN_STOCK_FUNDAMENTAL_EARNINGS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "report_date": _date_column(),
+        "ann_date": _date_column(),
+        "event_kind": Column(
+            str,
+            checks=Check.isin(["forecast", "express", "schedule"], name="event_kind"),
+            nullable=False,
+        ),
+        "forecast_type": Column(str, nullable=True),
+        "p_change_min": Column(float, nullable=True),
+        "p_change_max": Column(float, nullable=True),
+        "net_profit_min": Column(float, nullable=True),
+        "net_profit_max": Column(float, nullable=True),
+        "revenue": Column(float, nullable=True),
+        "net_profit": Column(float, nullable=True),
+        "eps": Column(float, nullable=True),
+        "roe": Column(float, nullable=True),
+        "pre_date": _date_column(nullable=True),
+        "actual_date": _date_column(nullable=True),
+    },
+    unique=["ticker", "report_date", "ann_date", "event_kind"],
+)
+
+CN_STOCK_FUNDAMENTAL_CONSENSUS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "visible_from": _date_column(nullable=True),
+        "eps_fy0": Column(float, nullable=True),
+        "eps_fy1": Column(float, nullable=True),
+        "eps_fy2": Column(float, nullable=True),
+        "eps_fwd12m": Column(float, nullable=True),
+        "eps_fy1_n": Column(float, nullable=True),
+        "eps_fy1_std": Column(float, nullable=True),
+        "eps_fy1_up_3m": Column(float, nullable=True),
+        "eps_fy1_down_3m": Column(float, nullable=True),
+        "rating_score": Column(float, nullable=True),
+        "tp_median": Column(float, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+# ===========================================================================
+# 5. Stock Special Flows / Sentiment / Chips (9 tables, formerly ext/)
+# ===========================================================================
+CN_STOCK_AUCTION_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "auction_session": Column(
+            str,
+            checks=Check.isin(["open", "close"], name="auction_session"),
+            nullable=False,
+        ),
+        "price": Column(float, checks=_ohlcv_checks, nullable=False),
+        "pre_close": Column(float, checks=_ohlcv_checks, nullable=True),
+        "pct_chg": Column(float, nullable=True),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "turnover_rate": Column(float, checks=_non_negative_checks, nullable=True),
+        "volume_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "auction_session"],
+)
+
+CN_STOCK_MONEYFLOW_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "buy_elg_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "sell_elg_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "buy_lg_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "sell_lg_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "buy_md_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "sell_md_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "buy_sm_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "sell_sm_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "net_mf_amount": Column(float, nullable=True),
+        "net_mf_pct": Column(float, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CN_STOCK_HSGT_MARKET_FLOW_SCHEMA = _table(
+    {
+        "trade_date": _date_column(),
+        "ggt_ss": Column(float, nullable=True),
+        "ggt_sz": Column(float, nullable=True),
+        "hgt": Column(float, nullable=True),
+        "sgt": Column(float, nullable=True),
+        "north_money": Column(float, nullable=True),
+        "south_money": Column(float, nullable=True),
+        "is_turnover_regime": Column(bool, nullable=False),
+    },
+    unique=["trade_date"],
+)
+
+CN_STOCK_HSGT_HOLD_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "vol": Column(int, checks=_non_negative_checks, nullable=False),
+        "ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "exchange": Column(str, checks=_exchange_check, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CN_STOCK_MARGIN_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "rzye": Column(float, checks=_non_negative_checks, nullable=True),
+        "rzmre": Column(float, checks=_non_negative_checks, nullable=True),
+        "rzche": Column(float, checks=_non_negative_checks, nullable=True),
+        "rqyl": Column(float, checks=_non_negative_checks, nullable=True),
+        "rqmcl": Column(float, checks=_non_negative_checks, nullable=True),
+        "rqchl": Column(float, checks=_non_negative_checks, nullable=True),
+        "rqye": Column(float, checks=_non_negative_checks, nullable=True),
+        "rzrqye": Column(float, checks=_non_negative_checks, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CN_STOCK_LHB_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "reason": Column(str, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=True),
+        "pct_chg": Column(float, nullable=True),
+        "turnover_rate": Column(float, checks=_non_negative_checks, nullable=True),
+        "l_buy": Column(float, checks=_non_negative_checks, nullable=True),
+        "l_sell": Column(float, checks=_non_negative_checks, nullable=True),
+        "net_amount": Column(float, nullable=True),
+        "net_rate": Column(float, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "reason"],
+)
+
+CN_STOCK_LHB_SEATS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "side": Column(
+            str, checks=Check.isin(["buy", "sell"], name="side"), nullable=False
+        ),
+        "rank": Column(int, checks=Check.ge(1), nullable=False),
+        "seat_name": Column(str, nullable=False),
+        "buy": Column(float, checks=_non_negative_checks, nullable=True),
+        "sell": Column(float, checks=_non_negative_checks, nullable=True),
+        "net_buy": Column(float, nullable=True),
+        "hm_name": Column(str, nullable=True),
+        "is_institution": Column(bool, nullable=False),
+    },
+    unique=["ticker", "trade_date", "side", "rank", "seat_name"],
+)
+
+CN_STOCK_LIMIT_POOL_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "pool_type": Column(
+            str,
+            checks=Check.isin(["up", "down", "break"], name="pool_type"),
+            nullable=False,
+        ),
+        "first_time": Column(str, nullable=True),
+        "last_time": Column(str, nullable=True),
+        "open_times": Column(float, checks=_non_negative_checks, nullable=True),
+        "streak_days": Column(float, checks=_non_negative_checks, nullable=True),
+        "seal_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "theme": Column(str, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "pool_type"],
+)
+
+CN_STOCK_CHIPS_PERF_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "his_low": Column(float, checks=_ohlcv_checks, nullable=True),
+        "his_high": Column(float, checks=_ohlcv_checks, nullable=True),
+        "cost_5pct": Column(float, checks=_ohlcv_checks, nullable=True),
+        "cost_15pct": Column(float, checks=_ohlcv_checks, nullable=True),
+        "cost_50pct": Column(float, checks=_ohlcv_checks, nullable=True),
+        "cost_85pct": Column(float, checks=_ohlcv_checks, nullable=True),
+        "cost_95pct": Column(float, checks=_ohlcv_checks, nullable=True),
+        "weight_avg": Column(float, checks=_ohlcv_checks, nullable=True),
+        "winner_rate": Column(float, checks=_non_negative_checks, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+# ===========================================================================
+# 6. Stock Holders & Capital Events — #29 Split Tables (8 tables)
+# ===========================================================================
+CN_STOCK_HOLDER_NUM_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "end_date": _date_column(),
+        "holder_num": Column(int, checks=Check.ge(1), nullable=False),
+        "holder_num_chg_pct": Column(float, nullable=True),
+        "avg_hold_shares": Column(float, checks=_non_negative_checks, nullable=True),
+    },
+    unique=["ticker", "end_date", "ann_date"],
+)
+
+CN_STOCK_TOP_HOLDERS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "end_date": _date_column(),
+        "holder_scope": Column(
+            str,
+            checks=Check.isin(["top10", "free_top10"], name="holder_scope"),
+            nullable=False,
+        ),
+        "rank": Column(int, checks=Check.ge(1), nullable=False),
+        "holder_name": Column(str, nullable=False),
+        "holder_type": Column(str, nullable=True),
+        "hold_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "hold_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "hold_change": Column(float, nullable=True),
+    },
+    unique=["ticker", "end_date", "holder_scope", "rank", "holder_name"],
+)
+
+CN_STOCK_RESTRICTED_RELEASE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "ann_date": _date_column(nullable=True),
+        "float_date": _date_column(),
+        "holder_name": Column(str, nullable=False),
+        "float_share": Column(float, checks=_non_negative_checks, nullable=False),
+        "float_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "share_type": Column(str, nullable=False),
+        "is_announced": Column(bool, nullable=False),
+    },
+    unique=["ticker", "float_date", "holder_name", "share_type"],
+)
+
+CN_STOCK_BLOCK_TRADE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "seq": Column(int, checks=Check.ge(0), nullable=False),
+        "price": Column(float, checks=_ohlcv_checks, nullable=False),
+        "vol": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "discount_rate": Column(float, nullable=True),
+        "buyer": Column(str, nullable=True),
+        "seller": Column(str, nullable=True),
+    },
+    unique=["ticker", "trade_date", "seq"],
+)
+
+CN_STOCK_REPURCHASE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "end_date": _date_column(nullable=True),
+        "proc": Column(str, nullable=False),
+        "exp_date": _date_column(nullable=True),
+        "vol": Column(float, checks=_non_negative_checks, nullable=True),
+        "amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "high_limit": Column(float, checks=_non_negative_checks, nullable=True),
+        "low_limit": Column(float, checks=_non_negative_checks, nullable=True),
+    },
+    unique=["ticker", "ann_date", "proc"],
+)
+
+CN_STOCK_HOLDER_TRADE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "holder_name": Column(str, nullable=False),
+        "holder_type": Column(str, nullable=True),
+        "in_de": Column(
+            str,
+            checks=Check.isin(["IN", "DE"], name="in_de"),
+            nullable=False,
+        ),
+        "change_vol": Column(float, checks=_non_negative_checks, nullable=True),
+        "change_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "after_share": Column(float, checks=_non_negative_checks, nullable=True),
+        "avg_price": Column(float, checks=_non_negative_checks, nullable=True),
+        "begin_date": _date_column(nullable=True),
+        "close_date": _date_column(nullable=True),
+    },
+    unique=["ticker", "ann_date", "holder_name", "in_de"],
+)
+
+CN_STOCK_PLEDGE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "holder_name": Column(str, nullable=False),
+        "pledge_amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "start_date": _date_column(),
+        "end_date": _date_column(nullable=True),
+        "is_release": Column(bool, nullable=False),
+        "pledge_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "freeze_type": Column(str, nullable=True),
+    },
+    unique=["ticker", "ann_date", "holder_name", "start_date"],
+)
+
+CN_STOCK_RESEARCH_VISITS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "surv_date": _date_column(),
+        "rece_place": Column(str, nullable=True),
+        "rece_mode": Column(str, nullable=True),
+        "org_name": Column(str, nullable=False),
+        "org_type": Column(str, nullable=True),
+        "fund_visitors": Column(str, nullable=True),
+    },
+    unique=["ticker", "surv_date", "org_name"],
+)
+
+# ===========================================================================
+# 7. Stock Tick & L2 (2 tables)
+# ===========================================================================
+CN_STOCK_TICK_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "datetime": _datetime_column(),
+        "seq": Column(int, checks=Check.ge(0), nullable=False),
+        "price": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "bs_flag": Column(str, checks=_bs_flag_check, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "seq"],
+)
+
+_stock_l2_book: dict[str, Column] = {}
+for _lvl in range(1, 11):
+    _stock_l2_book[f"bid_price_{_lvl}"] = Column(
+        float, checks=_non_negative_checks, nullable=False
+    )
+    _stock_l2_book[f"bid_volume_{_lvl}"] = Column(
+        int, checks=_non_negative_checks, nullable=False
+    )
+    _stock_l2_book[f"ask_price_{_lvl}"] = Column(
+        float, checks=_non_negative_checks, nullable=False
+    )
+    _stock_l2_book[f"ask_volume_{_lvl}"] = Column(
+        int, checks=_non_negative_checks, nullable=False
+    )
+
+CN_STOCK_TICK_L2_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "datetime": _datetime_column(),
+        "seq": Column(int, checks=Check.ge(0), nullable=False),
+        "last_price": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "num_trades": Column(float, checks=_non_negative_checks, nullable=True),
+        **_stock_l2_book,
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "seq"],
+)
+
+# ===========================================================================
+# 8. Independent ETF Domain (5 tables, cn_etf_pcf excluded)
+# ===========================================================================
+CN_ETF_BASIC_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_etf_ticker_check, nullable=False),
+        "name": Column(str, nullable=False),
+        "exchange": Column(str, checks=_exchange_check, nullable=False),
+        "management": Column(str, nullable=True),
+        "index_code": Column(str, nullable=True),
+        "index_name": Column(str, nullable=True),
+        "etf_type": Column(str, nullable=True),
+        "setup_date": _date_column(nullable=True),
+        "list_date": _date_column(nullable=True),
+        "delist_date": _date_column(nullable=True),
+        "m_fee": Column(float, checks=_non_negative_checks, nullable=True),
+        "c_fee": Column(float, checks=_non_negative_checks, nullable=True),
+    },
+    unique=["ticker"],
+)
+
+CN_ETF_BARS_DAILY_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_etf_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "adjfactor": Column(float, checks=_ohlcv_checks, nullable=False),
+        "turnover": Column(float, checks=_non_negative_checks, nullable=True),
+        "suspend": Column(bool, nullable=False),
+        "is_limit_up": Column(bool, nullable=False),
+        "is_limit_down": Column(bool, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CN_ETF_BARS_MINUTE_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_etf_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "datetime": _datetime_column(),
+        "open": Column(float, checks=_ohlcv_checks, nullable=False),
+        "high": Column(float, checks=_ohlcv_checks, nullable=False),
+        "low": Column(float, checks=_ohlcv_checks, nullable=False),
+        "close": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "datetime"],
+)
+
+CN_ETF_FUNDAMENTAL_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_etf_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "unit_nav": Column(float, checks=_ohlcv_checks, nullable=True),
+        "accum_nav": Column(float, checks=_ohlcv_checks, nullable=True),
+        "nav_adj_factor": Column(float, checks=_ohlcv_checks, nullable=True),
+        "iopv": Column(float, checks=_ohlcv_checks, nullable=True),
+        "total_shares": Column(float, checks=_non_negative_checks, nullable=True),
+        "total_nav": Column(float, checks=_non_negative_checks, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date"],
+)
+
+CN_ETF_TICK_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_etf_ticker_check, nullable=False),
+        "trade_date": _date_column(),
+        "datetime": _datetime_column(),
+        "seq": Column(int, checks=Check.ge(0), nullable=False),
+        "price": Column(float, checks=_ohlcv_checks, nullable=False),
+        "volume": Column(int, checks=_non_negative_checks, nullable=False),
+        "amount": Column(float, checks=_non_negative_checks, nullable=False),
+        "bs_flag": Column(str, checks=_bs_flag_check, nullable=False),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "trade_date", "seq"],
+)
+
+# ===========================================================================
+# 9. OTC & Listed Public Mutual Funds (5 tables)
+# ===========================================================================
+CN_FUND_BASIC_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_fund_ticker_check, nullable=False),
+        "name": Column(str, nullable=False),
+        "market": Column(
+            str, checks=Check.isin(["O", "E"], name="fund_market"), nullable=False
+        ),
+        "management": Column(str, nullable=True),
+        "custodian": Column(str, nullable=True),
+        "fund_type": Column(str, nullable=True),
+        "invest_type": Column(str, nullable=True),
+        "found_date": _date_column(nullable=True),
+        "list_date": _date_column(nullable=True),
+        "delist_date": _date_column(nullable=True),
+        "m_fee": Column(float, checks=_non_negative_checks, nullable=True),
+        "c_fee": Column(float, checks=_non_negative_checks, nullable=True),
+        "benchmark": Column(str, nullable=True),
+    },
+    unique=["ticker"],
+)
+
+CN_FUND_MANAGERS_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_fund_ticker_check, nullable=False),
+        "ann_date": _date_column(nullable=True),
+        "name": Column(str, nullable=False),
+        "gender": Column(str, nullable=True),
+        "edu": Column(str, nullable=True),
+        "begin_date": _date_column(),
+        "end_date": _date_column(nullable=True),
+    },
+    unique=["ticker", "name", "begin_date"],
+)
+
+CN_FUND_NAV_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_fund_ticker_check, nullable=False),
+        "nav_date": _date_column(),
+        "ann_date": _date_column(nullable=True),
+        "unit_nav": Column(float, checks=_ohlcv_checks, nullable=False),
+        "accum_nav": Column(float, checks=_ohlcv_checks, nullable=True),
+        "adj_nav": Column(float, checks=_ohlcv_checks, nullable=True),
+        "nav_adj_factor": Column(float, checks=_ohlcv_checks, nullable=True),
+        "total_shares": Column(float, checks=_non_negative_checks, nullable=True),
+        "total_netasset": Column(float, checks=_non_negative_checks, nullable=True),
+        "quality_flag": _quality_flag_column(),
+    },
+    unique=["ticker", "nav_date"],
+)
+
+CN_FUND_DIVIDEND_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_fund_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "record_date": _date_column(nullable=True),
+        "ex_date": _date_column(),
+        "pay_date": _date_column(nullable=True),
+        "div_cash": Column(float, checks=_non_negative_checks, nullable=True),
+        "div_proc": Column(str, nullable=True),
+    },
+    unique=["ticker", "ex_date", "ann_date"],
+)
+
+CN_FUND_PORTFOLIO_SCHEMA = _table(
+    {
+        "ticker": Column(str, checks=_fund_ticker_check, nullable=False),
+        "ann_date": _date_column(),
+        "end_date": _date_column(),
+        "symbol": Column(str, nullable=False),
+        "asset_class": Column(
+            str,
+            checks=Check.isin(["stock", "bond", "fund", "other"], name="asset_class"),
+            nullable=False,
+        ),
+        "mkv": Column(float, checks=_non_negative_checks, nullable=True),
+        "amount": Column(float, checks=_non_negative_checks, nullable=True),
+        "stk_mkv_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "stk_float_ratio": Column(float, checks=_non_negative_checks, nullable=True),
+        "rank": Column(float, checks=Check.ge(1), nullable=True),
+    },
+    unique=["ticker", "end_date", "symbol"],
+)
+
+# ===========================================================================
+# 10. Futures (4 tables, preserved) & Factors (1 table, sibling dir)
+# ===========================================================================
 BARS_DAILY_FUTURES_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
@@ -382,9 +1155,6 @@ BARS_DAILY_FUTURES_SCHEMA = _table(
     unique=["ticker", "trade_date"],
 )
 
-# --- 4. tick_futures_l2 — 28 cols (Phase 2 reserved) ------------------------
-# bid_price_1~5 / bid_volume_1~5 / ask_price_1~5 / ask_volume_1~5 are five
-# independent columns each, not list-typed.  7 base + 20 book + quality_flag.
 _tick_base: dict = {
     "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
     "trade_date": _date_column(),
@@ -418,65 +1188,6 @@ TICK_FUTURES_L2_SCHEMA = _table(
     unique=["ticker", "trade_date", "datetime"],
 )
 
-# --- 5. fundamental — 11 cols, valuation ratios nullable -------------------
-FUNDAMENTAL_SCHEMA = _table(
-    {
-        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-        "trade_date": _date_column(),
-        "total_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
-        "float_market_cap": Column(float, checks=_non_negative_checks, nullable=False),
-        "pe_ttm": Column(float, nullable=True),
-        "pe_lyr": Column(float, nullable=True),
-        "pb": Column(float, nullable=True),
-        "ps_ttm": Column(float, nullable=True),
-        "total_shares": Column(int, checks=_non_negative_checks, nullable=False),
-        "float_shares": Column(int, checks=_non_negative_checks, nullable=False),
-        "quality_flag": _quality_flag_column(),
-    },
-    unique=["ticker", "trade_date"],
-)
-
-
-# --- 6. factor — 3 cols, value column named per-factor ---------------------
-_FACTOR_RESERVED_COLUMNS = frozenset({"ticker", "date"})
-
-
-def factor_schema(value_column: str = "value") -> DataFrameSchema:
-    """Schema for one factor's long-format value table.
-
-    Columns: ``ticker``, ``date``, *value_column* (nullable).
-    The value column is named after the factor (issue QUANT-12: "3 cols
-    ticker/date/{name}").  ``SCHEMA["factor"]`` uses the canonical placeholder
-    ``"value"``; T2/T3 should call this function with the real factor name.
-
-    Raises ``ValueError`` when *value_column* collides with the fixed
-    ``ticker`` / ``date`` columns (code-review finding 5).
-    """
-    if value_column in _FACTOR_RESERVED_COLUMNS:
-        raise ValueError(
-            f"value_column {value_column!r} collides with a fixed column name; "
-            f"reserved names are {sorted(_FACTOR_RESERVED_COLUMNS)}"
-        )
-    return _table(
-        {
-            "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-            "date": _date_column(),
-            value_column: Column(float, nullable=True),
-        },
-        unique=["ticker", "date"],
-    )
-
-
-# Canonical placeholder for the SCHEMA registry.
-FACTOR_SCHEMA = factor_schema()
-
-# --- 7. calendar — 1 col, per-exchange file -------------------------------
-CALENDAR_SCHEMA = _table(
-    {"trade_date": _date_column()},
-    unique=["trade_date"],
-)
-
-# --- 8. contract_specs — 12 cols, futures contract metadata ---------------
 CONTRACT_SPECS_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
@@ -495,37 +1206,6 @@ CONTRACT_SPECS_SCHEMA = _table(
     unique=["ticker"],
 )
 
-# --- 9. industry — 6 cols, l3 nullable ------------------------------------
-INDUSTRY_SCHEMA = _table(
-    {
-        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-        "industry_l1": Column(str, nullable=False),
-        "industry_l2": Column(str, nullable=False),
-        "industry_l3": Column(str, nullable=True),
-        "classification": Column(str, checks=_classification_check, nullable=False),
-        "effective_date": _date_column(),
-    },
-    unique=["ticker", "classification"],
-)
-
-# --- 10. corporate_actions — 10 cols, PK(ticker, ex_date, event_type) -----
-CORPORATE_ACTIONS_SCHEMA = _table(
-    {
-        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-        "ex_date": _date_column(),
-        "event_type": Column(str, checks=_event_type_check, nullable=False),
-        "announce_date": _date_column(nullable=True),
-        "record_date": _date_column(nullable=True),
-        "detail": Column(str, nullable=False),
-        "cash_dividend": Column(float, checks=_non_negative_checks, nullable=True),
-        "stock_dividend": Column(float, checks=_non_negative_checks, nullable=True),
-        "rights_price": Column(float, checks=_non_negative_checks, nullable=True),
-        "rights_ratio": Column(float, checks=_non_negative_checks, nullable=True),
-    },
-    unique=["ticker", "ex_date", "event_type"],
-)
-
-# --- 11. continuous — 11 cols, per-symbol file, no quality_flag -----------
 CONTINUOUS_SCHEMA = _table(
     {
         "trade_date": _date_column(),
@@ -543,24 +1223,215 @@ CONTINUOUS_SCHEMA = _table(
     unique=["trade_date"],
 )
 
+_FACTOR_RESERVED_COLUMNS = frozenset({"ticker", "date"})
 
-# ---------------------------------------------------------------------------
-# SCHEMA registry — exactly 11 tables, no more, no fewer
-# ---------------------------------------------------------------------------
-SCHEMA: dict[str, DataFrameSchema] = {
-    "bars_daily": BARS_DAILY_SCHEMA,
-    "bars_minute": BARS_MINUTE_SCHEMA,
-    "bars_daily_futures": BARS_DAILY_FUTURES_SCHEMA,
-    "tick_futures_l2": TICK_FUTURES_L2_SCHEMA,
-    "fundamental": FUNDAMENTAL_SCHEMA,
-    "factor": FACTOR_SCHEMA,
-    "calendar": CALENDAR_SCHEMA,
-    "contract_specs": CONTRACT_SPECS_SCHEMA,
-    "industry": INDUSTRY_SCHEMA,
-    "corporate_actions": CORPORATE_ACTIONS_SCHEMA,
-    "continuous": CONTINUOUS_SCHEMA,
-}
 
+def factor_schema(value_column: str = "value") -> DataFrameSchema:
+    """Schema for one factor's long-format value table (``ticker, date, {name}``)."""
+    if value_column in _FACTOR_RESERVED_COLUMNS:
+        raise ValueError(
+            f"value_column {value_column!r} collides with a fixed column name; "
+            f"reserved names are {sorted(_FACTOR_RESERVED_COLUMNS)}"
+        )
+    return _table(
+        {
+            "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+            "date": _date_column(),
+            value_column: Column(float, nullable=True),
+        },
+        unique=["ticker", "date"],
+    )
+
+
+FACTOR_SCHEMA = factor_schema()
+
+# ===========================================================================
+# Canonical Registries — 52 tables (47 A-share + 4 futures + 1 factor)
+# ===========================================================================
+PARTITION_PATHS: dict[str, str] = _AliasedDict(
+    {
+        # Calendar (1)
+        "cn_calendar": "asset/cn_calendar/{exchange}.parquet",
+        # Stock Core & Status (6)
+        "cn_stock_basic": "asset/cn_stock_basic/stock_basic.parquet",
+        "cn_stock_bars_daily": "asset/cn_stock_bars_daily/{date}.parquet",
+        "cn_stock_bars_minute": "asset/cn_stock_bars_minute/{date}.parquet",
+        "cn_stock_fundamental": "asset/cn_stock_fundamental/{month}.parquet",
+        "cn_stock_daily_status": "asset/cn_stock_daily_status/{month}.parquet",
+        "cn_stock_corporate_actions": "asset/cn_stock_corporate_actions/corporate_actions.parquet",
+        # Stock Index / Industry / Concept (4)
+        "cn_stock_index_basic": "asset/cn_stock_index_basic/index_basic.parquet",
+        "cn_stock_index_bars_daily": "asset/cn_stock_index_bars_daily/{month}.parquet",
+        "cn_stock_industry": "asset/cn_stock_industry/industry.parquet",
+        "cn_stock_index_weights": "asset/cn_stock_index_weights/{year}.parquet",
+        # Stock Fundamental PIT (7)
+        "cn_stock_fundamental_income": "asset/cn_stock_fundamental_income/{year}.parquet",
+        "cn_stock_fundamental_balance": "asset/cn_stock_fundamental_balance/{year}.parquet",
+        "cn_stock_fundamental_cashflow": "asset/cn_stock_fundamental_cashflow/{year}.parquet",
+        "cn_stock_fundamental_indicator": "asset/cn_stock_fundamental_indicator/{year}.parquet",
+        "cn_stock_fundamental_segment": "asset/cn_stock_fundamental_segment/{year}.parquet",
+        "cn_stock_fundamental_earnings": "asset/cn_stock_fundamental_earnings/{year}.parquet",
+        "cn_stock_fundamental_consensus": "asset/cn_stock_fundamental_consensus/{month}.parquet",
+        # Stock Special Flows / Sentiment / Chips (9)
+        "cn_stock_auction": "asset/cn_stock_auction/{month}.parquet",
+        "cn_stock_moneyflow": "asset/cn_stock_moneyflow/{month}.parquet",
+        "cn_stock_hsgt_market_flow": "asset/cn_stock_hsgt_market_flow/market_flow.parquet",
+        "cn_stock_hsgt_hold": "asset/cn_stock_hsgt_hold/{month}.parquet",
+        "cn_stock_margin": "asset/cn_stock_margin/{month}.parquet",
+        "cn_stock_lhb": "asset/cn_stock_lhb/{month}.parquet",
+        "cn_stock_lhb_seats": "asset/cn_stock_lhb_seats/{month}.parquet",
+        "cn_stock_limit_pool": "asset/cn_stock_limit_pool/{month}.parquet",
+        "cn_stock_chips_perf": "asset/cn_stock_chips_perf/{month}.parquet",
+        # Stock Holders & Capital Events (8)
+        "cn_stock_holder_num": "asset/cn_stock_holder_num/holder_num.parquet",
+        "cn_stock_top_holders": "asset/cn_stock_top_holders/{year}.parquet",
+        "cn_stock_restricted_release": "asset/cn_stock_restricted_release/{year}.parquet",
+        "cn_stock_block_trade": "asset/cn_stock_block_trade/block_trade.parquet",
+        "cn_stock_repurchase": "asset/cn_stock_repurchase/repurchase.parquet",
+        "cn_stock_holder_trade": "asset/cn_stock_holder_trade/{year}.parquet",
+        "cn_stock_pledge": "asset/cn_stock_pledge/{year}.parquet",
+        "cn_stock_research_visits": "asset/cn_stock_research_visits/{year}.parquet",
+        # Stock Tick & L2 (2)
+        "cn_stock_tick": "asset/cn_stock_tick/{date}.parquet",
+        "cn_stock_tick_l2": "asset/cn_stock_tick_l2/{date}.parquet",
+        # Independent ETF Domain (5)
+        "cn_etf_basic": "asset/cn_etf_basic/etf_basic.parquet",
+        "cn_etf_bars_daily": "asset/cn_etf_bars_daily/{date}.parquet",
+        "cn_etf_bars_minute": "asset/cn_etf_bars_minute/{date}.parquet",
+        "cn_etf_fundamental": "asset/cn_etf_fundamental/{month}.parquet",
+        "cn_etf_tick": "asset/cn_etf_tick/{date}.parquet",
+        # OTC & Listed Mutual Funds (5)
+        "cn_fund_basic": "asset/cn_fund_basic/fund_basic.parquet",
+        "cn_fund_managers": "asset/cn_fund_managers/managers.parquet",
+        "cn_fund_nav": "asset/cn_fund_nav/{month}.parquet",
+        "cn_fund_dividend": "asset/cn_fund_dividend/dividend.parquet",
+        "cn_fund_portfolio": "asset/cn_fund_portfolio/{year}.parquet",
+        # Futures (4) & Factors (1)
+        "cn_futures_bars_daily": "asset/cn_futures_bars_daily/{date}.parquet",
+        "cn_futures_tick_l2": "asset/cn_futures_tick_l2/{date}.parquet",
+        "cn_futures_contract_specs": "asset/cn_futures_contract_specs/contract_specs.parquet",
+        "cn_futures_continuous": "asset/cn_futures_continuous/{symbol}.parquet",
+        "factor": "factors/cn_stock_factors/{name}_v{version}/{year}.parquet",
+    }
+)
+
+TABLE_FAMILY: dict[str, str] = _AliasedDict(
+    {
+        "cn_calendar": "reference",
+        "cn_stock_basic": "stock",
+        "cn_stock_bars_daily": "stock",
+        "cn_stock_bars_minute": "stock",
+        "cn_stock_fundamental": "stock",
+        "cn_stock_daily_status": "stock",
+        "cn_stock_corporate_actions": "stock",
+        "cn_stock_index_basic": "stock",
+        "cn_stock_index_bars_daily": "stock",
+        "cn_stock_industry": "stock",
+        "cn_stock_index_weights": "stock",
+        "cn_stock_fundamental_income": "stock",
+        "cn_stock_fundamental_balance": "stock",
+        "cn_stock_fundamental_cashflow": "stock",
+        "cn_stock_fundamental_indicator": "stock",
+        "cn_stock_fundamental_segment": "stock",
+        "cn_stock_fundamental_earnings": "stock",
+        "cn_stock_fundamental_consensus": "stock",
+        "cn_stock_auction": "stock",
+        "cn_stock_moneyflow": "stock",
+        "cn_stock_hsgt_market_flow": "stock",
+        "cn_stock_hsgt_hold": "stock",
+        "cn_stock_margin": "stock",
+        "cn_stock_lhb": "stock",
+        "cn_stock_lhb_seats": "stock",
+        "cn_stock_limit_pool": "stock",
+        "cn_stock_chips_perf": "stock",
+        "cn_stock_holder_num": "stock",
+        "cn_stock_top_holders": "stock",
+        "cn_stock_restricted_release": "stock",
+        "cn_stock_block_trade": "stock",
+        "cn_stock_repurchase": "stock",
+        "cn_stock_holder_trade": "stock",
+        "cn_stock_pledge": "stock",
+        "cn_stock_research_visits": "stock",
+        "cn_stock_tick": "stock",
+        "cn_stock_tick_l2": "stock",
+        "cn_etf_basic": "etf",
+        "cn_etf_bars_daily": "etf",
+        "cn_etf_bars_minute": "etf",
+        "cn_etf_fundamental": "etf",
+        "cn_etf_tick": "etf",
+        "cn_fund_basic": "fund",
+        "cn_fund_managers": "fund",
+        "cn_fund_nav": "fund",
+        "cn_fund_dividend": "fund",
+        "cn_fund_portfolio": "fund",
+        "cn_futures_bars_daily": "futures",
+        "cn_futures_tick_l2": "futures",
+        "cn_futures_contract_specs": "futures",
+        "cn_futures_continuous": "continuous",
+        "factor": "stock",
+    }
+)
+
+SCHEMA: dict[str, DataFrameSchema] = _AliasedDict(
+    {
+        "cn_calendar": CALENDAR_SCHEMA,
+        "cn_stock_basic": CN_STOCK_BASIC_SCHEMA,
+        "cn_stock_bars_daily": BARS_DAILY_SCHEMA,
+        "cn_stock_bars_minute": BARS_MINUTE_SCHEMA,
+        "cn_stock_fundamental": FUNDAMENTAL_SCHEMA,
+        "cn_stock_daily_status": CN_STOCK_DAILY_STATUS_SCHEMA,
+        "cn_stock_corporate_actions": CORPORATE_ACTIONS_SCHEMA,
+        "cn_stock_index_basic": CN_STOCK_INDEX_BASIC_SCHEMA,
+        "cn_stock_index_bars_daily": CN_STOCK_INDEX_BARS_DAILY_SCHEMA,
+        "cn_stock_industry": INDUSTRY_SCHEMA,
+        "cn_stock_index_weights": CN_STOCK_INDEX_WEIGHTS_SCHEMA,
+        "cn_stock_fundamental_income": CN_STOCK_FUNDAMENTAL_INCOME_SCHEMA,
+        "cn_stock_fundamental_balance": CN_STOCK_FUNDAMENTAL_BALANCE_SCHEMA,
+        "cn_stock_fundamental_cashflow": CN_STOCK_FUNDAMENTAL_CASHFLOW_SCHEMA,
+        "cn_stock_fundamental_indicator": CN_STOCK_FUNDAMENTAL_INDICATOR_SCHEMA,
+        "cn_stock_fundamental_segment": CN_STOCK_FUNDAMENTAL_SEGMENT_SCHEMA,
+        "cn_stock_fundamental_earnings": CN_STOCK_FUNDAMENTAL_EARNINGS_SCHEMA,
+        "cn_stock_fundamental_consensus": CN_STOCK_FUNDAMENTAL_CONSENSUS_SCHEMA,
+        "cn_stock_auction": CN_STOCK_AUCTION_SCHEMA,
+        "cn_stock_moneyflow": CN_STOCK_MONEYFLOW_SCHEMA,
+        "cn_stock_hsgt_market_flow": CN_STOCK_HSGT_MARKET_FLOW_SCHEMA,
+        "cn_stock_hsgt_hold": CN_STOCK_HSGT_HOLD_SCHEMA,
+        "cn_stock_margin": CN_STOCK_MARGIN_SCHEMA,
+        "cn_stock_lhb": CN_STOCK_LHB_SCHEMA,
+        "cn_stock_lhb_seats": CN_STOCK_LHB_SEATS_SCHEMA,
+        "cn_stock_limit_pool": CN_STOCK_LIMIT_POOL_SCHEMA,
+        "cn_stock_chips_perf": CN_STOCK_CHIPS_PERF_SCHEMA,
+        "cn_stock_holder_num": CN_STOCK_HOLDER_NUM_SCHEMA,
+        "cn_stock_top_holders": CN_STOCK_TOP_HOLDERS_SCHEMA,
+        "cn_stock_restricted_release": CN_STOCK_RESTRICTED_RELEASE_SCHEMA,
+        "cn_stock_block_trade": CN_STOCK_BLOCK_TRADE_SCHEMA,
+        "cn_stock_repurchase": CN_STOCK_REPURCHASE_SCHEMA,
+        "cn_stock_holder_trade": CN_STOCK_HOLDER_TRADE_SCHEMA,
+        "cn_stock_pledge": CN_STOCK_PLEDGE_SCHEMA,
+        "cn_stock_research_visits": CN_STOCK_RESEARCH_VISITS_SCHEMA,
+        "cn_stock_tick": CN_STOCK_TICK_SCHEMA,
+        "cn_stock_tick_l2": CN_STOCK_TICK_L2_SCHEMA,
+        "cn_etf_basic": CN_ETF_BASIC_SCHEMA,
+        "cn_etf_bars_daily": CN_ETF_BARS_DAILY_SCHEMA,
+        "cn_etf_bars_minute": CN_ETF_BARS_MINUTE_SCHEMA,
+        "cn_etf_fundamental": CN_ETF_FUNDAMENTAL_SCHEMA,
+        "cn_etf_tick": CN_ETF_TICK_SCHEMA,
+        "cn_fund_basic": CN_FUND_BASIC_SCHEMA,
+        "cn_fund_managers": CN_FUND_MANAGERS_SCHEMA,
+        "cn_fund_nav": CN_FUND_NAV_SCHEMA,
+        "cn_fund_dividend": CN_FUND_DIVIDEND_SCHEMA,
+        "cn_fund_portfolio": CN_FUND_PORTFOLIO_SCHEMA,
+        "cn_futures_bars_daily": BARS_DAILY_FUTURES_SCHEMA,
+        "cn_futures_tick_l2": TICK_FUTURES_L2_SCHEMA,
+        "cn_futures_contract_specs": CONTRACT_SPECS_SCHEMA,
+        "cn_futures_continuous": CONTINUOUS_SCHEMA,
+        "factor": FACTOR_SCHEMA,
+    }
+)
+
+A_SHARE_TABLES: frozenset[str] = frozenset(
+    k for k in SCHEMA if not k.startswith("cn_futures_") and k != "factor"
+)
 
 # ---------------------------------------------------------------------------
 # Factor DuckDB view naming (QUANT-12 §5 decision)
@@ -569,15 +1440,7 @@ _non_alnum = re.compile(r"[^0-9a-zA-Z_]")
 
 
 def factor_view_name(factor_name: str) -> str:
-    """Return the DuckDB view name for *factor_name*.
-
-    Rule: ``factor_{sanitized}`` where every non-``[0-9a-zA-Z_]`` character
-    becomes ``_``; if the sanitized name starts with a digit, prepend ``_``.
-    The same sanitization applies to the value-column alias inside the view.
-
-    This is a pure function and does **not** detect collisions; use
-    :class:`FactorViewRegistry` when registering views at runtime.
-    """
+    """Return the DuckDB view name for *factor_name*."""
     sanitized = _non_alnum.sub("_", factor_name)
     if sanitized and sanitized[0].isdigit():
         sanitized = f"_{sanitized}"
@@ -585,21 +1448,13 @@ def factor_view_name(factor_name: str) -> str:
 
 
 class FactorViewRegistry:
-    """Collision-safe registry mapping factor names to DuckDB view names.
-
-    ``factor_view_name`` sanitizes names, so ``alpha.1`` and ``alpha_1``
-    both map to ``factor_alpha_1``.  Registering both through this
-    registry raises ``ValueError`` instead of silently overwriting.
-    """
+    """Collision-safe registry mapping factor names to DuckDB view names."""
 
     def __init__(self) -> None:
-        self._views: dict[str, str] = {}  # view_name -> factor_name
+        self._views: dict[str, str] = {}
 
     def register(self, factor_name: str) -> str:
-        """Register *factor_name* and return its view name.
-
-        Raises ``ValueError`` on collision with a different factor name.
-        """
+        """Register *factor_name* and return its view name."""
         view = factor_view_name(factor_name)
         existing = self._views.get(view)
         if existing is not None and existing != factor_name:

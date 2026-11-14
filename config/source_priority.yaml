@@ -1,38 +1,211 @@
-# Source arbitration table (QUANT-40, S10-T1).
-# Spec: docs/design/data/ingestion.md + docs/archive/OPEN_QUESTIONS.md §41.2/§41.3.
+# Source arbitration table (QUANT-40, S10-T1; expanded for 51 asset/ tables).
+# Spec: docs/design/data/ingestion.md + docs/design/data/storage_schema.md.
 #
-# One entry per asset type: priority[0] is the primary source (the only one
-# that writes the asset layer); the rest are backups that cross-check and
-# backfill gaps, never mix-write.  field_override names the source a field is
-# always taken from, regardless of row priority.  There is no automatic
-# primary election — switching a primary is a reviewed commit here.
-bars_daily:
-  priority: [tushare, akshare]
+# One entry per canonical asset table: priority[0] is the primary source (the
+# only one that writes the asset layer); the rest are backups that cross-check
+# and backfill gaps, never mix-write.  field_override names the source a field
+# is always taken from, regardless of row priority, and must appear in that
+# table's priority list.  Switching a primary is a reviewed commit here.
+#
+# Active source adapters (data/adapters/__init__.py):
+#   tushare | qdc | amazingdata | straightflush
+# (akshare remains registered only for legacy tests/fallback, retired from
+#  default priority lists.)
+
+# ---------------------------------------------------------------------------
+# 1. Calendar (1)
+# ---------------------------------------------------------------------------
+cn_calendar:
+  priority: [tushare, qdc, straightflush, amazingdata]
+
+# ---------------------------------------------------------------------------
+# 2. A-share Stock Core & Status (6)
+# ---------------------------------------------------------------------------
+cn_stock_basic:
+  priority: [tushare, amazingdata, straightflush]
+
+cn_stock_bars_daily:
+  priority: [tushare, qdc, amazingdata, straightflush]
   field_override:
-    adjfactor: tushare      # adjfactor quality is better from tushare
-bars_minute:
-  priority: [tushare]       # single source, no backup
-fundamental:
-  priority: [akshare, tushare]
+    adjfactor: tushare      # adjfactor baseline & split precision from tushare
+
+cn_stock_bars_minute:
+  priority: [qdc, tushare, amazingdata]
+
+cn_stock_fundamental:
+  priority: [tushare, qdc, straightflush]
   field_override:
     pe_ttm: tushare         # tushare's PE_TTM definition is the reference
-option_basic:
-  priority: [amazingdata]   # the only source; no backfill path
-reference:                  # per-table priority
-  calendar:
-    priority: [tushare, akshare]
-  industry:
-    priority: [tushare]
-  # Tables with no source assigned yet (QUANT-40: left empty on purpose,
-  # listed in the PR description): contract_specs, corporate_actions.
-  contract_specs:
-    priority: []
-  corporate_actions:
-    priority: []
 
+cn_stock_daily_status:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_corporate_actions:
+  priority: [tushare, qdc, amazingdata]
+
+# ---------------------------------------------------------------------------
+# 3. Stock Index / Industry / Concept (4)
+# ---------------------------------------------------------------------------
+cn_stock_index_basic:
+  priority: [tushare, qdc, straightflush, amazingdata]
+
+cn_stock_index_bars_daily:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_stock_industry:
+  priority: [tushare, qdc, straightflush]
+
+cn_stock_index_weights:
+  priority: [tushare, qdc, amazingdata]
+
+# ---------------------------------------------------------------------------
+# 4. Stock Fundamental PIT (7)
+# ---------------------------------------------------------------------------
+cn_stock_fundamental_income:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_stock_fundamental_balance:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_stock_fundamental_cashflow:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_stock_fundamental_indicator:
+  priority: [tushare, qdc, straightflush]
+
+cn_stock_fundamental_segment:
+  priority: [tushare, qdc]
+
+cn_stock_fundamental_earnings:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_fundamental_consensus:
+  priority: [qdc, tushare]   # QDC cn_estimates delivers PIT daily consensus
+
+# ---------------------------------------------------------------------------
+# 5. Stock Special Flows / Sentiment / Chips (9)
+# ---------------------------------------------------------------------------
+cn_stock_auction:
+  priority: [tushare, qdc, straightflush]
+
+cn_stock_moneyflow:
+  priority: [tushare, qdc]
+
+cn_stock_hsgt_market_flow:
+  priority: [tushare, qdc]
+
+cn_stock_hsgt_hold:
+  priority: [tushare, qdc]
+
+cn_stock_margin:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_lhb:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_stock_lhb_seats:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_stock_limit_pool:
+  priority: [tushare, qdc, straightflush]
+
+cn_stock_chips_perf:
+  priority: [tushare, qdc]
+
+# ---------------------------------------------------------------------------
+# 6. Stock Holders & Capital Events — #29 Split Tables (8)
+# ---------------------------------------------------------------------------
+cn_stock_holder_num:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_top_holders:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_restricted_release:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_block_trade:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_repurchase:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_holder_trade:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_pledge:
+  priority: [tushare, qdc, amazingdata]
+
+cn_stock_research_visits:
+  priority: [tushare, qdc]
+
+# ---------------------------------------------------------------------------
+# 7. Stock Tick & L2 (2)
+# ---------------------------------------------------------------------------
+cn_stock_tick:
+  priority: [qdc, amazingdata]
+
+cn_stock_tick_l2:
+  priority: [qdc, amazingdata]
+
+# ---------------------------------------------------------------------------
+# 8. Independent ETF Domain (5, cn_etf_pcf excluded)
+# ---------------------------------------------------------------------------
+cn_etf_basic:
+  priority: [tushare, amazingdata, straightflush]
+
+cn_etf_bars_daily:
+  priority: [tushare, qdc, amazingdata, straightflush]
+  field_override:
+    adjfactor: tushare
+
+cn_etf_bars_minute:
+  priority: [qdc, tushare, amazingdata]
+
+cn_etf_fundamental:
+  priority: [tushare, qdc, amazingdata]
+
+cn_etf_tick:
+  priority: [qdc, amazingdata]
+
+# ---------------------------------------------------------------------------
+# 9. OTC & Listed Public Mutual Funds (5)
+# ---------------------------------------------------------------------------
+cn_fund_basic:
+  priority: [tushare, straightflush]
+
+cn_fund_managers:
+  priority: [tushare, straightflush]
+
+cn_fund_nav:
+  priority: [tushare, straightflush]
+
+cn_fund_dividend:
+  priority: [tushare, straightflush]
+
+cn_fund_portfolio:
+  priority: [tushare, qdc, straightflush]
+
+# ---------------------------------------------------------------------------
+# 10. Futures (4)
+# ---------------------------------------------------------------------------
+cn_futures_bars_daily:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_futures_tick_l2:
+  priority: [qdc, amazingdata]
+
+cn_futures_contract_specs:
+  priority: [tushare, qdc, amazingdata, straightflush]
+
+cn_futures_continuous:
+  priority: [tushare, qdc, straightflush]
+
+# ---------------------------------------------------------------------------
 # Cross-check tolerance per field class (§41.3).  price and adjfactor are
 # absolute; volume, amount, pe_pb and default are relative.  Field -> class
 # mapping lives in data/ingestion.py (TOLERANCE_CLASS).
+# ---------------------------------------------------------------------------
 cross_check:
   tolerances:
     price: 0.01

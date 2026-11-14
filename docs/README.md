@@ -13,8 +13,9 @@
 ```
 design/
 ├── ARCHITECTURE.md          —— 唯一权威架构总纲，五域骨架与主链契约的裁定依据
+├── README.md                —— design/ 目录结构与 52 张规范表分域文档导航
 ├── core/
-│   ├── asset_rules.md       —— 多资产交易规则查表：T+1、手数、印花税、涨跌停
+│   ├── asset_rules.md       —— 多资产交易规则查表与代码前缀校验（T+1/手数/印花税/涨跌停/92·52·53·55 段）
 │   ├── config.md            —— 三层 TOML + .env 配置加载，含 config_snapshot 快照
 │   ├── logging.md           —— Python logging + JSONL 运行记录，logs/runs/ 分类落盘
 │   ├── registry.md          —— FactorRegistry 注册与状态管理（draft → production → deprecated）
@@ -27,13 +28,22 @@ design/
 │   ├── dqc_rules.md             —— 44 条数据质量规则（27 HARD / 17 SOFT），按资产 YAML 配置
 │   ├── dqc_runtime.md           —— DQC 执行时机、报告表结构、性能预算
 │   ├── dqc_severity.md          —— HARD/SOFT 分级处置、QualityFlag 位掩码、批量拒收
-│   ├── ingestion.md             —— 多源数据仲裁与优先级管理（source_priority.yaml）
+│   ├── ingestion.md             —— 多源数据仲裁与优先级管理（51 张 asset 表，config/source_priority.yaml）
 │   ├── level2_data.md           —— Level-2 / tick 数据存储因子与数据接口
 │   ├── QDC_ingestion_contract.md —— QDCData → Data 落盘布局与字段映射契约（M1 binding）
 │   ├── quarantine_raw.md        —— 隔离区与原始层管理、Normalizer 标准化
 │   ├── source_adapter.md        —— 每数据源一个子类，fetch() 返回原始 DataFrame
 │   ├── storage_ops.md           —— 原子写入、FileLock、生命周期管理、备份策略
-│   └── storage_schema.md        —— Parquet + DuckDB 存储 schema，11 张核心表与演进规则
+│   ├── storage_schema.md        —— Parquet + DuckDB 存储 schema，52 张规范表（47 A 股 + 4 期货 + 1 因子）与演进规则
+│   └── asset/                   —— asset/ 51 张规范表分域字段字典
+│       ├── README.md                        —— 资产域索引与通用类型/校验约定
+│       ├── 01-stock-core-and-status.md      —— 日历 + 股票核心行情、估值与日频风控状态（7 张）
+│       ├── 02-stock-index-and-board.md      —— 指数、行业分类与成分权重（4 张）
+│       ├── 03-stock-fundamental-pit.md      —— PIT 财务三表、指标、分部、业绩与一致预期（7 张）
+│       ├── 04-stock-flows-and-events.md     —— 资金流/情绪/筹码 + #29 股东资本事件拆表（17 张）
+│       ├── 05-stock-tick-l2.md              —— 股票逐笔成交与十档 L2 盘口（2 张）
+│       ├── 06-etf-and-fund.md               —— 独立 ETF 域（5 张）+ 场外/LOF 公募基金（5 张）
+│       └── 07-futures.md                    —— 期货日线、五档 L2、合约规格与主连（4 张）
 ├── research/
 │   ├── alpha_signal.md          —— 统一信号层 AlphaSignal，score → 权重转换
 │   ├── alpha_type.md            —— 策略配方治理：注册、七维标签、生命周期

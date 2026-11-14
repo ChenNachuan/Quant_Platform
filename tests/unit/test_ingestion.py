@@ -1,4 +1,4 @@
-"""Unit tests for data.ingestion (QUANT-40, S10-T1).
+"""Unit tests for data.ingestion (QUANT-40, S10-T1 + 51-table expansion).
 
 Three groups per the issue deliverables — tolerance five tiers, adjfactor
 always warns, fallback source_tag in Parquet metadata — plus the tiered
@@ -24,6 +24,7 @@ from data.ingestion import (
     get_field_overrides,
     get_primary_source,
     get_source_priority,
+    load_source_priority,
     raw_exists,
     respond,
     response_level,
@@ -33,6 +34,7 @@ from data.ingestion import (
 )
 from data.raw import raw_path
 from data.storage_ops import DiskFullError
+from data.storage_schema import PARTITION_PATHS
 
 TRADE_DATE = date(2024, 6, 14)
 
@@ -274,11 +276,11 @@ class TestOneSidedNaNSemantics:
 # ---------------------------------------------------------------------------
 class TestFallbackSourceTag:
     def test_backfill_source_tag_format(self):
-        assert backfill_source_tag("akshare") == "akshare:backfill"
+        assert backfill_source_tag("qdc") == "qdc:backfill"
 
     def test_backfill_tag_lands_in_metadata_not_columns(self, tmp_path):
         df = _bars_frame(n=5)
-        tag = backfill_source_tag("akshare")
+        tag = backfill_source_tag("qdc")
         path = write_asset(df, "bars_daily", TRADE_DATE, tag, data_root=tmp_path)
         assert path == tmp_path / "asset" / "cn_stock_bars_daily" / "2024-06-14.parquet"
         assert path.exists()
@@ -289,7 +291,7 @@ class TestFallbackSourceTag:
         assert len(written) == 5
 
         meta = pq.read_schema(path).metadata
-        assert meta[b"source_tag"].decode("utf-8") == "akshare:backfill"
+        assert meta[b"source_tag"].decode("utf-8") == "qdc:backfill"
         datetime.fromisoformat(meta[b"ingest_time"].decode("utf-8"))
 
     def test_normal_ingest_tag_round_trips(self, tmp_path):
@@ -348,18 +350,41 @@ class TestTieredResponse:
 # source_priority.yaml loaders + trigger hook
 # ---------------------------------------------------------------------------
 class TestSourcePriorityConfig:
-    def test_loaders(self):
+    def test_all_asset_tables_present(self):
+        cfg = load_source_priority()
+        asset_tables = {k for k in PARTITION_PATHS if k != "factor"}
+        assert len(asset_tables) == 51
+        missing = asset_tables - (set(cfg) - {"cross_check"})
+        assert not missing, f"missing in source_priority.yaml: {sorted(missing)}"
+
+    def test_loaders_canonical_and_legacy_aliases(self):
+        assert get_primary_source("cn_stock_bars_daily") == "tushare"
         assert get_primary_source("bars_daily") == "tushare"
-        assert get_source_priority("fundamental") == ["akshare", "tushare"]
+        assert get_source_priority("cn_stock_bars_daily") == [
+            "tushare",
+            "qdc",
+            "amazingdata",
+            "straightflush",
+        ]
+        assert get_source_priority("fundamental") == ["tushare", "qdc", "straightflush"]
         assert get_field_overrides("bars_daily") == {"adjfactor": "tushare"}
+        assert get_field_overrides("cn_etf_bars_daily") == {"adjfactor": "tushare"}
         assert get_field_overrides("bars_minute") == {}
-        assert get_source_priority("reference", "calendar") == ["tushare", "akshare"]
+        assert get_source_priority("reference", "calendar") == [
+            "tushare",
+            "qdc",
+            "straightflush",
+            "amazingdata",
+        ]
+        assert get_primary_source("cn_stock_fundamental_consensus") == "qdc"
+        assert get_primary_source("cn_stock_tick") == "qdc"
+        assert get_primary_source("cn_etf_tick") == "qdc"
 
     def test_field_override_source_must_be_in_priority(self, tmp_path):
         bad = tmp_path / "source_priority.yaml"
         bad.write_text(
-            "bars_daily:\n"
-            "  priority: [tushare, akshare]\n"
+            "cn_stock_bars_daily:\n"
+            "  priority: [tushare, qdc]\n"
             "  field_override:\n"
             "    adjfactor: amazingdata\n",
             encoding="utf-8",
@@ -369,31 +394,50 @@ class TestSourcePriorityConfig:
 
 
 class TestShouldCrossCheckHook:
-    def test_fires_only_when_primary_done_and_backup_raw_arrived(self, tmp_path):
-        backup_raw = raw_path("akshare", "bars_daily", TRADE_DATE, tmp_path)
-        backup_raw.parent.mkdir(parents=True, exist_ok=True)
-
+    def test_fires_only_when_primary_done_and_all_backups_raw_arrived(self, tmp_path):
+        backups = ["qdc", "amazingdata", "straightflush"]
         assert not should_cross_check(
             "tushare", "bars_daily", TRADE_DATE, data_root=tmp_path
         )
 
-        backup_raw.touch()
+        # Partial backups still do not trigger
+        first = raw_path(backups[0], "bars_daily", TRADE_DATE, tmp_path)
+        first.parent.mkdir(parents=True, exist_ok=True)
+        first.touch()
+        assert not should_cross_check(
+            "tushare", "bars_daily", TRADE_DATE, data_root=tmp_path
+        )
+
+        for b in backups[1:]:
+            p = raw_path(b, "bars_daily", TRADE_DATE, tmp_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.touch()
+
         assert should_cross_check(
             "tushare", "bars_daily", TRADE_DATE, data_root=tmp_path
         )
-        assert raw_exists("akshare", "bars_daily", TRADE_DATE, data_root=tmp_path)
+        assert raw_exists("qdc", "bars_daily", TRADE_DATE, data_root=tmp_path)
 
     def test_backup_ingest_never_triggers(self, tmp_path):
-        backup_raw = raw_path("akshare", "bars_daily", TRADE_DATE, tmp_path)
-        backup_raw.parent.mkdir(parents=True, exist_ok=True)
-        backup_raw.touch()
+        for b in ("qdc", "amazingdata", "straightflush"):
+            p = raw_path(b, "bars_daily", TRADE_DATE, tmp_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.touch()
         assert not should_cross_check(
-            "akshare", "bars_daily", TRADE_DATE, data_root=tmp_path
+            "qdc", "bars_daily", TRADE_DATE, data_root=tmp_path
         )
 
-    def test_single_source_asset_never_cross_checks(self, tmp_path):
+    def test_single_source_asset_never_cross_checks(self, tmp_path, monkeypatch):
+        single = tmp_path / "source_priority.yaml"
+        single.write_text(
+            "cn_stock_bars_minute:\n  priority: [qdc]\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "data.ingestion._resolve_source_priority_path", lambda path=None: single
+        )
         assert not should_cross_check(
-            "tushare", "bars_minute", TRADE_DATE, data_root=tmp_path
+            "qdc", "bars_minute", TRADE_DATE, data_root=tmp_path
         )
 
 
@@ -402,8 +446,8 @@ class TestShouldCrossCheckHook:
 # ---------------------------------------------------------------------------
 class TestOcrRegressions:
     def test_should_cross_check_unarbitrated_types_return_false(self, tmp_path):
-        # factor / futures / per-table reference are not arbitrated by the
-        # YAML — the hook answers False instead of raising (finding 1).
+        # factor / bare reference are not arbitrated by the YAML; futures
+        # without arrived backup raw also answers False instead of raising.
         assert not should_cross_check(
             "tushare", "factor", TRADE_DATE, data_root=tmp_path
         )
@@ -458,11 +502,23 @@ class TestOcrRegressions:
 
 def test_numeric_fields_cover_the_multi_source_asset_types():
     # The participating-field lists (§41 open item) must exist for every
-    # asset type the priority table arbitrates.
-    for asset_type in ("bars_daily", "bars_minute", "fundamental", "option_basic"):
+    # asset table and preserve legacy aliases.
+    for asset_type in (
+        "bars_daily",
+        "bars_minute",
+        "fundamental",
+        "cn_stock_bars_daily",
+        "cn_etf_bars_daily",
+        "cn_etf_fundamental",
+        "cn_fund_nav",
+        "cn_stock_fundamental_income",
+        "option_basic",
+    ):
         assert asset_type in NUMERIC_FIELDS
     assert "adjfactor" in NUMERIC_FIELDS["bars_daily"]
     assert "adjfactor" not in NUMERIC_FIELDS["bars_minute"]
+    assert "adjfactor" in NUMERIC_FIELDS["cn_etf_bars_daily"]
+    assert "adjfactor" not in NUMERIC_FIELDS["cn_etf_bars_minute"]
 
 
 class TestMonthlyPartitionWrite:
@@ -476,7 +532,7 @@ class TestMonthlyPartitionWrite:
         f2 = _fundamental_frame(n=2, trade_date=d2, pe_ttm=22.0)
         f2["ticker"] = ["000001.SZ", "600519.SH"]
 
-        p1 = write_asset(f1, "fundamental", d1, "akshare", data_root=tmp_path)
+        p1 = write_asset(f1, "fundamental", d1, "qdc", data_root=tmp_path)
         p2 = write_asset(f2, "fundamental", d2, "tushare", data_root=tmp_path)
 
         assert p1 == p2
@@ -489,7 +545,7 @@ class TestMonthlyPartitionWrite:
         # Re-writing d1 replaces only d1 rows, keeping d2 intact.
         f1_updated = _fundamental_frame(n=2, trade_date=d1, pe_ttm=35.0)
         f1_updated["ticker"] = ["000001.SZ", "600519.SH"]
-        write_asset(f1_updated, "fundamental", d1, "akshare", data_root=tmp_path)
+        write_asset(f1_updated, "fundamental", d1, "qdc", data_root=tmp_path)
         stored2 = pd.read_parquet(p1)
         assert len(stored2) == 4
         d1_rows = stored2[pd.to_datetime(stored2["trade_date"]).dt.date == d1]

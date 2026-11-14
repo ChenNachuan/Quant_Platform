@@ -2,9 +2,9 @@
 
 > 状态：V1实施完成，验收迁移中
 > 
-> 最后更新：2026-11-08
+> 最后更新：2026-11-14
 
-这份文档是平台架构的**唯一权威总纲**：范式、边界、跨域契约、选型定稿。各域细节见 `design/<域>/` 下的模块文档（39 份，文件名与未来代码模块同名）；现行代码放置规则见 [PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)。
+这份文档是平台架构的**唯一权威总纲**：范式、边界、跨域契约、选型定稿。各域细节见 `design/<域>/` 下的模块文档（40 份模块设计 + [data/asset/](data/asset/README.md) 8 份分域表字典，完整索引见 [design/README.md](README.md)）；现行代码放置规则见 [PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)。
 
 ---
 
@@ -87,7 +87,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 | 维度 | 选型 | 否决项 | 详情 |
 |---|---|---|---|
 | 回测引擎 | pandas自研 SimBroker/QmtBroker | backtrader/vnpy（事件驱动不需要）；VectorBT 留 V2 备选 | [execution/broker.md](execution/broker.md) |
-| 存储 | Parquet + DuckDB 持久化 catalog.duckdb | ClickHouse、DuckDB 纯内存模式 | [data/storage_schema.md](data/storage_schema.md) |
+| 存储 | Parquet + DuckDB 持久化 `catalog.duckdb`（`asset/` 51 表与 `factors/` 1 表平级，无 `ext/` 顶层） | ClickHouse、DuckDB 纯内存模式、混合目录 `cn_reference/` | [data/storage_schema.md](data/storage_schema.md)、[data/asset/](data/asset/README.md) |
 | 数据接入 | SourceAdapter 四方法 + watermark | - | [data/source_adapter.md](data/source_adapter.md) |
 | 因子评价 | alphalens-reloaded 0.4.6 | alphalens 原版（不维护） | [research/factor_evaluation.md](research/factor_evaluation.md) |
 | 配置 | TOML 三层 + .env + git | YAML（on→True 陷阱）；配置中心（单机不需要） | [core/config.md](core/config.md) |
@@ -135,5 +135,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 
 ## 8. 文档地图
 
-- 各域模块文档见[README.md](../README.md)
-- 现行代码放置规则[PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)
+- 设计文档分域索引见 [design/README.md](README.md)
+- 资产表逐字段字典见 [data/asset/README.md](data/asset/README.md)
+- 仓库文档总目录见 [docs/README.md](../README.md)
+- 现行代码放置规则见 [PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)

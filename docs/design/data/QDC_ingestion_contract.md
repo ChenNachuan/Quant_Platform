@@ -29,24 +29,26 @@
 
 ## 2. 落盘布局（schema 层 + ext 层 + manifest）
 
-### 2.1 schema 层——pandera 可校验的 11 张表
+### 2.1 schema 层——pandera 可校验表（全库 52 张，batch-1 落地 5 张）
 
-路径与 `data/storage_schema.py::PARTITION_PATHS` 逐字一致。batch-1 落其中 5 张；其余 6 张留给后续批次，路径先占位不落数。
+路径与 `data/storage_schema.py::PARTITION_PATHS` 逐字一致。batch-1 落其中 5 张；其余 47 张规范表留给后续批次，路径先占位不落数。
 
 | 平台表 | 落盘路径（相对 `L`） | batch-1 写者 | 源 |
 |---|---|---|---|
 | bars_daily | `asset/cn_stock_bars_daily/{date}.parquet` | M2（价量）+ M3（adjfactor 更新） | cn_daily_full、cn_etf_1d、cn_adj_factor |
 | fundamental | `asset/cn_stock_fundamental/{month}.parquet` | M5（股票域）+ M2（基金域） | cn_valuation_1d、imai_etf、cn_etf_1d（close 派生） |
 | calendar | `asset/cn_calendar/{exchange}.parquet` | M4（**只写 manifest，不落行**） | ——（§5 I-2） |
-| industry | `asset/cn_reference/industry.parquet` | M4 | cn_sw_index/index_member_history |
-| corporate_actions | `asset/cn_reference/corporate_actions.parquet` | M3 | cn_dividend |
-| bars_minute / bars_daily_futures / tick_futures_l2 / factor / contract_specs / continuous | 同 `PARTITION_PATHS` | 非 batch-1 | —— |
+| industry | `asset/cn_stock_industry/industry.parquet` | M4 | cn_sw_index/index_member_history |
+| corporate_actions | `asset/cn_stock_corporate_actions/corporate_actions.parquet` | M3 | cn_dividend |
+| 其余 47 张规范表（`cn_stock_*` / `cn_etf_*` / `cn_fund_*` / `cn_futures_*` / `factor`） | 同 `PARTITION_PATHS` | 非 batch-1 | —— |
 
 `{date}` 为交易日 `YYYY-MM-DD`；一文件一交易日（bars_daily）。
 `{month}` 为自然月 `YYYY-MM`；一文件一自然月、按 `trade_date` 原子合并写入（fundamental）。
 `{exchange}` 为交易所代码（calendar，batch-1 恒空）。
 
 ### 2.2 ext 层——schema 表示不了、但必须落盘留痕的源表
+
+> **架构演进注**：v2 架构已取消独立 `ext/` 顶层，将原 ext 扩展表统一纳入 `asset/` 下的 51 张规范表（`cn_stock_*` / `cn_etf_*` / `cn_fund_*`），`factors/` 与 `asset/` 同级。下述 M1 历史路径仅作迁移批次过渡说明。
 
 ```
 L/ext/<dataset>/<subtable>/<volume>.parquet

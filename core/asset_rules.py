@@ -20,7 +20,7 @@ ASSET_RULES: dict[str, dict] = {
             "main": 0.10,  # main board 60/00
             "gem": 0.20,  # ChiNext 30
             "star": 0.20,  # STAR Market 68
-            "bse": 0.30,  # Beijing Stock Exchange 8
+            "bse": 0.30,  # Beijing Stock Exchange 8/4/92
         },
         "st_limit": 0.05,  # ST +/-5%
         "short": False,  # short selling prohibited
@@ -76,6 +76,9 @@ PREFIX_RULES: dict[str, tuple[AssetType, str]] = {
     "60": (AssetType.STOCK, "SH"),  # main board
     "68": (AssetType.STOCK, "SH"),  # STAR Market
     "51": (AssetType.ETF, "SH"),  # traditional ETF
+    "52": (AssetType.ETF, "SH"),  # SSE ETF segment (observed in QDCData)
+    "53": (AssetType.ETF, "SH"),  # SSE ETF segment (observed in QDCData)
+    "55": (AssetType.ETF, "SH"),  # SSE ETF segment (observed in QDCData)
     "56": (AssetType.ETF, "SH"),  # new numbering segment
     "58": (AssetType.ETF, "SH"),  # STAR / cross-market ETF
     "50": (AssetType.FUND, "SH"),  # Shanghai LOF / closed-end fund (501xxx/502xxx)
@@ -85,6 +88,7 @@ PREFIX_RULES: dict[str, tuple[AssetType, str]] = {
     "15": (AssetType.ETF, "SZ"),  # Shenzhen ETF
     "16": (AssetType.FUND, "SZ"),  # LOF / structured fund
     # Beijing Stock Exchange
+    "92": (AssetType.STOCK, "BJ"),  # unified BSE 920xxx code
     "83": (AssetType.STOCK, "BJ"),
     "87": (AssetType.STOCK, "BJ"),
     "43": (AssetType.STOCK, "BJ"),  # V2 old third-board transfer
@@ -116,28 +120,91 @@ PREFIX_EXCHANGE: dict[str, str] = {
 #: being exhaustive.
 FUTURES_EXCHANGE: dict[str, str] = {
     # CFFEX — index & bond futures
-    "IF": "CFFEX", "IH": "CFFEX", "IC": "CFFEX", "IM": "CFFEX", "T": "CFFEX",
-    "TF": "CFFEX", "TS": "CFFEX", "TL": "CFFEX",
+    "IF": "CFFEX",
+    "IH": "CFFEX",
+    "IC": "CFFEX",
+    "IM": "CFFEX",
+    "T": "CFFEX",
+    "TF": "CFFEX",
+    "TS": "CFFEX",
+    "TL": "CFFEX",
     # SHFE — metals & chemicals
-    "CU": "SHFE", "AL": "SHFE", "ZN": "SHFE", "PB": "SHFE", "NI": "SHFE",
-    "SN": "SHFE", "AU": "SHFE", "AG": "SHFE", "RB": "SHFE", "HC": "SHFE",
-    "SS": "SHFE", "BU": "SHFE", "RU": "SHFE", "FU": "SHFE", "SP": "SHFE",
-    "BR": "SHFE", "AO": "SHFE",
+    "CU": "SHFE",
+    "AL": "SHFE",
+    "ZN": "SHFE",
+    "PB": "SHFE",
+    "NI": "SHFE",
+    "SN": "SHFE",
+    "AU": "SHFE",
+    "AG": "SHFE",
+    "RB": "SHFE",
+    "HC": "SHFE",
+    "SS": "SHFE",
+    "BU": "SHFE",
+    "RU": "SHFE",
+    "FU": "SHFE",
+    "SP": "SHFE",
+    "BR": "SHFE",
+    "AO": "SHFE",
     # DCE — agricultural & industrial
-    "M": "DCE", "Y": "DCE", "P": "DCE", "C": "DCE", "CS": "DCE", "A": "DCE",
-    "B": "DCE", "JD": "DCE", "L": "DCE", "V": "DCE", "PP": "DCE", "J": "DCE",
-    "JM": "DCE", "I": "DCE", "EG": "DCE", "EB": "DCE", "PG": "DCE", "LH": "DCE",
-    "RR": "DCE", "BB": "DCE", "FB": "DCE", "LG": "DCE",
+    "M": "DCE",
+    "Y": "DCE",
+    "P": "DCE",
+    "C": "DCE",
+    "CS": "DCE",
+    "A": "DCE",
+    "B": "DCE",
+    "JD": "DCE",
+    "L": "DCE",
+    "V": "DCE",
+    "PP": "DCE",
+    "J": "DCE",
+    "JM": "DCE",
+    "I": "DCE",
+    "EG": "DCE",
+    "EB": "DCE",
+    "PG": "DCE",
+    "LH": "DCE",
+    "RR": "DCE",
+    "BB": "DCE",
+    "FB": "DCE",
+    "LG": "DCE",
     # CZCE — agricultural & chemical
-    "SR": "CZCE", "CF": "CZCE", "ZC": "CZCE", "TA": "CZCE", "MA": "CZCE",
-    "OI": "CZCE", "RM": "CZCE", "FG": "CZCE", "SA": "CZCE", "UR": "CZCE",
-    "SF": "CZCE", "SM": "CZCE", "AP": "CZCE", "CJ": "CZCE", "PK": "CZCE",
-    "PF": "CZCE", "SH": "CZCE", "PX": "CZCE", "CY": "CZCE", "WH": "CZCE",
-    "RI": "CZCE", "RS": "CZCE", "JR": "CZCE", "LR": "CZCE", "PM": "CZCE",
+    "SR": "CZCE",
+    "CF": "CZCE",
+    "ZC": "CZCE",
+    "TA": "CZCE",
+    "MA": "CZCE",
+    "OI": "CZCE",
+    "RM": "CZCE",
+    "FG": "CZCE",
+    "SA": "CZCE",
+    "UR": "CZCE",
+    "SF": "CZCE",
+    "SM": "CZCE",
+    "AP": "CZCE",
+    "CJ": "CZCE",
+    "PK": "CZCE",
+    "PF": "CZCE",
+    "SH": "CZCE",
+    "PX": "CZCE",
+    "CY": "CZCE",
+    "WH": "CZCE",
+    "RI": "CZCE",
+    "RS": "CZCE",
+    "JR": "CZCE",
+    "LR": "CZCE",
+    "PM": "CZCE",
     # INE — energy & international
-    "SC": "INE", "NR": "INE", "LU": "INE", "BC": "INE", "EC": "INE",
+    "SC": "INE",
+    "NR": "INE",
+    "LU": "INE",
+    "BC": "INE",
+    "EC": "INE",
     # GFEX — green / new materials
-    "SI": "GFEX", "LC": "GFEX", "PS": "GFEX",
+    "SI": "GFEX",
+    "LC": "GFEX",
+    "PS": "GFEX",
 }
 
 # ---------------------------------------------------------------------------
@@ -148,8 +215,7 @@ FUTURES_EXCHANGE: dict[str, str] = {
 # ASSET_PREFIXES is the single edit that makes this set follow.
 # ``execution/fee_model.py`` must import from here, not copy.
 STAMP_TAX_EXEMPT_PREFIXES: frozenset[str] = frozenset(
-    p for p, at in ASSET_PREFIXES.items()
-    if not ASSET_RULES[at.value]["stamp_tax"]
+    p for p, at in ASSET_PREFIXES.items() if not ASSET_RULES[at.value]["stamp_tax"]
 )
 
 # ---------------------------------------------------------------------------
@@ -180,26 +246,61 @@ CALENDAR_EXCHANGES: set[str] = set(EXCHANGE_MAP.values())
 # two-digit prefix is in ASSET_PREFIXES.  Replaces the retired L13 regex.
 _equity_re = re.compile(r"^(\d{6})\.(SH|SZ|BJ)\Z")
 
+# OTC mutual fund: ``{6-digit code}.OF``
+_otc_fund_re = re.compile(r"^(\d{6})\.OF\Z")
+
+# A-share index & sector/concept boards across SSE/SZSE/BSE/CSI/CNI/SW/CI/TI/DC/TS
+_index_re = re.compile(r"^[A-Za-z0-9_]+\.(SH|SZ|BJ|CSI|CNI|SI|CI|TI|DC|TS)\Z")
+
 # Futures: product letters + month digits, e.g. IF2406, T2406, SC2412.
 _futures_re = re.compile(r"^([A-Z]{1,2})\d{4}\.(CFFEX|SHFE|DCE|CZCE|INE|GFEX)\Z")
 
 
 def validate_equity_ticker(ticker: str) -> bool:
-    """Validate an A-share equity ticker (L13 replacement).
+    """Validate an exchange-traded A-share equity/ETF/LOF ticker.
 
     Format: ``{6-digit code}.{SH|SZ|BJ}``.  Code's two-digit prefix must be
-    in :data:`ASSET_PREFIXES`.  Unknown prefix or exchange returns ``False``
-    (fails loudly, no silent fallback).
+    in :data:`ASSET_PREFIXES` and match its venue in :data:`PREFIX_EXCHANGE`.
     """
     m = _equity_re.match(ticker)
     if m is None:
         return False
     code, exchange = m.groups()
     prefix = code[:2]
-    # Prefix and suffix must agree. Checking them independently accepted
-    # `600000.SZ` (Shanghai prefix, Shenzhen suffix) as valid, and the suffix
-    # is what drives calendar selection and instrument identity downstream.
     return PREFIX_EXCHANGE.get(prefix) == exchange
+
+
+def validate_stock_ticker(ticker: str) -> bool:
+    """Validate an A-share stock ticker (excluding ETF/LOF prefixes)."""
+    if not validate_equity_ticker(ticker):
+        return False
+    return ASSET_PREFIXES[ticker[:2]] is AssetType.STOCK
+
+
+def validate_etf_ticker(ticker: str) -> bool:
+    """Validate an exchange-traded ETF ticker (51/52/53/55/56/58.SH, 15.SZ)."""
+    if not validate_equity_ticker(ticker):
+        return False
+    return ASSET_PREFIXES[ticker[:2]] is AssetType.ETF
+
+
+def validate_otc_fund_ticker(ticker: str) -> bool:
+    """Validate an off-exchange OTC mutual fund ticker (``{6 digits}.OF``)."""
+    return _otc_fund_re.match(ticker) is not None
+
+
+def validate_fund_ticker(ticker: str) -> bool:
+    """Validate a public fund ticker (OTC ``.OF`` or listed LOF/fund ``50/16``)."""
+    if validate_otc_fund_ticker(ticker):
+        return True
+    if not validate_equity_ticker(ticker):
+        return False
+    return ASSET_PREFIXES[ticker[:2]] is AssetType.FUND
+
+
+def validate_index_ticker(ticker: str) -> bool:
+    """Validate an A-share index, industry, or concept board ticker."""
+    return _index_re.match(ticker) is not None
 
 
 def validate_futures_ticker(ticker: str) -> bool:

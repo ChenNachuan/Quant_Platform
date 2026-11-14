@@ -22,9 +22,8 @@ Implementation-time rulings (recorded in the QUANT-40 PR description):
   not watermark inspection — watermark formats are subclass-defined and the
   platform never parses them.
 * ``NUMERIC_FIELDS`` (§41 open item) is defined here from the storage
-  schemas: the compared numeric columns per asset type.  ``option_basic`` and
-  ``reference`` have no cross-check list yet (option_basic is single-source;
-  reference is per-table and lands with T2/T3).
+  schemas: the compared numeric columns per asset type.  Single-source or
+  static metadata tables map to ``()``.
 * The ``pe_pb`` tolerance class covers the valuation ratios ``pe_ttm`` /
   ``pe_lyr`` / ``pb`` / ``ps_ttm`` — same cross-source definition-difference
   rationale as PE/PB.
@@ -46,6 +45,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
+from core.config import DATA_ROOT
 from data.raw import raw_path
 from data.storage_ops import (
     DiskFullError,
@@ -54,7 +54,11 @@ from data.storage_ops import (
     is_monthly_partition,
     partition_path,
 )
-from core.config import DATA_ROOT
+from data.storage_schema import (
+    CANONICAL_TO_LEGACY,
+    _AliasedDict,
+    resolve_table_name,
+)
 
 __all__ = [
     "SOURCE_PRIORITY_PATH",
@@ -99,33 +103,287 @@ def _resolve_source_priority_path(path: str | os.PathLike[str] | None = None) ->
 # Field classification (§41 open item: NUMERIC_FIELDS was referenced from
 # three design docs and defined nowhere — defined here, from the storage
 # schemas).  Only numeric columns participate; flags (suspend / is_limit_up /
-# quality_flag) are not cross-compared.
+# quality_flag) are not cross-compared.  Wrapped in _AliasedDict so legacy
+# short names ("bars_daily", "fundamental", ...) resolve transparently to
+# canonical names.
 # ---------------------------------------------------------------------------
-NUMERIC_FIELDS: dict[str, tuple[str, ...]] = {
-    "bars_daily": (
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "amount",
-        "adjfactor",
-        "turnover",
-    ),
-    "bars_minute": ("open", "high", "low", "close", "volume", "amount"),
-    "fundamental": (
-        "total_market_cap",
-        "float_market_cap",
-        "pe_ttm",
-        "pe_lyr",
-        "pb",
-        "ps_ttm",
-        "total_shares",
-        "float_shares",
-    ),
-    "option_basic": (),  # single source — nothing to cross-check
-    "reference": (),  # per-table lists land with the reference slice
-}
+NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
+    {
+        # Calendar (1)
+        "cn_calendar": (),
+        # Stock Core & Status (6)
+        "cn_stock_basic": (),
+        "cn_stock_bars_daily": (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "adjfactor",
+            "turnover",
+        ),
+        "cn_stock_bars_minute": ("open", "high", "low", "close", "volume", "amount"),
+        "cn_stock_fundamental": (
+            "total_market_cap",
+            "float_market_cap",
+            "pe_ttm",
+            "pe_lyr",
+            "pb",
+            "ps_ttm",
+            "total_shares",
+            "float_shares",
+        ),
+        "cn_stock_daily_status": ("pre_close", "up_limit", "down_limit", "limit_pct"),
+        "cn_stock_corporate_actions": (
+            "cash_dividend",
+            "stock_dividend",
+            "rights_price",
+            "rights_ratio",
+        ),
+        # Stock Index / Industry / Concept (4)
+        "cn_stock_index_basic": (),
+        "cn_stock_index_bars_daily": (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "pe",
+            "pb",
+            "turnover",
+            "total_market_cap",
+            "float_market_cap",
+        ),
+        "cn_stock_industry": (),
+        "cn_stock_index_weights": ("weight",),
+        # Stock Fundamental PIT (7)
+        "cn_stock_fundamental_income": (
+            "basic_eps",
+            "diluted_eps",
+            "total_revenue",
+            "revenue",
+            "total_cogs",
+            "operate_profit",
+            "total_profit",
+            "net_profit",
+            "net_profit_attr_p",
+            "net_profit_dedt",
+            "rd_exp",
+            "ebit",
+            "ebitda",
+        ),
+        "cn_stock_fundamental_balance": (
+            "total_assets",
+            "total_cur_assets",
+            "total_nca",
+            "money_cap",
+            "accounts_receiv",
+            "inventories",
+            "total_liab",
+            "total_cur_liab",
+            "total_ncl",
+            "total_hldr_eqy_exc_min_int",
+            "total_hldr_eqy_inc_min_int",
+            "total_share",
+        ),
+        "cn_stock_fundamental_cashflow": (
+            "n_cashflow_act",
+            "n_cashflow_inv_act",
+            "n_cash_flows_fnc_act",
+            "c_fr_sale_sg",
+            "c_paid_to_for_empl",
+            "c_pay_acq_const_fiolta",
+            "free_cashflow",
+            "n_incr_cash_cash_equ",
+        ),
+        "cn_stock_fundamental_indicator": (
+            "roe",
+            "roe_waa",
+            "roe_dt",
+            "roa",
+            "roic",
+            "grossprofit_margin",
+            "netprofit_margin",
+            "debt_to_assets",
+            "current_ratio",
+            "quick_ratio",
+            "assets_turn",
+            "netprofit_yoy",
+            "or_yoy",
+        ),
+        "cn_stock_fundamental_segment": (
+            "bz_sales",
+            "bz_profit",
+            "bz_cost",
+            "sales_ratio",
+            "gross_margin",
+        ),
+        "cn_stock_fundamental_earnings": (
+            "p_change_min",
+            "p_change_max",
+            "net_profit_min",
+            "net_profit_max",
+            "revenue",
+            "net_profit",
+            "eps",
+            "roe",
+        ),
+        "cn_stock_fundamental_consensus": (
+            "eps_fy0",
+            "eps_fy1",
+            "eps_fy2",
+            "eps_fwd12m",
+            "eps_fy1_n",
+            "eps_fy1_std",
+            "rating_score",
+            "tp_median",
+        ),
+        # Stock Special Flows / Sentiment / Chips (9)
+        "cn_stock_auction": (
+            "price",
+            "pre_close",
+            "pct_chg",
+            "volume",
+            "amount",
+            "turnover_rate",
+            "volume_ratio",
+        ),
+        "cn_stock_moneyflow": (
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "buy_lg_amount",
+            "sell_lg_amount",
+            "buy_md_amount",
+            "sell_md_amount",
+            "buy_sm_amount",
+            "sell_sm_amount",
+            "net_mf_amount",
+            "net_mf_pct",
+        ),
+        "cn_stock_hsgt_market_flow": (
+            "ggt_ss",
+            "ggt_sz",
+            "hgt",
+            "sgt",
+            "north_money",
+            "south_money",
+        ),
+        "cn_stock_hsgt_hold": ("vol", "ratio"),
+        "cn_stock_margin": (
+            "rzye",
+            "rzmre",
+            "rzche",
+            "rqyl",
+            "rqmcl",
+            "rqchl",
+            "rqye",
+            "rzrqye",
+        ),
+        "cn_stock_lhb": (
+            "close",
+            "pct_chg",
+            "turnover_rate",
+            "l_buy",
+            "l_sell",
+            "net_amount",
+            "net_rate",
+        ),
+        "cn_stock_lhb_seats": ("buy", "sell", "net_buy"),
+        "cn_stock_limit_pool": ("open_times", "streak_days", "seal_amount"),
+        "cn_stock_chips_perf": (
+            "his_low",
+            "his_high",
+            "cost_5pct",
+            "cost_15pct",
+            "cost_50pct",
+            "cost_85pct",
+            "cost_95pct",
+            "weight_avg",
+            "winner_rate",
+        ),
+        # Stock Holders & Capital Events (8)
+        "cn_stock_holder_num": ("holder_num", "holder_num_chg_pct", "avg_hold_shares"),
+        "cn_stock_top_holders": ("hold_amount", "hold_ratio", "hold_change"),
+        "cn_stock_restricted_release": ("float_share", "float_ratio"),
+        "cn_stock_block_trade": ("price", "vol", "amount", "discount_rate"),
+        "cn_stock_repurchase": ("vol", "amount", "high_limit", "low_limit"),
+        "cn_stock_holder_trade": (
+            "change_vol",
+            "change_ratio",
+            "after_share",
+            "avg_price",
+        ),
+        "cn_stock_pledge": ("pledge_amount", "pledge_ratio"),
+        "cn_stock_research_visits": (),
+        # Stock Tick & L2 (2)
+        "cn_stock_tick": ("price", "volume", "amount"),
+        "cn_stock_tick_l2": ("last_price", "volume", "amount"),
+        # Independent ETF Domain (5)
+        "cn_etf_basic": ("m_fee", "c_fee"),
+        "cn_etf_bars_daily": (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "adjfactor",
+            "turnover",
+        ),
+        "cn_etf_bars_minute": ("open", "high", "low", "close", "volume", "amount"),
+        "cn_etf_fundamental": (
+            "unit_nav",
+            "accum_nav",
+            "nav_adj_factor",
+            "iopv",
+            "total_shares",
+            "total_nav",
+        ),
+        "cn_etf_tick": ("price", "volume", "amount"),
+        # OTC & Listed Public Mutual Funds (5)
+        "cn_fund_basic": ("m_fee", "c_fee"),
+        "cn_fund_managers": (),
+        "cn_fund_nav": (
+            "unit_nav",
+            "accum_nav",
+            "adj_nav",
+            "nav_adj_factor",
+            "total_shares",
+            "total_netasset",
+        ),
+        "cn_fund_dividend": ("div_cash",),
+        "cn_fund_portfolio": ("mkv", "amount", "stk_mkv_ratio", "stk_float_ratio"),
+        # Futures (4)
+        "cn_futures_bars_daily": (
+            "open",
+            "high",
+            "low",
+            "close",
+            "settle",
+            "volume",
+            "amount",
+            "open_interest",
+        ),
+        "cn_futures_tick_l2": ("last_price", "volume", "amount", "open_interest"),
+        "cn_futures_contract_specs": (),
+        "cn_futures_continuous": (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "open_interest",
+            "settle",
+            "adjfactor",
+        ),
+        # Legacy compatibility entries
+        "option_basic": (),
+        "reference": (),
+    }
+)
 
 # Field name -> tolerance class.  Anything not listed falls to "default".
 TOLERANCE_CLASS: dict[str, str] = {
@@ -134,9 +392,21 @@ TOLERANCE_CLASS: dict[str, str] = {
     "low": "price",
     "close": "price",
     "pre_close": "price",
+    "settle": "price",
+    "price": "price",
+    "last_price": "price",
+    "up_limit": "price",
+    "down_limit": "price",
+    "unit_nav": "price",
+    "accum_nav": "price",
+    "adj_nav": "price",
+    "iopv": "price",
     "volume": "volume",
+    "vol": "volume",
     "amount": "amount",
     "adjfactor": "adjfactor",
+    "nav_adj_factor": "adjfactor",
+    "pe": "pe_pb",
     "pe_ttm": "pe_pb",
     "pe_lyr": "pe_pb",
     "pb": "pe_pb",
@@ -172,8 +442,9 @@ def load_source_priority(
     """Load and validate the source arbitration table.
 
     Validation: every entry exposes a ``priority`` list (directly, or per
-    sub-table for ``reference``), and every ``field_override`` source appears
-    in the same entry's ``priority`` list.  Raises ``ValueError`` otherwise.
+    sub-table for nested sections like ``reference``), and every
+    ``field_override`` source appears in the same entry's ``priority`` list.
+    Raises ``ValueError`` otherwise.
     """
     resolved = _resolve_source_priority_path(path)
     cfg = yaml.safe_load(resolved.read_text(encoding="utf-8"))
@@ -215,10 +486,34 @@ def _validate_table(name: str, entry: dict) -> None:
             )
 
 
+def _lookup_key(cfg: dict, name: str) -> str | None:
+    if name in cfg:
+        return name
+    canonical = resolve_table_name(name)
+    if canonical in cfg:
+        return canonical
+    legacy = CANONICAL_TO_LEGACY.get(name)
+    if legacy is not None and legacy in cfg:
+        return legacy
+    return None
+
+
 def _entry_for(cfg: dict, asset_type: str, sub_type: str | None) -> dict:
-    entry = cfg[asset_type]
-    if sub_type is not None:
-        entry = entry[sub_type]
+    key = _lookup_key(cfg, asset_type)
+    if key is not None:
+        entry = cfg[key]
+        if sub_type is not None:
+            sub_key = _lookup_key(entry, sub_type)
+            if sub_key is None:
+                raise KeyError(sub_type)
+            entry = entry[sub_key]
+    elif asset_type == "reference" and sub_type is not None:
+        sub_key = _lookup_key(cfg, sub_type)
+        if sub_key is None:
+            raise KeyError(sub_type)
+        entry = cfg[sub_key]
+    else:
+        raise KeyError(asset_type)
     if not isinstance(entry, dict) or not isinstance(entry.get("priority"), list):
         raise ValueError(f"{asset_type}: per-table entry — pass sub_type")
     return entry
@@ -648,14 +943,14 @@ def should_cross_check(
     Fires only when the **primary** source's ingest just completed (a backup
     ingest does not write the asset layer, so it never triggers) **and** every
     backup's raw batch has arrived (§41.4).  An asset type with no backup
-    never cross-checks, and one the YAML does not arbitrate (``factor``,
-    futures, per-table ``reference``) answers ``False`` instead of raising.
-    *source* is the source whose ingest just finished.
+    never cross-checks, and one the YAML does not arbitrate (e.g. ``factor``,
+    per-table ``reference`` without sub-table) answers ``False`` instead of
+    raising.  *source* is the source whose ingest just finished.
     """
     try:
         priority = get_source_priority(asset_type)
     except (KeyError, ValueError):
-        # Asset type not arbitrated here (factor, futures, per-table reference)
+        # Asset type not arbitrated here (e.g. factor, bare reference)
         return False
     if not priority or source != priority[0]:
         return False

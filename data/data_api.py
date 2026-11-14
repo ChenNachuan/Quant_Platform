@@ -41,10 +41,15 @@ TABLE_MAP: dict[tuple[str, str], str] = {
     ("etf", "daily"): "cn_etf_bars_daily",
     ("equity", "minute"): "bars_minute",
     ("stock", "minute"): "bars_minute",
+    ("etf", "minute"): "cn_etf_bars_minute",
     ("futures", "daily"): "bars_daily_futures",
     ("continuous", "daily"): "continuous",
     ("cn_stock", "daily"): "cn_stock_bars_daily",
     ("cn_equity", "daily"): "cn_stock_bars_daily",
+    ("cn_stock", "minute"): "cn_stock_bars_minute",
+    ("cn_equity", "minute"): "cn_stock_bars_minute",
+    ("cn_etf", "daily"): "cn_etf_bars_daily",
+    ("cn_etf", "minute"): "cn_etf_bars_minute",
     ("cn_futures", "daily"): "cn_futures_bars_daily",
     ("cn_continuous", "daily"): "cn_futures_continuous",
 }
@@ -384,9 +389,17 @@ def _build_daily_sql(
         "cn_etf_bars_daily",
         "cn_futures_continuous",
     )
-    ticker_col = "dominant_contract" if table == "continuous" else "ticker"
+    ticker_col = (
+        "dominant_contract"
+        if table in ("continuous", "cn_futures_continuous")
+        else "ticker"
+    )
     # bars_minute uses datetime as the bar timestamp; all other tables use trade_date
-    date_col = "datetime" if table == "bars_minute" else "trade_date"
+    date_col = (
+        "datetime"
+        if table in ("bars_minute", "cn_stock_bars_minute", "cn_etf_bars_minute")
+        else "trade_date"
+    )
 
     select_parts = [f"{date_col} AS date", f"{ticker_col} AS ticker"]
     value_cols = fields if fields is not None else list(_STD_COLS[2:])
@@ -490,7 +503,11 @@ def _apply_adjustment(
     Only price columns are scaled; volume and amount stay raw.
     """
     date_col = "trade_date"
-    ticker_col = "dominant_contract" if table == "continuous" else "ticker"
+    ticker_col = (
+        "dominant_contract"
+        if table in ("continuous", "cn_futures_continuous")
+        else "ticker"
+    )
     base_sql = (
         f"SELECT {ticker_col} AS ticker, "
         f"arg_max(adjfactor, {date_col}) AS adj_latest, "
