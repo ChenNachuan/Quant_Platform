@@ -38,6 +38,8 @@ _NORMALIZER_MODULES: dict[str, str] = {
     "akshare": "data.normalizers.akshare_normalizer",
     "tushare": "data.normalizers.tushare_normalizer",
     "amazingdata": "data.normalizers.amazingdata_normalizer",
+    "qdc": "data.normalizers.qdc_normalizer",
+    "straightflush": "data.normalizers.straightflush_normalizer",
 }
 
 

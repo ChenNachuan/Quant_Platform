@@ -43,8 +43,8 @@
 
 ## 在本量化平台中的接入与落盘约定
 
-- **凭证管理（红线 8）**：API 密钥（`QDC_API_KEY`、`QDC_DEVICE`）与命令行登录环境变量（`QDC_EMAIL`、`QDC_PASSWORD`）统一存放于本地 `config/.env`（已被 `.gitignore` 忽略），由 [`core.config.load_secrets()`](../../../core/config.py#L44-L57) 读取，**严禁在代码、文档、配置文件、配置快照或日志中明文写入真实邮箱、密码或 API Key**。
-- **落盘契约与代码现状**：平台落盘规范已由绑定契约 [`QDC_ingestion_contract.md`](../../design/data/QDC_ingestion_contract.md)（`qdc-m1-v1`）定稿；[`data/adapters/`](../../../data/adapters/) 尚未实现在线拉取 `QdcAdapter`，当前数据流为**本地只读原始目录 `QDCData` → 契约化清洗落盘至 `$QUANT_DATA_ROOT`**（参见 [`storage_schema.md`](../../design/data/storage_schema.md) 与 [`config/settings.toml`](../../../config/settings.toml)）。
+- **凭证管理（红线 8）**：CLI 登录凭据由本机 `qdc-cli login` 持久化管理（不走 API Key）；如额外启用在线 HTTP REST 通道（`mode="http"`），API 密钥（`QDC_API_KEY`、`QDC_DEVICE`）与可选环境变量（`QDC_EMAIL`、`QDC_PASSWORD`）统一存放于本地 `config/.env`（已被 `.gitignore` 忽略），由 [`core.config.load_secrets()`](../../../core/config.py#L44-L57) 读取，**严禁在代码、文档、配置文件、配置快照或日志中明文写入真实邮箱、密码或 API Key**。
+- **适配器与落盘契约**：由 [`QdcAdapter`](../../../data/adapters/qdc_adapter.py) 与 [`qdc_normalizer`](../../../data/normalizers/qdc_normalizer.py) 提供接入：默认采用 **`qdc-cli` 模式**（自动读取 `qdc-cli config` 的 `download_root/QDCData/` 并按年懒加载 `qdc-cli get <sku> --years <YYYY>`，也可用 `QDC_DATA_DIR` / `local_dir` 直接指定本地目录，不消耗在线 API 行数额度），同时保留可选 `mode="http"` 通道（`/v1/query` Parquet 游标分页、`requests_per_second = 5.0`）；批量历史迁移落盘遵循绑定契约 [`QDC_ingestion_contract.md`](../../design/data/QDC_ingestion_contract.md)（`qdc-m1-v1`）清洗落盘至 `$QUANT_DATA_ROOT`（参见 [`storage_schema.md`](../../design/data/storage_schema.md) 与 [`config/settings.toml`](../../../config/settings.toml)）。
 - **三层存储结构**：
   - **Schema 层**（`$QUANT_DATA_ROOT/asset/{nation}_{asset_type}_{data_type}/`）：通过 `pandera` 校验的标准化表（batch-1 覆盖 `bars_daily`、`fundamental`、`industry`、`corporate_actions` 等），并注册至 `$QUANT_DATA_ROOT/catalog.duckdb`。
   - **Ext 层**（`$QUANT_DATA_ROOT/ext/<dataset>/<subtable>/<volume>.parquet`）：Schema 暂未容纳但须留痕的扩展源表（财务三表/指标、预期、评级、股本、ST/停复牌、回购/增减持/质押/解禁、指数成分等）。

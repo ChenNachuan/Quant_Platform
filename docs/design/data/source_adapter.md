@@ -18,7 +18,7 @@
 @dataclass
 class FetchResult:
     df: pd.DataFrame         # 数据源原始列名/原始值
-    source: str              # "akshare" / "tushare" / "amazingdata"
+    source: str              # "akshare" / "tushare" / "amazingdata" / "qdc" / "straightflush"
     asset_type: str          # 传入值原样返回
     trade_date: date         # 业务日期（非下载日期）
     row_count: int           # len(df)，冗余但方便日志
@@ -33,11 +33,10 @@ class SourceAdapter(ABC):
     @abstractmethod
     def list_asset_types(self) -> list[str]: ...
     def health_check(self) -> bool: ...   # 默认：拉一天看能否成功
-    def close(self): ...                  # 有连接池的源覆盖（如 ad.logout()）
+    def close(self): ...                  # 有连接池/Session 的源覆盖（如 ad.logout() / session.close()）
 ```
 
-- 增量 = **watermark 模式**：格式由子类定义，调用方只存取不解析，持久化在 `raw/{source}/.watermarks.json`。
-- 注册：`adapters/__init__.py` 的 `REGISTRY` 字典 + `get_adapter(source)` 工厂。
+- 增量 = **watermark 模式**：格式由子类定义，调用方只存取不解析，持久化在 `raw/{source}/.watermarks.json`。\n- 注册：[`data/adapters/__init__.py`](../../../data/adapters/__init__.py) 的 `REGISTRY` 字典 + `get_adapter(source)` 工厂（已注册 `akshare`、`tushare`、`amazingdata`、`qdc`、`straightflush`）。
 
 ## 关键决策
 

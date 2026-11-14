@@ -65,6 +65,9 @@ class AmazingdataAdapter(SourceAdapter):
         else:  # pragma: no cover — guarded above
             raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
+        if df is None:
+            df = pd.DataFrame()
+
         return FetchResult(
             df=df,
             source="amazingdata",
@@ -86,7 +89,7 @@ class AmazingdataAdapter(SourceAdapter):
             end_date=date_str,
             local_path=self._local_path,
         )
-        return df
+        return df if df is not None else pd.DataFrame()
 
     def _fetch_option(self, ad, date_str: str) -> pd.DataFrame:
         """Fetch option basic info in batches of 10 codes (C2: ~100-row cap)."""

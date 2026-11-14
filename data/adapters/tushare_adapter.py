@@ -10,6 +10,7 @@ import logging
 import os
 from datetime import date
 
+import pandas as pd
 
 from data.source_adapter import FetchResult, SourceAdapter
 
@@ -50,6 +51,9 @@ class TushareAdapter(SourceAdapter):
             df = pro.daily(trade_date=date_str)
         else:  # pragma: no cover — guarded above
             raise ValueError(f"unsupported asset_type: {asset_type!r}")
+
+        if df is None:
+            df = pd.DataFrame()
 
         return FetchResult(
             df=df,

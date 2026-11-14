@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from data.adapters.akshare_adapter import AkshareAdapter
 from data.adapters.amazingdata_adapter import AmazingdataAdapter
+from data.adapters.qdc_adapter import QdcAdapter
+from data.adapters.straightflush_adapter import StraightFlushAdapter
 from data.adapters.tushare_adapter import TushareAdapter
 from data.source_adapter import SourceAdapter
 
@@ -16,6 +18,8 @@ REGISTRY: dict[str, type[SourceAdapter]] = {
     "akshare": AkshareAdapter,
     "tushare": TushareAdapter,
     "amazingdata": AmazingdataAdapter,
+    "qdc": QdcAdapter,
+    "straightflush": StraightFlushAdapter,
 }
 
 

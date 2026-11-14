@@ -1,10 +1,11 @@
-"""Unit tests for data.source_adapter — ABC, guards, watermark, and three adapters.
+"""Unit tests for data.source_adapter — ABC, guards, watermark, and five adapters.
 
-Covers every ac-1 row, plus seven regression tests for PR #50 review findings:
+Covers every ac-1 row, plus seven regression tests for PR #50 review findings,
+plus full mock-backed unit suites for QdcAdapter and StraightFlushAdapter:
 
 * ``FetchResult`` dataclass fields and types
 * ``SourceAdapter`` ABC — four methods present (fetch / list_asset_types / health_check / close)
-* Three subclasses (AkshareAdapter / TushareAdapter / AmazingdataAdapter) run minimal fetch
+* Five subclasses (Akshare / Tushare / Amazingdata / Qdc / StraightFlush) run fetch
 * Hand-rolled decorators: rate_limit throttles, retry retries and gives up, timeout raises
 * Watermark ``read_watermark`` / ``write_watermark`` round-trip at ``raw/{source}/.watermarks.json``
 
@@ -23,22 +24,29 @@ Regression tests (each fails without its fix):
 
 from __future__ import annotations
 
+import io
 import json
+import subprocess
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from functools import wraps
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
+import requests
 
 from data.adapters import REGISTRY, get_adapter
 from data.adapters.akshare_adapter import AkshareAdapter
 from data.adapters.amazingdata_adapter import AmazingdataAdapter
+from data.adapters.qdc_adapter import QdcAdapter
+from data.adapters.straightflush_adapter import StraightFlushAdapter
 from data.adapters.tushare_adapter import TushareAdapter
 from data.source_adapter import (
+    FETCH_TIMEOUT,
     RETRY_ON,
     FetchResult,
     FetchTimeoutError,
@@ -283,13 +291,21 @@ class TestWatermark:
 # Registry and factory
 # ---------------------------------------------------------------------------
 class TestRegistry:
-    def test_three_adapters_registered(self):
-        assert set(REGISTRY.keys()) == {"akshare", "tushare", "amazingdata"}
+    def test_five_adapters_registered(self):
+        assert set(REGISTRY.keys()) == {
+            "akshare",
+            "tushare",
+            "amazingdata",
+            "qdc",
+            "straightflush",
+        }
 
     def test_get_adapter_returns_correct_type(self):
         assert isinstance(get_adapter("akshare"), AkshareAdapter)
         assert isinstance(get_adapter("tushare"), TushareAdapter)
         assert isinstance(get_adapter("amazingdata"), AmazingdataAdapter)
+        assert isinstance(get_adapter("qdc"), QdcAdapter)
+        assert isinstance(get_adapter("straightflush"), StraightFlushAdapter)
 
     def test_get_adapter_unknown_source_raises(self):
         with pytest.raises(KeyError):
@@ -297,7 +313,7 @@ class TestRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Three adapters — minimal fetch (mocked external APIs)
+# Adapters — minimal fetch & protocol behavior (mocked external APIs)
 # ---------------------------------------------------------------------------
 class TestAkshareAdapter:
     def test_list_asset_types(self):
@@ -402,6 +418,652 @@ class TestAmazingdataAdapter:
         a = AmazingdataAdapter()
         with pytest.raises(ValueError, match="unsupported"):
             a.fetch("crypto", date(2026, 1, 5))
+
+
+# ---------------------------------------------------------------------------
+# QdcAdapter tests
+# ---------------------------------------------------------------------------
+def _parquet_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False)
+    return buf.getvalue()
+
+
+class TestQdcAdapter:
+    def test_defaults_to_cli_mode(self, tmp_path: Path):
+        q = QdcAdapter(secrets_path=tmp_path / "missing.env")
+        assert q._mode == "cli"
+        assert q.list_asset_types() == [
+            "stock",
+            "etf",
+            "index",
+            "convertible",
+            "futures",
+            "option",
+        ]
+
+    def test_cli_mode_auto_syncs_missing_year_and_reads_parquet(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("QDC_DATA_DIR", raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: f"/opt/homebrew/bin/{name}")
+
+        tz = ZoneInfo("Asia/Shanghai")
+        ts_day1 = int(datetime(2026, 1, 5, 0, 0, tzinfo=tz).timestamp() * 1000)
+        ts_day2 = int(datetime(2026, 1, 6, 0, 0, tzinfo=tz).timestamp() * 1000)
+        df = pd.DataFrame(
+            {
+                "symbol": ["000001.XSHE", "000001.XSHE"],
+                "ts": [ts_day1, ts_day2],
+                "close": [11.5, 11.8],
+            }
+        )
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            subcmd = cmd[1]
+            if subcmd == "config":
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "download_root": str(tmp_path / "QDCData"),
+                            "format": "parquet",
+                        }
+                    ),
+                    stderr="",
+                )
+            if subcmd == "get":
+                sku_dir = tmp_path / "QDCData" / "cn_daily_full" / "full"
+                sku_dir.mkdir(parents=True, exist_ok=True)
+                df.to_parquet(sku_dir / "2026.parquet", index=False)
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout='{"ok": true}', stderr=""
+                )
+            if subcmd == "whoami":
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=json.dumps(
+                        {"email": "user@example.com", "entitlement": ["cn_daily_full"]}
+                    ),
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected CLI subcommand: {cmd}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        q = QdcAdapter(secrets_path=tmp_path / "missing.env")
+        res1 = q.fetch("stock", date(2026, 1, 5))
+        assert res1.source == "qdc"
+        assert res1.row_count == 1
+        assert res1.df["close"].iloc[0] == pytest.approx(11.5)
+        assert res1.watermark == "2026-01-05"
+
+        # Second fetch in the same year reads the synced Parquet directly without re-running get
+        res2 = q.fetch("stock", date(2026, 1, 6))
+        assert res2.row_count == 1
+        assert res2.df["close"].iloc[0] == pytest.approx(11.8)
+
+        subcmds = [c[1] for c in calls]
+        assert subcmds.count("config") == 2
+        assert subcmds.count("get") == 1
+        get_cmd = next(c for c in calls if c[1] == "get")
+        assert get_cmd == [
+            "/opt/homebrew/bin/qdc-cli",
+            "get",
+            "cn_daily_full",
+            "--years",
+            "2026",
+            "--json",
+            "--quiet",
+        ]
+        assert q.health_check() is True
+
+    def test_cli_download_root_without_qdcdata_suffix_appends_subdir(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("QDC_DATA_DIR", raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: f"/opt/homebrew/bin/{name}")
+        sku_dir = tmp_path / "QDCData" / "cn_daily_full" / "full"
+        sku_dir.mkdir(parents=True)
+        tz = ZoneInfo("Asia/Shanghai")
+        ts_day1 = int(datetime(2026, 1, 5, 0, 0, tzinfo=tz).timestamp() * 1000)
+        pd.DataFrame(
+            {"symbol": ["000001.XSHE"], "ts": [ts_day1], "close": [11.5]}
+        ).to_parquet(sku_dir / "2026.parquet", index=False)
+
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda cmd, **_kw: subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"download_root": str(tmp_path)}),
+                stderr="",
+            ),
+        )
+        q = QdcAdapter(secrets_path=tmp_path / "missing.env")
+        res = q.fetch("stock", date(2026, 1, 5))
+        assert res.row_count == 1
+        assert res.df["close"].iloc[0] == pytest.approx(11.5)
+
+    def test_cli_missing_download_root_raises_value_error(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("QDC_DATA_DIR", raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: f"/opt/homebrew/bin/{name}")
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda cmd, **_kw: subprocess.CompletedProcess(
+                cmd, 0, stdout='{"download_root": ""}', stderr=""
+            ),
+        )
+
+        q = QdcAdapter(secrets_path=tmp_path / "missing.env")
+        with pytest.raises(ValueError, match="download_root"):
+            q.fetch("stock", date(2026, 1, 5))
+        assert q.health_check() is False
+
+    def test_cli_missing_binary_raises_file_not_found(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("QDC_DATA_DIR", raising=False)
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+
+        q = QdcAdapter(
+            cli_bin="nonexistent-qdc-cli", secrets_path=tmp_path / "missing.env"
+        )
+        with pytest.raises(FileNotFoundError, match="nonexistent-qdc-cli"):
+            q.fetch("stock", date(2026, 1, 5))
+        assert q.health_check() is False
+
+    def test_cli_auth_error_raises_permission_error_without_retry(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("QDC_DATA_DIR", raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: f"/opt/homebrew/bin/{name}")
+
+        calls: list[str] = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd[1])
+            if cmd[1] == "config":
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=json.dumps({"download_root": str(tmp_path)}),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="403 entitlement missing"
+            )
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        q = QdcAdapter(secrets_path=tmp_path / "missing.env")
+        with pytest.raises(PermissionError, match="403"):
+            q.fetch("stock", date(2026, 1, 5))
+        assert calls.count("get") == 1
+
+    def test_local_parquet_mode_supports_qdcdata_subdir_and_beijing_day(
+        self, tmp_path: Path
+    ):
+        # Support passing download_root directly (containing QDCData/)
+        sku_dir = tmp_path / "QDCData" / "cn_daily_full" / "full"
+        sku_dir.mkdir(parents=True)
+        tz = ZoneInfo("Asia/Shanghai")
+        ts_day1 = int(datetime(2026, 1, 5, 0, 0, tzinfo=tz).timestamp() * 1000)
+        ts_day2 = int(datetime(2026, 1, 6, 0, 0, tzinfo=tz).timestamp() * 1000)
+        df = pd.DataFrame(
+            {
+                "symbol": ["000001.XSHE", "000001.XSHE"],
+                "ts": [ts_day1, ts_day2],
+                "close": [11.5, 11.8],
+            }
+        )
+        df.to_parquet(sku_dir / "2026.parquet", index=False)
+
+        q = QdcAdapter(local_dir=tmp_path, secrets_path=tmp_path / "missing.env")
+        result = q.fetch("stock", date(2026, 1, 5))
+        assert result.row_count == 1
+        assert result.df["close"].iloc[0] == pytest.approx(11.5)
+        assert q.health_check() is True
+
+    def test_http_parquet_pagination_and_headers(self, tmp_path: Path):
+        page1_df = pd.DataFrame(
+            {"symbol": ["000001.XSHE"], "ts": [1767542400000], "close": [11.5]}
+        )
+        page2_df = pd.DataFrame(
+            {"symbol": ["600519.XSHG"], "ts": [1767542400000], "close": [1500.0]}
+        )
+
+        resp1 = MagicMock(spec=requests.Response)
+        resp1.status_code = 200
+        resp1.headers = {
+            "Content-Type": "application/vnd.apache.parquet",
+            "X-QDC-Truncated": "true",
+            "X-QDC-Next-Cursor": "cur-2",
+        }
+        resp1.content = _parquet_bytes(page1_df)
+
+        resp2 = MagicMock(spec=requests.Response)
+        resp2.status_code = 200
+        resp2.headers = {
+            "Content-Type": "application/vnd.apache.parquet",
+            "X-QDC-Truncated": "false",
+        }
+        resp2.content = _parquet_bytes(page2_df)
+
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [resp1, resp2]
+
+        q = QdcAdapter(
+            api_key="test-key",
+            device="dev-01",
+            secrets_path=tmp_path / "missing.env",
+        )
+        assert q._mode == "http"
+        q._session = mock_session
+
+        result = q.fetch("stock", date(2026, 1, 5))
+        assert result.source == "qdc"
+        assert result.asset_type == "stock"
+        assert result.row_count == 2
+        assert result.watermark == "2026-01-05"
+        assert list(result.df["symbol"]) == ["000001.XSHE", "600519.XSHG"]
+
+        assert mock_session.get.call_count == 2
+        first_call = mock_session.get.call_args_list[0]
+        assert first_call.kwargs["headers"] == {
+            "X-API-Key": "test-key",
+            "X-Device": "dev-01",
+        }
+        assert first_call.kwargs["timeout"] == FETCH_TIMEOUT
+        assert first_call.kwargs["params"]["sku"] == "cn_daily_full"
+        assert first_call.kwargs["params"]["format"] == "parquet"
+        second_call = mock_session.get.call_args_list[1]
+        assert second_call.kwargs["params"]["cursor"] == "cur-2"
+        assert second_call.kwargs["params"]["sku"] == "cn_daily_full"
+
+    def test_http_futures_passes_table_and_symbols(self, tmp_path: Path):
+        df = pd.DataFrame({"symbol": ["IF2603"], "close": [3900.0]})
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "application/vnd.apache.parquet"}
+        resp.content = _parquet_bytes(df)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = resp
+
+        q = QdcAdapter(
+            api_key="k",
+            symbols=["IF2603"],
+            secrets_path=tmp_path / "missing.env",
+        )
+        q._session = mock_session
+
+        result = q.fetch("futures", date(2026, 1, 5))
+        assert result.row_count == 1
+        params = mock_session.get.call_args.kwargs["params"]
+        assert params["sku"] == "cn_futures_1d"
+        assert params["table"] == "bars"
+        assert params["code"] == "IF2603"
+
+    def test_http_422_raises_value_error_without_retry(self, tmp_path: Path):
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = 422
+        resp.text = "date range exceeds 14 days"
+        mock_session = MagicMock()
+        mock_session.get.return_value = resp
+
+        q = QdcAdapter(api_key="k", secrets_path=tmp_path / "missing.env")
+        q._session = mock_session
+        with pytest.raises(ValueError, match="422"):
+            q.fetch("stock", date(2026, 1, 5))
+        assert mock_session.get.call_count == 1
+
+    def test_http_403_raises_permission_error(self, tmp_path: Path):
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = 403
+        resp.text = "not purchased"
+        mock_session = MagicMock()
+        mock_session.get.return_value = resp
+
+        q = QdcAdapter(api_key="k", secrets_path=tmp_path / "missing.env")
+        q._session = mock_session
+        with pytest.raises(PermissionError, match="403"):
+            q.fetch("stock", date(2026, 1, 5))
+
+    def test_http_429_triggers_retry_and_recovers(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        bad_resp = MagicMock(spec=requests.Response)
+        bad_resp.status_code = 429
+        bad_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
+
+        ok_resp = MagicMock(spec=requests.Response)
+        ok_resp.status_code = 200
+        ok_resp.headers = {"Content-Type": "application/vnd.apache.parquet"}
+        ok_resp.content = _parquet_bytes(pd.DataFrame({"symbol": ["000001.XSHE"]}))
+
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [bad_resp, ok_resp]
+
+        q = QdcAdapter(api_key="k", secrets_path=tmp_path / "missing.env")
+        q._session = mock_session
+        res = q.fetch("stock", date(2026, 1, 5))
+        assert res.row_count == 1
+        assert mock_session.get.call_count == 2
+
+    def test_http_missing_api_key_raises(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv("QDC_API_KEY", raising=False)
+        monkeypatch.delenv("QDC_DATA_DIR", raising=False)
+        q = QdcAdapter(mode="http", secrets_path=tmp_path / "missing.env")
+        with pytest.raises(ValueError, match="QDC_API_KEY"):
+            q.fetch("stock", date(2026, 1, 5))
+
+    def test_http_health_check_and_close(self, tmp_path: Path):
+        resp_ok = MagicMock(spec=requests.Response)
+        resp_ok.status_code = 200
+        resp_ok.json.return_value = {"datasets": [{"sku": "cn_daily_full"}]}
+        mock_session = MagicMock()
+        mock_session.get.return_value = resp_ok
+
+        q = QdcAdapter(mode="http", api_key="k", secrets_path=tmp_path / "missing.env")
+        q._session = mock_session
+        assert q.health_check() is True
+        assert mock_session.get.call_args.kwargs["timeout"] == FETCH_TIMEOUT
+
+        q.close()
+        mock_session.close.assert_called_once()
+        assert q._session is None
+
+    def test_unsupported_asset_type_raises(self, tmp_path: Path):
+        q = QdcAdapter(secrets_path=tmp_path / "missing.env")
+        with pytest.raises(ValueError, match="unsupported"):
+            q.fetch("crypto", date(2026, 1, 5))
+
+
+# ---------------------------------------------------------------------------
+# StraightFlushAdapter (Fuyao) tests
+# ---------------------------------------------------------------------------
+class TestStraightFlushAdapter:
+    def test_list_asset_types(self, tmp_path: Path):
+        s = StraightFlushAdapter(token="fake", secrets_path=tmp_path / "missing.env")
+        assert s.list_asset_types() == [
+            "stock",
+            "etf",
+            "index",
+            "futures",
+            "option",
+            "calendar",
+        ]
+
+    def test_stock_batch_uses_adjust_none_and_chunks_by_10(self, tmp_path: Path):
+        # 25 codes -> 3 batch calls (10 + 10 + 5)
+        codes = [f"60{i:04d}.SH" for i in range(25)]
+
+        def make_resp(params_codes: list[str]) -> MagicMock:
+            resp = MagicMock(spec=requests.Response)
+            resp.status_code = 200
+            resp.json.return_value = {
+                "code": 0,
+                "message": "success",
+                "request_id": "req-1",
+                "data": {
+                    "interval": "1d",
+                    "adjust": "none",
+                    "item": [
+                        {
+                            "thscode": code,
+                            "timestamp": 1767542400000,
+                            "item": [
+                                {
+                                    "date_ms": 1767542400000,
+                                    "open_price": 10.0,
+                                    "high_price": 10.5,
+                                    "low_price": 9.8,
+                                    "close_price": 10.2,
+                                    "volume": 100000,
+                                    "turnover": 1020000.0,
+                                }
+                            ],
+                        }
+                        for code in params_codes
+                    ],
+                },
+            }
+            return resp
+
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [
+            make_resp(codes[:10]),
+            make_resp(codes[10:20]),
+            make_resp(codes[20:25]),
+        ]
+
+        s = StraightFlushAdapter(
+            token="test-fuyao-key",
+            symbols=codes,
+            secrets_path=tmp_path / "missing.env",
+        )
+        s._session = mock_session
+
+        result = s.fetch("stock", date(2026, 1, 5))
+        assert result.source == "straightflush"
+        assert result.asset_type == "stock"
+        assert result.row_count == 25
+        assert result.watermark == "20260105"
+        assert "thscode" in result.df.columns
+        assert mock_session.get.call_count == 3
+
+        for call in mock_session.get.call_args_list:
+            assert call.kwargs["headers"] == {"X-api-key": "test-fuyao-key"}
+            assert call.kwargs["timeout"] == FETCH_TIMEOUT
+            params = call.kwargs["params"]
+            assert params["interval"] == "1d"
+            assert params["adjust"] == "none"
+            assert len(params["thscodes"].split(",")) <= 10
+
+    def test_auto_ticker_list_pagination_when_symbols_omitted(self, tmp_path: Path):
+        list_resp = MagicMock(spec=requests.Response)
+        list_resp.status_code = 200
+        list_resp.json.return_value = {
+            "code": 0,
+            "data": {"item": [{"thscode": "600519.SH"}, {"thscode": "000001.SZ"}]},
+        }
+
+        bars_resp = MagicMock(spec=requests.Response)
+        bars_resp.status_code = 200
+        bars_resp.json.return_value = {
+            "code": 0,
+            "data": {
+                "item": [
+                    {
+                        "thscode": "600519.SH",
+                        "item": [{"date_ms": 1767542400000, "close_price": 1500.0}],
+                    }
+                ]
+            },
+        }
+
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [list_resp, bars_resp]
+
+        s = StraightFlushAdapter(
+            token="test-key", secrets_path=tmp_path / "missing.env"
+        )
+        s._session = mock_session
+
+        result = s.fetch("stock", date(2026, 1, 5))
+        assert result.row_count == 1
+        assert "/api/meta/tickers/list" in mock_session.get.call_args_list[0].args[0]
+        assert (
+            mock_session.get.call_args_list[0].kwargs["params"]["asset_type"]
+            == "a-share"
+        )
+        assert (
+            "/api/a-share/prices/historical-batch"
+            in mock_session.get.call_args_list[1].args[0]
+        )
+
+    def test_etf_futures_and_calendar_endpoints(self, tmp_path: Path):
+        mock_session = MagicMock()
+        etf_resp = MagicMock(spec=requests.Response)
+        etf_resp.status_code = 200
+        etf_resp.json.return_value = {
+            "code": 0,
+            "data": {
+                "item": [
+                    {
+                        "thscode": "510300.SH",
+                        "item": [{"date_ms": 1767542400000, "close_price": 4.1}],
+                    }
+                ]
+            },
+        }
+        fut_resp = MagicMock(spec=requests.Response)
+        fut_resp.status_code = 200
+        fut_resp.json.return_value = {
+            "code": 0,
+            "data": {
+                "item": [
+                    {
+                        "date_ms": 1767542400000,
+                        "close_price": 3900.0,
+                        "open_interest": 10000,
+                    }
+                ]
+            },
+        }
+        cal_resp = MagicMock(spec=requests.Response)
+        cal_resp.status_code = 200
+        cal_resp.json.return_value = {
+            "code": 0,
+            "data": {"item": [{"date_ms": 1767542400000, "date": "20260105"}]},
+        }
+        mock_session.get.side_effect = [etf_resp, fut_resp, cal_resp]
+
+        s = StraightFlushAdapter(
+            token="k",
+            symbols=["510300.SH"],
+            secrets_path=tmp_path / "missing.env",
+        )
+        s._session = mock_session
+
+        r_etf = s.fetch("etf", date(2026, 1, 5))
+        assert r_etf.row_count == 1
+        assert (
+            "/api/fund/market/historical-batch"
+            in mock_session.get.call_args_list[0].args[0]
+        )
+
+        s._symbols = ["CU2603.SHF"]
+        r_fut = s.fetch("futures", date(2026, 1, 5))
+        assert r_fut.row_count == 1
+        assert r_fut.df["thscode"].iloc[0] == "CU2603.SHF"
+        assert (
+            mock_session.get.call_args_list[1].kwargs["params"]["time_period"]
+            == "day_1"
+        )
+
+        r_cal = s.fetch("calendar", date(2026, 1, 5))
+        assert r_cal.row_count == 1
+        assert r_cal.df["date"].iloc[0] == "20260105"
+
+    def test_business_error_codes_and_retry(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        s = StraightFlushAdapter(
+            token="k",
+            symbols=["600519.SH"],
+            secrets_path=tmp_path / "missing.env",
+        )
+
+        # 4001 rate limit retries and succeeds
+        rate_resp = MagicMock(spec=requests.Response)
+        rate_resp.status_code = 200
+        rate_resp.json.return_value = {
+            "code": 4001,
+            "message": "rate limited",
+            "request_id": "r1",
+        }
+        ok_resp = MagicMock(spec=requests.Response)
+        ok_resp.status_code = 200
+        ok_resp.json.return_value = {
+            "code": 0,
+            "data": {"item": [{"date_ms": 1767542400000, "date": "20260105"}]},
+        }
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [rate_resp, ok_resp]
+        s._session = mock_session
+        res = s.fetch("calendar", date(2026, 1, 5))
+        assert res.row_count == 1
+        assert mock_session.get.call_count == 2
+
+        # 2001 auth error -> PermissionError without retry
+        auth_resp = MagicMock(spec=requests.Response)
+        auth_resp.status_code = 200
+        auth_resp.json.return_value = {
+            "code": 2001,
+            "message": "invalid api key",
+            "request_id": "r2",
+        }
+        mock_session.get.side_effect = [auth_resp]
+        with pytest.raises(PermissionError, match="2001"):
+            s.fetch("calendar", date(2026, 1, 5))
+
+        # 3002 data not ready -> empty DataFrame
+        empty_resp = MagicMock(spec=requests.Response)
+        empty_resp.status_code = 200
+        empty_resp.json.return_value = {
+            "code": 3002,
+            "message": "not ready",
+            "request_id": "r3",
+        }
+        mock_session.get.side_effect = [empty_resp]
+        res_empty = s.fetch("calendar", date(2026, 1, 5))
+        assert res_empty.row_count == 0
+
+    def test_reads_stright_flush_token_from_secrets_file(
+        self, tmp_path: Path, monkeypatch
+    ):
+        for key in (
+            "STRIGHT_FLUSH_TOKEN",
+            "STRAIGHT_FLUSH_TOKEN",
+            "HITHINK_FINANCE_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "STRIGHT_FLUSH_TOKEN=placeholder-only-token\n", encoding="utf-8"
+        )
+        s = StraightFlushAdapter(secrets_path=env_file)
+        assert s._headers() == {"X-api-key": "placeholder-only-token"}
+
+    def test_health_check_and_close(self, tmp_path: Path):
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = 200
+        resp.json.return_value = {
+            "code": 0,
+            "data": {"item": [{"thscode": "000001.SZ"}]},
+        }
+        mock_session = MagicMock()
+        mock_session.get.return_value = resp
+
+        s = StraightFlushAdapter(token="k", secrets_path=tmp_path / "missing.env")
+        s._session = mock_session
+        assert s.health_check() is True
+
+        s.close()
+        mock_session.close.assert_called_once()
+        assert s._session is None
+
+    def test_unsupported_asset_type_raises(self, tmp_path: Path):
+        s = StraightFlushAdapter(token="k", secrets_path=tmp_path / "missing.env")
+        with pytest.raises(ValueError, match="unsupported"):
+            s.fetch("crypto", date(2026, 1, 5))
 
 
 # ---------------------------------------------------------------------------
@@ -580,8 +1242,6 @@ class TestRegressionSdkTimeout:
     """Review r2 optional 2: SDK call must pass timeout (default None pins thread)."""
 
     def test_fetch_passes_timeout_to_akshare(self):
-        from data.source_adapter import FETCH_TIMEOUT
-
         a = AkshareAdapter(symbols=["000001"])
         mock_df = pd.DataFrame({"date": ["2026-01-05"], "close": [10.0]})
         with patch("akshare.stock_zh_a_hist", return_value=mock_df) as mock_call:
