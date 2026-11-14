@@ -1,6 +1,6 @@
 # dqc_severity
 
-> 域：data · 对应代码 [data/dqc/severity.py](data/dqc/severity.py)
+> 域：data · 对应代码 [data/dqc/severity.py](../../../data/dqc/severity.py)
 
 ## 职责与边界
 
@@ -69,7 +69,7 @@ def ingest_with_dqc(df, date, config) -> None: ...   # 七步入库（见实现�
 
 ## 实现要点
 
-详见 [data/dqc/severity.py](data/dqc/severity.py)
+详见 [data/dqc/severity.py](../../../data/dqc/severity.py)
 
 七步入库(ingest_with_dqc):
 1. 跑全部规则(HARD+SOFT)

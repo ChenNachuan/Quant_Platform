@@ -1,6 +1,6 @@
 # storage_schema
 
-> 域：data · 对应代码 [data/storage_schema.py](data/storage_schema.py)
+> 域：data · 对应代码 [data/storage_schema.py](../../../data/storage_schema.py)
 
 ## 职责与边界
 
@@ -47,9 +47,9 @@ $QUANT_DATA_ROOT/
 
 ## 核心层
 
-以[data/storage_schema.py](data/storage_schema.py) 的pandera契约为准。
+以[data/storage_schema.py](../../../data/storage_schema.py) 的pandera契约为准。
 
-**11 张表**（文件路径相对 `data_platform/`；PK = 主键）：
+**11 张表**（文件路径相对 `$QUANT_DATA_ROOT/`；PK = 主键）：
 
 | 表 | 文件 | 关键列 / 约束 |
 |---|---|---|
@@ -95,7 +95,7 @@ $QUANT_DATA_ROOT/
 
 ## 实现要点
 
-详见 [data/storage_schema.py](data/storage_schema.py)
+详见 [data/storage_schema.py](../../../data/storage_schema.py)
 
 核心约定:
 - SCHEMA 字典是pandera DataFrameSchema的集合,一表一条目

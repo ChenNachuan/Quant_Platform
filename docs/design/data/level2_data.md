@@ -1,6 +1,6 @@
 # l2_data
 
-> 域：data · 对应代码 [data/level2_data.py](data/level2_data.py)
+> 域：data · 对应代码 `data/level2_data.py`（V3+ 规划预留，尚未实现）
 
 ## 职责与边界
 
@@ -48,7 +48,7 @@ C++部分的边界:
  ## 数据规模与存储
 逐笔数据:~2500万行/天(5000只×~5000笔)
 五档快照:~1200万行/天(5000只×~2400条/天)
-存储:按日+按板块分组,单文件目标50-100MB(见storagee_schema.md
+存储:按日+按板块分组,单文件目标50-100MB(见 [storage_schema.md](storage_schema.md))
 
 L2入库走既有流水线(raw→normalize→DQC→asset),不需要新架构。
 

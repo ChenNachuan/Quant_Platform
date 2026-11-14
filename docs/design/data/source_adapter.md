@@ -1,6 +1,6 @@
 # source_adapter
 
-> 域：data · 对应代码 [data/source_adapter.py](data/source_adapter.py)
+> 域：data · 对应代码 [data/source_adapter.py](../../../data/source_adapter.py)
 ## 职责与边界
 
 数据入库链最上游抽象：从外部数据源拉取**原始** DataFrame。一源一子类，新增数据源 = 写一个 Adapter 子类 + 一个 Normalizer，DQC 与 asset 层零改动。
@@ -52,7 +52,7 @@ class SourceAdapter(ABC):
 
 ## 实现要点
 
-详见[data/source_adapter.py](data/source_adapter.py)
+详见[data/source_adapter.py](../../../data/source_adapter.py)
 
 入库流水线中的位置：`get_adapter(source)` → `fetch()` → `save_raw` → `normalize` → `ingest_with_dqc` → `save_watermark` → `finally: adapter.close()`。
 

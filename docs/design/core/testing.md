@@ -1,6 +1,6 @@
 # testing
 
-> 域：core · 对应代码 [core/testing.py](core/testing.py)（fixtures 归 tests/）
+> 域：core · 对应代码 [core/testing.py](../../../core/testing.py)（fixtures 归 tests/）
 ## 职责与边界
 
 平台测试策略：pytest 三层目录、单测覆盖约定、hypothesis 性质测试、测试替身、黄金样本端到端对拍。规定**测什么、怎么组织、容差多少**，不含具体测试用例实现。

@@ -1,6 +1,6 @@
 # calendar_adjustment
 
-> 域：data · 对应代码 [data/calendar_adjustment.py](data/calendar_adjustment.py)
+> 域：data · 对应代码 [data/calendar_adjustment.py](../../../data/calendar_adjustment.py)
 
 ## 职责与边界
 
@@ -64,7 +64,7 @@ class PriceAccessor:
 
 ## 实现要点
 
-详见 [data/calendar_adjustment.py](data/calendar_adjustment.py)
+详见 [data/calendar_adjustment.py](../../../data/calendar_adjustment.py)
 
 核心约定:
 - TradingCalendar用bisect实现0(Logn)推移,is_trading_day 0(1) set 查找

@@ -1,6 +1,6 @@
 # dqc_runtime
 
-> 域：data · 对应代码 [data/dqc/report.py](data/dqc/report.py)
+> 域：data · 对应代码 [data/dqc/report.py](../../../data/dqc/report.py)
 ## 职责与边界
 
 DQC 的**运行时**：何时跑、跑多快、失败了怎么办、结果怎么落盘与呈现。规则定义在 [dqc_rules.md](dqc_rules.md)，处置判定在 [dqc_severity.md](dqc_severity.md)，本模块收口执行时机、性能预算、失败重跑、并行策略、报告双表、看板与告警通道。
@@ -61,7 +61,7 @@ python -m data.dqc.engine revalidate --asset X --start S --end E  # 只重验不
 
 ## 实现要点
 
-详见 [data/dqc/report.py](data/dqc/report.py) ·  [data/dqc/engine.py](data/dqc/engine.py)
+详见 [data/dqc/report.py](../../../data/dqc/report.py) ·  [data/dqc/engine.py](../../../data/dqc/engine.py)
 
 核心约定:
 - 报告双表职责:明细答「哪条规则、哪些票、什么值」;汇总答「这批干净不干净、丢了多少」

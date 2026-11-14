@@ -1,6 +1,6 @@
 # reporting
 
-> 域：ops · 对应代码 [ops/reporting.py](ops/reporting.py)
+> 域：ops · 对应代码 [ops/reporting.py](../../../ops/reporting.py)
 ## 职责与边界
 
 产出两类报告：
@@ -42,7 +42,7 @@ def alpha_beta_attribution(portfolio_returns: pd.Series,
 
 ## 实现要点
 
-详见  [ops/reporting.py](ops/reporting.py)
+详见  [ops/reporting.py](../../../ops/reporting.py)
 
 核心约定:
 - 日报在daily_pipeline尾部生成(scheduler.md),包含策略指标表+系统指标表+当日告警列表

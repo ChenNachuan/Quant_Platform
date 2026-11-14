@@ -1,6 +1,6 @@
 # alerting
 
-> 域：ops · 对应代码 [ops/alerting.py](ops/alerting.py)
+> 域：ops · 对应代码 [ops/alerting.py](../../../ops/alerting.py)
 
 ## 职责与边界
 
@@ -54,7 +54,7 @@ def log_alert(payload: dict) -> None:
 
 ## 实现要点
 
-详见 [ops/alerting.py](ops/alerting.py)
+详见 [ops/alerting.py](../../../ops/alerting.py)
 
 核心约定:
 - 去重 key = {date}_{alert_type}_{alpha_type_id},同日同类型不重复

@@ -1,6 +1,6 @@
 # logging
 
-> 域：core · 对应代码 [core/logging.py](core/logging.py)
+> 域：core · 对应代码 [core/logging.py](../../../core/logging.py)
 ## 职责与边界
 
 平台日志与运行记录：Python logging + JSON Lines（console 人读、jsonl 机器查），以及 `logs/runs/` 三类运行元数据的落盘约定。只做**格式与落盘**，不做日志采集/汇聚/检索服务。
@@ -47,7 +47,7 @@ def setup_logging(level: str = "INFO") -> None: ...
 
 ## 实现要点
 
-详见[core/logging.py](core/logging.py)
+详见[core/logging.py](../../../core/logging.py)
 
 核心约定：
 

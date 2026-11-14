@@ -1,6 +1,6 @@
 # storage_ops
 
-> 域：data · 对应代码 [data/storage_ops.py](data/storage_ops.py)
+> 域：data · 对应代码 [data/storage_ops.py](../../../data/storage_ops.py)
 
 ## 职责与边界
 
@@ -59,7 +59,7 @@ def check_capacity(data_root=DATA_ROOT) -> str: ...     # OK | WARNING | CRITICA
 
 ## 实现要点
 
-详见[data/storage_ops.py](data/storage_ops.py)
+详见[data/storage_ops.py](../../../data/storage_ops.py)
 
 核心约定:
 

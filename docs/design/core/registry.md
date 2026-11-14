@@ -1,6 +1,6 @@
 # registry
 
-> 域：core · 对应代码 [core/registry.py](core/registry.py)
+> 域：core · 对应代码 [core/registry.py](../../../core/registry.py)
 
 ## 职责与边界
 
@@ -45,7 +45,7 @@ status 三态：`draft → production → deprecated`。
 
 ## 实现要点
 
-详见[core/registry.py](core/registry.py)
+详见[core/registry.py](../../../core/registry.py)
 
 核心约定：
 

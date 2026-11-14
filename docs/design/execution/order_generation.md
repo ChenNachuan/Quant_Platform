@@ -1,6 +1,6 @@
 # order_generation
 
-> 域：execution · 对应代码 [execution/order_generation.py](execution/order_generation.py)
+> 域：execution · 对应代码 [execution/order_generation.py](../../../execution/order_generation.py)
 
 ## 职责与边界
 
@@ -43,7 +43,7 @@ def check_split_needed(order: dict) -> None:
 
 ## 实现要点
 
-详见 [execution/order_generation.py](execution/order_generation.py)
+详见 [execution/order_generation.py](../../../execution/order_generation.py)
 
 核心约定:
 - compute_order_diff:逐行取最新价>target_shares=floor(weightx nav/price/lot_size)xlot_size+与holdings求差→非零产单

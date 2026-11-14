@@ -1,6 +1,6 @@
 # fee_model
 
-> 域：execution · 对应代码 [execution/fee_model.py](execution/fee_model.py)
+> 域：execution · 对应代码 [execution/fee_model.py](../../../execution/fee_model.py)
 
 ## 职责与边界
 
@@ -48,7 +48,7 @@ class FeeModel:
 
 ## 实现要点
 
-详见[execution/fee_model.py](execution/fee_model.py)
+详见[execution/fee_model.py](../../../execution/fee_model.py)
 
 核心约定:
 - compute返回总费用=佣金 +印花税+过户费+滑点

@@ -1,6 +1,6 @@
 # ledger
 
-> 域：execution · 对应代码 [execution/ledger.py](execution/ledger.py)
+> 域：execution · 对应代码 [execution/ledger.py](../../../execution/ledger.py)
 ## 职责与边界
 
 统一账本数据模型：五个规范 dataclass + 三枚举 + 订单状态机 + Journal 事件流。**不依赖任何引擎类型**，供 SimBroker/QmtBroker 共用。事件流是本体、快照是派生——回测里 Journal 就是回测日志，实盘里是审计日志 + 对拍数据源。
@@ -91,7 +91,7 @@ PartialFilled → Cancelled（部分成交后撤单，已成交部分保留）
 
 ## 实现要点
 
-详见 [execution/ledger.py](execution/ledger.py)
+详见 [execution/ledger.py](../../../execution/ledger.py)
 
 核心约定:
 - 资金流转:下单冻结→每笔fill从frozen转支出(BUY扣成本,SELL入cash)→终态退剩余frozen全额回 cash

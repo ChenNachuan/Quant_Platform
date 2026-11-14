@@ -7,7 +7,7 @@
 截面策略回测路径（A+C 混合）：自研截面组合模拟器 `cs_portfolio_sim`（约 300–400 行）+ 截面回测引擎。截面策略每天收盘 → 全市场一起算 → 输出目标权重矩阵，是纯矩阵运算范式，与逐 bar 单票的时序范式不同——硬塞进事件驱动框架等于用 Excel 跑矩阵运算。
 
 - 负责：`BaseCrossStrategy.on_rebalance` 接口、rebalance 差额调仓模拟（先卖后买、逐笔约束）、`simulate_single_trade`、向量化外壳 + 逐笔内核。
-- 不负责：策略信号本身（[alpha_signal.md](alpha_signal.md) / [ml_signal.md](ml_signal.md)）、账本 dataclass 与 Journal 格式（[execution/ledger.md](execution/ledger.md)）、费用与滑点参数（[execution/fee_model.md](execution/fee_model.md)）、实盘柜台（[execution/broker.md](execution/broker.md)）。
+- 不负责：策略信号本身（[alpha_signal.md](alpha_signal.md) / [ml_signal.md](ml_signal.md)）、账本 dataclass 与 Journal 格式（[../execution/ledger.md](../execution/ledger.md)）、费用与滑点参数（[../execution/fee_model.md](../execution/fee_model.md)）、实盘柜台（[../execution/broker.md](../execution/broker.md)）。
 - 模拟器是薄壳的一部分：直接用账本四件套 + 预检/佣金/手数/持仓更新公共逻辑 + 统一 Journal，不是独立引擎。
 
 > 回改（2026-10-10）：本节的 backtrader / vnpy 相关结论已被 §66.2/§68 修正——**backtrader/vnpy 不用**（pandas 自研 <300 行 + SimBroker/QmtBroker）；alphalens-reloaded 与自研路径不受影响；VectorBT 留 V2 备选。以 §66/§68 为准。

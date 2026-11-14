@@ -1,6 +1,6 @@
 # risk_control
 
-> 域：execution · 对应代码 [execution/risk_control.py](execution/risk_control.py)
+> 域：execution · 对应代码 [execution/risk_control.py](../../../execution/risk_control.py)
 ## 职责与边界
 
 下单前风控：逐规则检查订单列表，返回 PASS/BLOCK 两级结果。目标是防「策略失控 / 操作错误」，**不是防市场风险**。只做 pre-trade，不做盘中 intra-trade 监控。
@@ -55,7 +55,7 @@ def log_risk_audit(check: RiskCheckResult) -> None:
 
 ## 实现要点
 
-详见 [execution/risk_control.py](execution/risk_control.py)
+详见 [execution/risk_control.py](../../../execution/risk_control.py)
 
 核心约定:
 - 逐规则检查,一BLOCK即标记该ticker;金额过小SKIP不拒整批

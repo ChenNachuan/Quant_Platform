@@ -1,6 +1,6 @@
 # broker
 
-> 域：execution · 对应代码 [execution/broker.py](execution/broker.py)
+> 域：execution · 对应代码 [execution/broker.py](../../../execution/broker.py)
 
 ## 职责与边界
 
@@ -55,7 +55,7 @@ def create_broker(mode: str, config: dict) -> Broker:
 
 ## 实现要点
 
-详见 [execution/broker.py](execution/broker.py)
+详见 [execution/broker.py](../../../execution/broker.py)
 
 核心约定:
 - submit_orders内部三步:pre_trade_risk_check→撮合(取价格成交) account.execute_fill(记账+扣费)

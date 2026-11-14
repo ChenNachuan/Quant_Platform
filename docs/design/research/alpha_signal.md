@@ -7,7 +7,7 @@
 统一信号层：把合成分数 / ML 分数汇聚成 `AlphaSignal`，并给出 score→持仓权重的转换。三步主链的第一步（AlphaSignal → Portfolio → Execution）。
 
 - 负责：信号契约（截面分数 + 原因 + 因子快照）、双路径汇聚（from_multi_factor / from_ml_factor）、score→weights、信号落盘。
-- 不负责：因子合成（[factor_combiner.md](factor_combiner.md)）、权重约束求解（约束权威 = PortfolioConstraints，[execution/portfolio_construction.md](execution/portfolio_construction.md)）、时序单票信号（Tick/盘中实时，月频不涉及）、订单生成（[execution/order_generation.md](execution/order_generation.md)）。
+- 不负责：因子合成（[factor_combiner.md](factor_combiner.md)）、权重约束求解（约束权威 = PortfolioConstraints，[../execution/portfolio_construction.md](../execution/portfolio_construction.md)）、时序单票信号（Tick/盘中实时，月频不涉及）、订单生成（[../execution/order_generation.md](../execution/order_generation.md)）。
 - 历史修正一句话：公司 Signal 三层（Blueshift/USignal/Tick）已被 §68.5 坍缩为一层 AlphaSignal；§32 的 CrossSignal/SignalData 两层 schema 随之收敛为本文的 AlphaSignal 一层（Tick 层不做）。
 
 ## 接口签名
@@ -43,8 +43,8 @@ def signal_to_weights(signal_frame: pd.DataFrame,
 
 | 落点 | 字段 |
 |---|---|
-| `data_platform/signals/cross/{strategy_id}/{date}.parquet` | signal_time / ticker / target_weight / score / strategy_id / trade_date |
-| `data_platform/signals/timeseries/{strategy_id}/{date}.parquet` | datetime / ticker / direction / strength / quantity / factor_snapshot / reason |
+| `$QUANT_DATA_ROOT/signals/cross/{strategy_id}/{date}.parquet` | signal_time / ticker / target_weight / score / strategy_id / trade_date |
+| `$QUANT_DATA_ROOT/signals/timeseries/{strategy_id}/{date}.parquet` | datetime / ticker / direction / strength / quantity / factor_snapshot / reason |
 
 SIGNAL 事件写 Journal（EventType 12→13，§34 补 PORTFOLIO→14；事件总表见 [../execution/ledger.md](../execution/ledger.md)）。
 
@@ -90,7 +90,7 @@ class AlphaSignal:
         return signal_to_weights(self.frame, method=method, k=k, **kw)
 ```
 
-下游契约：`to_weights` 产出的 target_weight 只是**无约束初值**，集中度/换手/资金约束由 PortfolioConstraints 求解（失败回退等权不空仓，见 [execution/portfolio_construction.md](execution/portfolio_construction.md)）。
+下游契约：`to_weights` 产出的 target_weight 只是**无约束初值**，集中度/换手/资金约束由 PortfolioConstraints 求解（失败回退等权不空仓，见 [../execution/portfolio_construction.md](../execution/portfolio_construction.md)）。
 
 ## 实施时定稿项
 

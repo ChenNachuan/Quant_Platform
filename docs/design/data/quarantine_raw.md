@@ -1,6 +1,6 @@
 # quarantine_raw
 
-> 域：data · 对应代码 [data/quarantine.py](data/quarantine.py) · [data/normalizers/](data/normalizers/) · [data/raw.py](data/raw.py)
+> 域：data · 对应代码 [data/quarantine.py](../../../data/quarantine.py) · [data/normalizers/](../../../data/normalizers/) · [data/raw.py](../../../data/raw.py)
 ## 职责与边界
 
 三件事：**隔离区**（DQC 拒收的数据放哪、留多久、怎么修复）、 **raw 层**（数据源原样落盘，证据链起点）、**Normalizer**（格式转换，不做清洗）。
@@ -60,7 +60,7 @@ normalizers/{source}_normalizer.py         # normalize(asset_type, raw_df) -> df
 
 ## 实现要点
 
-详见 [data/quarantine.py](data/quarantine.py) · [data/normalizers/](data/normalizers/) · [data/raw.py](data/raw.py)
+详见 [data/quarantine.py](../../../data/quarantine.py) · [data/normalizers/](../../../data/normalizers/) · [data/raw.py](../../../data/raw.py)
 
 核心约定:
 - save_raw 在 DQC之前,save_quarantine在DQC拒收时--两步保证无论通过还是拒收,原始数据都有落盘

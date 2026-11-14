@@ -1,6 +1,6 @@
 # data_revision
 
-> 域：data · 对应代码 [data/data_revision.py](data/data_revision.py)
+> 域：data · 对应代码 [data/data_revision.py](../../../data/data_revision.py)
 
 ## 职责与边界
 
@@ -54,7 +54,7 @@ def mark_factors_stale(record: CorrectionRecord) -> list[str]   # 受影响因�
 
 ## 实现要点
 
-详见  [data/data_revision.py](data/data_revision.py)
+详见  [data/data_revision.py](../../../data/data_revision.py)
 
 核心约定:
 - 检测:重拉→与本地逐行比对→超容差的字段变动记入FieldChange

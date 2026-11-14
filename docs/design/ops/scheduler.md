@@ -1,6 +1,6 @@
 # scheduler
 
-> 域：ops · 对应代码 [ops/scheduler.py](ops/scheduler.py)
+> 域：ops · 对应代码 [ops/scheduler.py](../../../ops/scheduler.py)
 ## 职责与边界
 
 - 何时跑什么：APScheduler + 薄封装，5 类 Job 的编排、触发、重试、失败传导、运行记录。
@@ -56,7 +56,7 @@ def daily_pipeline() -> None:
 
 ## 实现要点
 
-详见 [ops/scheduler.py](ops/scheduler.py)
+详见 [ops/scheduler.py](../../../ops/scheduler.py)
 
 核心约定:
 - daily_pipeline顺序执行5个Job,CronTrigger周一至周五16:45触发

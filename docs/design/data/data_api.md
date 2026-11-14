@@ -1,6 +1,6 @@
 # data_api
 
-> 域：data · 对应代码 [data/data_api.py](data/data_api.py)
+> 域：data · 对应代码 [data/data_api.py](../../../data/data_api.py)
 
 ## 职责与边界
 
@@ -54,7 +54,7 @@ def to_alphalens_factor(factor_df) -> pd.Series                     # MultiIndex
 
 ## 实现要点
 
-详见[data/data_api.py](data/data_api.py)
+详见[data/data_api.py](../../../data/data_api.py)
 
 核心约定:
 - catalog.duckdb 存放于 $QUANT_DATA_ROOT/，持久化存储视图与统计缓存

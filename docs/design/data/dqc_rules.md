@@ -1,6 +1,6 @@
 # dqc_rules
 
-> 域：data · 对应代码 [data/dqc/rules/](data/dqc/rules/) ·  [data/dqc/checks/](data/dqc/checks/) 
+> 域：data · 对应代码 [data/dqc/rules/](../../../data/dqc/rules/) ·  [data/dqc/checks/](../../../data/dqc/checks/) 
 
 ## 职责与边界
 
@@ -120,7 +120,7 @@ DQC **规则库**：44 条四维规则的定义、阈值、版本化与 pandera 
 
 ## 实现要点
 
-详见 [data/dqc/rules/](data/dqc/rules/) ·  [data/dqc/checks/](data/dqc/checks/) 
+详见 [data/dqc/rules/](../../../data/dqc/rules/) ·  [data/dqc/checks/](../../../data/dqc/checks/) 
 
 核心约定:
 - 简单规则在YAML声明(column_check),复杂规则在 checks/custom_checks.py'和 checks/cross_checks.py'实现

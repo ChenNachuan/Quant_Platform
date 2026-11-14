@@ -1,6 +1,6 @@
 # ingestion
 
-> 域：data · 对应代码 [data/ingestion.py](data/ingestion.py)
+> 域：data · 对应代码 [data/ingestion.py](../../../data/ingestion.py)
 
 ## 职责与边界
 
@@ -73,7 +73,7 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 
 ## 实现要点
 
-详见 [data/ingestion.py](data/ingestion.py)
+详见 [data/ingestion.py](../../../data/ingestion.py)
 
 入库流程:
 1. 主源fetch→DQC→写asset

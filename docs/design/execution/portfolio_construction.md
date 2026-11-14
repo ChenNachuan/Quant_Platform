@@ -1,6 +1,6 @@
 # portfolio_construction
 
-> 域：execution · 对应代码 [execution/portfolio_construction.py](execution/portfolio_construction.py)
+> 域：execution · 对应代码 [execution/portfolio_construction.py](../../../execution/portfolio_construction.py)
 
 ## 职责与边界
 
@@ -73,7 +73,7 @@ class PortfolioOptimizer:
 
 ## 实现要点
 
-详见 [execution/portfolio_construction.py](execution/portfolio_construction.py)
+详见 [execution/portfolio_construction.py](../../../execution/portfolio_construction.py)
 
 核心约定:
 - solve()两步:约束裁剪(clip weight→clip industry→归一 →  clip turnover) → 手数取整(floor_to_lot + min_trade_value过滤)

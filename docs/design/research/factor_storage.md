@@ -7,22 +7,22 @@
 因子值的物理落盘布局：每因子一目录、语义化版本目录、按年 Parquet、metadata.json 元数据、append/full 两种写入、DuckDB 查询与 `load_factor_matrix()` 逻辑宽表。存 [factor_interface.md](factor_interface.md) 的 `compute()` 原始输出（§60 存原始值决策，NaN 保留不填）。
 
 - 输入：`compute()` / [factor_runtime.md](factor_runtime.md) 产出的 `DataFrame[date, ticker, {factor_name}]`
-- 输出：`data_platform/factors/{name}/v{version}/{year}.parquet + metadata.json`；ML 因子另有 `model/model.joblib`（随因子 version 走）
+- 输出：`$QUANT_DATA_ROOT/factors/{name}/v{version}/{year}.parquet + metadata.json`；ML 因子另有 `model/model.joblib`（随因子 version 走）
 - 不属于本模块：行情 bars（data 域）、回测产物 `outputs/`、后处理（消费时做，[post_processor.md](post_processor.md)）
 
 ## 接口签名
 
 ```python
 def save_factor_append(factor, result: pd.DataFrame,
-                       base_dir: str = "data_platform/factors") -> None: ...
+                       base_dir: str = str(DATA_ROOT / "factors")) -> None: ...
     # 日常增量：按 date 前 4 位拆年，当年文件 concat + drop_duplicates([date,ticker]) 再写
-def save_factor_full(factor, result, base_dir="data_platform/factors") -> None: ...
+def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None: ...
     # 全量：覆盖当前版本目录（或写新版本目录），按年落盘
 def load_factor(name, start, end, version="1.0",
-                base_dir="data_platform/factors") -> pd.DataFrame: ...
+                base_dir=str(DATA_ROOT / "factors")) -> pd.DataFrame: ...
     # 读年文件并按 [start, end] 裁剪 date 列（YYYYMMDD 字符串比较即时间序）
 def load_factor_matrix(names: list[str], start, end, version="1.0",
-                       base_dir="data_platform/factors") -> pd.DataFrame: ...
+                       base_dir=str(DATA_ROOT / "factors")) -> pd.DataFrame: ...
     # 多因子 outer join 拼宽表 (date, ticker, f1, f2, ...)，对标公司 GetViewer
 def write_metadata(out_dir, factor, result) -> None: ...
 ```
@@ -30,7 +30,7 @@ def write_metadata(out_dir, factor, result) -> None: ...
 目录与 schema：
 
 ```text
-data_platform/factors/{factor_name}/
+$QUANT_DATA_ROOT/factors/{factor_name}/
 ├── v1.0/               ← 语义化版本目录，多版本共存不覆盖
 │   ├── 2020.parquet … 2024.parquet   ← 按年分区
 │   └── metadata.json
@@ -67,7 +67,7 @@ metadata.json：factor_name/version/description/category/frequency/asset_types +
 ## 实现要点
 
 ```python
-def save_factor_append(factor, result, base_dir="data_platform/factors"):
+def save_factor_append(factor, result, base_dir=str(DATA_ROOT / "factors")):
     out_dir = Path(base_dir) / factor.name / f"v{factor.version}"
     out_dir.mkdir(parents=True, exist_ok=True)
     result = result.copy()
@@ -82,10 +82,10 @@ def save_factor_append(factor, result, base_dir="data_platform/factors"):
         chunk.to_parquet(path, compression="zstd", compression_level=3, index=False)
     write_metadata(out_dir, factor, result)
 
-def save_factor_full(factor, result, base_dir="data_platform/factors"):
+def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")):
     # 同上但不 concat 旧文件，直接覆盖各年 parquet；写 metadata.json
 
-def load_factor_matrix(names, start, end, version="1.0", base_dir="data_platform/factors"):
+def load_factor_matrix(names, start, end, version="1.0", base_dir=str(DATA_ROOT / "factors")):
     frames = [load_factor(n, start, end, version, base_dir).set_index(["date", "ticker"])
               for n in names]
     wide = pd.concat(frames, axis=1, join="outer").reset_index()
@@ -94,8 +94,8 @@ def load_factor_matrix(names, start, end, version="1.0", base_dir="data_platform
 
 - 写入模式触发表：version 变 → full 写新版本目录；`force=True` → full 覆盖当前版；depends_hash 变（上游修正）→ full 覆盖（保守不混写）；新交易日 → append
 - 月度一致性校验：full 重算与 append 目录 diff（行数一致、值一致容差 1e-12），不一致以全量为准覆盖
-- DuckDB 查询：`read_parquet('data_platform/factors/{name}/v1.0/2024.parquet')` / glob `*.parquet` / 多因子 JOIN 或直接 `load_factor_matrix()`
-- 三目录划分：`data_platform/asset/`（行情）/ `data_platform/factors/`（本节）/ `outputs/`（回测产物，§54.9/§55）
+- DuckDB 查询：`read_parquet('$QUANT_DATA_ROOT/factors/{name}/v1.0/2024.parquet')` / glob `*.parquet` / 多因子 JOIN 或直接 `load_factor_matrix()`
+- 三目录划分：`$QUANT_DATA_ROOT/asset/`（行情）/ `$QUANT_DATA_ROOT/factors/`（本节）/ `outputs/`（回测产物，§54.9/§55）
 - 与 §58 缓存衔接：缓存目录草图 `{range}.parquet` 细化为 `{year}.parquet`；缓存 key 的 version/depends_hash 由 metadata.json 镜像。新增代码 ≈65 行
 
 ## 实施时定稿项

@@ -1,6 +1,6 @@
 # config
 
-> 域：core · 对应代码 [core/config.py](core/config.py)
+> 域：core · 对应代码 [core/config.py](../../../core/config.py)
 
 ## 职责与边界
 

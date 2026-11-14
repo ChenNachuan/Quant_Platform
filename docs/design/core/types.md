@@ -1,6 +1,6 @@
 # types
 
-> 域：core · 对应代码 [core/types.py](core/types.py)
+> 域：core · 对应代码 [core/types.py](../../../core/types.py)
 
 ## 职责与边界
 
@@ -33,5 +33,5 @@
 
 ## 实现要点
 
-详见[core/types.py](core/types.py)
+详见[core/types.py](../../../core/types.py)
 归属约定：`core/types.py` 放跨域引用的类型定义本体；各域模块放以自己为权威的 schema 文档与构造逻辑。状态机（6 态）与费用归属见 ../execution/ledger.md，不在这里重复。

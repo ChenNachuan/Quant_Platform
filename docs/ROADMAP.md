@@ -316,7 +316,7 @@
 | **目标** | 主备源协作口径落地（单源写 asset、多源只校验补缺）；交易日历 / 复权 / 连续合约全平台统一坐标系；数据回溯修正闭环。 |
 | **模块** | `design/data/ingestion.md` · `calendar_adjustment.md` · `data_revision.md` |
 | **前置** | S9 |
-| **产出物** | `data_platform/config/source_priority.yaml`、`data/ingestion.py`、`data/calendar_adjustment.py`、`data/data_revision.py` |
+| **产出物** | `config/source_priority.yaml`、`data/ingestion.py`、`data/calendar_adjustment.py`、`data/data_revision.py` |
 
 **任务切分**
 
@@ -398,7 +398,7 @@
 | 项 | 内容 |
 |---|---|
 | **目标** | 执行 §5 的归档 / 迁移批次 M3–M7；登记 V2/V3/V4 与 L2 预留项。**本阶段本身不新增业务实现。** |
-| **模块** | `design/data/l2_data.md`（使用路径登记，不展开）+ §5 迁移映射表 |
+| **模块** | `design/data/level2_data.md`（使用路径登记，不展开）+ §5 迁移映射表 |
 | **前置** | S1–S12 全部通过 |
 | **产出物** | 归档 PR（批量删除 / 路径迁移，**分批回归**）、`docs/PROJECT_STRUCTURE.md` 更新、V2+ 登记清单 |
 
@@ -431,7 +431,7 @@
 | S10 | 多源仲裁 + 日历复权 + 修订闭环 | data: ingestion·calendar_adjustment·data_revision（3） | S9 | 容差五档 + 夜盘归属 + qfq 公式 + 修正走完整流水线 |
 | S11 | 评价门控 + 治理 + 配方 + ML 信号 | research: factor_evaluation·factor_governance·alpha_type·ml_signal（4） | S5,S6 | 门控公式 + 五态生命周期 + 失败 hold 不清仓 |
 | S12 | 日频流水线 + 指标/告警/日报闭环 | ops: scheduler·monitoring·reporting·alerting（4） | S9,S11 | 5 Job 顺序 + 失败传导 + 归因 α/β 容差 0.02 |
-| S13 | 迁移收口、归档、V2+ 登记 | l2_data 登记（1）+ §5 批次 | S1–S12 | 全量测试仍绿 + 归档 grep 无残留 |
+| S13 | 迁移收口、归档、V2+ 登记 | level2_data 登记（1）+ §5 批次 | S1–S12 | 全量测试仍绿 + 归档 grep 无残留 |
 
 **模块计数**：5+1+3+2+2+2+7+0+5+3+4+4+1 = **39**。
 
@@ -593,8 +593,8 @@
 | 期货（连续合约 / 夜盘归属 / 保证金账本 / 逐日盯市） | V3 | 新账本，**不复用 SimAccount**；`infra/futures_continuous.py` 届时迁 `data/calendar_adjustment.build_continuous`；`engine/backtest/` 期货回测届时迁 |
 | 期货 ALSTM 策略 | V3 | `strategies/futures/alstm/` 保留回归基准，届时迁 research/ml_signal + factor_runtime.MLFactor |
 | 期权 | V4+ | 不推荐散户，最后做 |
-| L2 / tick 表 `tick_futures_l2`（27 列） | Phase 2 | schema 已预留；使用路径已定 = **离线因子原料**（`l2_data.md` 路径 A），不进事件流；DQC/存储优化届时再做 |
-| L2 微观结构因子脚本 | Phase 2 | `l2_data.md`：L2 表 → 离线因子脚本 → 日频/分钟频因子值 → FactorPipeline。**不加 TICK / DEPTH_UPDATE 事件**（红线 1/2） |
+| L2 / tick 表 `tick_futures_l2`（27 列） | Phase 2 | schema 已预留；使用路径已定 = **离线因子原料**（`level2_data.md` 路径 A），不进事件流；DQC/存储优化届时再做 |
+| L2 微观结构因子脚本 | Phase 2 | `level2_data.md`：L2 表 → 离线因子脚本 → 日频/分钟频因子值 → FactorPipeline。**不加 TICK / DEPTH_UPDATE 事件**（红线 1/2） |
 | 自适应 DQC 阈值（K09 滚动算法） | phase-2 | `dqc_rules.md`：先固定 + 统计阈值跑通 |
 | 小文件 compaction / L2 按月合并 | Phase 2 | `storage_ops.md` |
 | 数据湖迁移（`data_lake/` Hive → `data_platform/` 扁平） | 批次 M2/M7 | `storage_schema.md` / `storage_ops.md` 迁移脚本待写 |

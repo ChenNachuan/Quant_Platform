@@ -65,8 +65,8 @@ AlphaSignal → Portfolio → Execution
                             └── broker.submit_orders() 内部封装：风控 + 撮合 + 记账
 ```
 
-- AlphaSignal：截面分数 DataFrame ->  [reasearch/alpha_signal.md](reasearch/alpha_signal.md)
-- Protofolio：目标持仓构建 ->  [execution/portfolio_construiction.md](execution/portfolio_construiction.md)
+- AlphaSignal：截面分数 DataFrame ->  [research/alpha_signal.md](research/alpha_signal.md)
+- Portfolio：目标持仓构建 ->  [execution/portfolio_construction.md](execution/portfolio_construction.md)
 - Execution: 风控 + 撮合 + 记账 -> [execution/broker.md](execution/broker.md)
 
 **接口边界在函数，不在产品**。执行域只认目标持仓（TargetPortfolio），订单由执行域自己算。薄壳**是"翻译官"**，把各框架方言翻译成薄壳 dataclass，不替代框架做它擅长的事。
@@ -78,7 +78,7 @@ Factor(compute) → FactorDAG(拓扑) → PostProcessor → per-factor-one-table
   → FactorCombiner → AlphaSignal   =  "DataFrame 流水线"
 ```
 
-静态拓扑DAG，不用时间订阅————离线计算无实时事件流、依赖关系静态、DataFrame天然批量。详见[reasearch/factor_interface.md](reasearch/factor_interface.md)和[research/factor_runtime.md](research/factor_runtime.md)。
+静态拓扑DAG，不用时间订阅————离线计算无实时事件流、依赖关系静态、DataFrame天然批量。详见[research/factor_interface.md](research/factor_interface.md)和[research/factor_runtime.md](research/factor_runtime.md)。
 
 alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/滑点/涨跌停），不是验证层；与正式回测结论矛盾时**以回测为准**。
 

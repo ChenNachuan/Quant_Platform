@@ -7,8 +7,8 @@
 策略配方治理：alphaType 注册（meta-info + publish 双表）、7 维标签、五态生命周期、规则库（Rule ABC + RulePipeline）、Signal 产出调度、Portfolio 约束求解入口。公司 PMS 的 alphaType 维表 + 计算器注册 + 发布流水线的个人版——取其结构，去其流程（单人 <10 策略，无审批流）。
 
 - 负责：`alphaType = signal_source + rules + params` 的注册与流转；标签与查询；规则实例化与串联；run_daily_signal 调度与失败 hold；build_portfolio 解析解 + 约束检查。
-- 不负责：信号计算（[alpha_signal.md](alpha_signal.md)）、ML 模型治理（[ml_signal.md](ml_signal.md)）、因子注册（FactorRegistry，[factor_governance.md](factor_governance.md)）、手数取整/订单（[execution/order_generation.md](execution/order_generation.md) §17.3/§34.4）、TargetPortfolio 字段级定义（[execution/portfolio_construction.md](execution/portfolio_construction.md)）。
-- 与 configs/strategies/*.toml 的分工：**配方 = 结构引用，config = 数值参数**（§13.1）。
+- 不负责：信号计算（[alpha_signal.md](alpha_signal.md)）、ML 模型治理（[ml_signal.md](ml_signal.md)）、因子注册（FactorRegistry，[factor_governance.md](factor_governance.md)）、手数取整/订单（[../execution/order_generation.md](../execution/order_generation.md) §17.3/§34.4）、TargetPortfolio 字段级定义（[../execution/portfolio_construction.md](../execution/portfolio_construction.md)）。
+- 与 config/strategies/*.toml 的分工：**配方 = 结构引用，config = 数值参数**（§13.1）。
 
 ## 接口签名
 
