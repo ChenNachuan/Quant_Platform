@@ -79,4 +79,10 @@ design/
   - [07. 公募基金（ETF / LOF / OTC）](data_source/StrightFlush/07-funds.md) · [08. 期货与期权](data_source/StrightFlush/08-futures-and-options.md)
   - [09. 资讯、公告与快讯](data_source/StrightFlush/09-news-and-events.md) · [10. MCP 服务与开发工具](data_source/StrightFlush/10-mcp-and-dev-tools.md) · [11. AI 客户端专属与规划中接口](data_source/StrightFlush/11-ai-client-only.md)
 
-### 4. **Tushare** — 待补充
+### 4. **Tushare（Tushare Pro）**
+  - [总目录与平台接入约定](data_source/Tushare/README.md)
+  - [01. 鉴权、通用协议、权限与坑点](data_source/Tushare/01-auth-protocol-and-limits.md) · [02. A 股基础数据与交易日历](data_source/Tushare/02-a-share-basic-and-calendar.md)
+  - [03. A 股行情、复权因子与停复牌](data_source/Tushare/03-a-share-market-and-adj.md) · [04. A 股财务报表与参考数据](data_source/Tushare/04-a-share-financials-and-ref.md)
+  - [05. 特色数据、两融、资金流向与打板专题](data_source/Tushare/05-a-share-special-margin-flow-hot.md) · [06. ETF、指数行业与公募基金](data_source/Tushare/06-etf-index-and-funds.md)
+  - [07. 期货、现货黄金与期权](data_source/Tushare/07-futures-options-and-spot.md) · [08. 债券可转债、外汇、港股与美股](data_source/Tushare/08-bonds-fx-hk-us.md)
+  - [09. 宏观经济（国内、美国与韩国市场）](data_source/Tushare/09-macro-economy.md) · [10. 大模型语料、量化因子库、自选组合与 MCP](data_source/Tushare/10-llm-corpus-factors-mcp.md)
