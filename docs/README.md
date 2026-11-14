@@ -69,7 +69,12 @@ design/
   - [05. ETF、指数、可转债、国债与期权](data_source/AmazingData/05-etf-index-kzz-and-options.md) · [06. 技术指标库（57 项）](data_source/AmazingData/06-technical-indicators.md)
   - [07. 量化算子库（108 项）](data_source/AmazingData/07-quant-operators.md) · [08. MCP Server 工具清单（26 项）](data_source/AmazingData/08-mcp-server.md)
 
-### 2. **QDCData** — 待补充
+### 2. **QDCData**
+  - [总目录与平台接入约定](data_source/QDCData/README.md)
+  - [01. 命令行下载器与本地 MCP](data_source/QDCData/01-cli-downloader-and-local-mcp.md) · [02. 存储格式、时区与防踩坑约定](data_source/QDCData/02-format-timezone-and-pit-conventions.md)
+  - [03. 在线 API、Python SDK 与远程 MCP](data_source/QDCData/03-online-api-and-remote-mcp.md) · [04. A 股行情、指数、板块、ETF、可转债与期权](data_source/QDCData/04-a-share-bars-tick-and-derivatives.md)
+  - [05. A 股财务、预期、资金流、事件与参考数据](data_source/QDCData/05-a-share-financials-flows-and-ref.md) · [06. 国内期货、港股、美股、外汇国际与数字货币](data_source/QDCData/06-futures-hk-us-fx-and-crypto.md)
+  - [07. 新闻事件、宏观经济与另类稀缺数据](data_source/QDCData/07-news-macro-and-alternative.md)
 
 ### 3. **StraightFlush（同花顺 Fuyao）**
   - [总目录与平台接入约定](data_source/StrightFlush/README.md)
