@@ -36,7 +36,7 @@ from data.storage_schema import PARTITION_PATHS, SCHEMA  # noqa: E402
 # DATA_ROOT imported from core.config above
 
 #: Where ``TUSHARE_TOKEN`` may live.  Read, never printed, never committed.
-_TOKEN_FILES = (Path(".env"), Path("config/secrets"))
+_TOKEN_FILES = (Path("config/.env"), Path("config/secrets"))
 
 #: Columns filled with a constant when the source cannot supply them.  A
 #: missing column outside this map must be nullable in the schema (filled with
@@ -65,8 +65,8 @@ def init_tushare():
     token = _read_token()
     if not token:
         raise RuntimeError(
-            "TUSHARE_TOKEN not found in .env or config/secrets — "
-            "copy .env.example to .env and fill it in"
+            "TUSHARE_TOKEN not found in config/.env or config/secrets — "
+            "copy config/.env.example to config/.env and fill it in"
         )
     import tushare as ts
 

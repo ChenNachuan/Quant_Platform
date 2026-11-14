@@ -106,16 +106,19 @@ class TestEnvGuard:
         secret = tmp_path / "secret.env"
         secret.write_text("KEY=real_secret\n")
 
-        # config/.env must not already exist (checked in; this test owns it).
-        assert not real_env.exists(), "config/.env unexpectedly exists"
-
-        # Plant the symlink LATE, after conftest module load.
-        real_env.symlink_to(secret)
+        temp_backup = None
+        if real_env.exists():
+            temp_backup = real_env.with_suffix(".tmp_real_env_backup")
+            real_env.rename(temp_backup)
         try:
+            real_env.symlink_to(secret)
             with pytest.raises(RuntimeError, match="forbidden"):
                 open(real_env)
         finally:
-            real_env.unlink()
+            if real_env.is_symlink() or real_env.exists():
+                real_env.unlink()
+            if temp_backup and temp_backup.exists():
+                temp_backup.rename(real_env)
 
 
 class TestBudgetsRegistered:

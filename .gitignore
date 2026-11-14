@@ -4,7 +4,6 @@
 task/
 .multica/
 
-
 *.db
 *.duckdb
 *.duckdb.wal
@@ -24,8 +23,9 @@ task/
 # =============================================
 .env
 .env.*
-!.env.example
 config/.env
+config/.env.*
+!config/.env.example
 config.json
 *secret*
 *api_key*
