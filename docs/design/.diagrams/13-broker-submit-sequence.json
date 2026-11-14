@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "broker.submit_orders() 风控、撮合与记账时序",
+    "subtitle": "回测（SimBroker）与实盘（QmtBroker）共用同一提交闭环 · 边界在函数不在产品",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/13-broker-submit-sequence.html",
+    "column_fit": "spread",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "default": {
+          "label": "常规调用"
+        },
+        "emphasis": {
+          "label": "主链提交 / 成交"
+        },
+        "security": {
+          "label": "风控拦截 / 审计"
+        },
+        "dashed": {
+          "label": "异步日志落盘"
+        },
+        "return": {
+          "label": "状态与结果返回"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "runner",
+      "type": "frontend",
+      "label": "策略主循环",
+      "sublabel": "rebalance_dates"
+    },
+    {
+      "id": "broker",
+      "type": "backend",
+      "label": "Broker",
+      "sublabel": "Sim / Qmt 工厂"
+    },
+    {
+      "id": "risk",
+      "type": "security",
+      "label": "风控 7 规则",
+      "sublabel": "pre_trade_check"
+    },
+    {
+      "id": "match",
+      "type": "cloud",
+      "label": "撮合与费用",
+      "sublabel": "收盘价 + FeeModel"
+    },
+    {
+      "id": "account",
+      "type": "backend",
+      "label": "SimAccount",
+      "sublabel": "持仓与现金账本"
+    },
+    {
+      "id": "journal",
+      "type": "database",
+      "label": "Journal & 审计",
+      "sublabel": "Parquet + jsonl"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 255,
+      "label": "1. 下单前风控与审计"
+    },
+    {
+      "from": 265,
+      "to": 385,
+      "label": "2. 撮合与算费"
+    },
+    {
+      "from": 395,
+      "to": 510,
+      "label": "3. 记账与事件持久化"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m1",
+      "from": "runner",
+      "to": "broker",
+      "y": 165,
+      "label": "submit_orders(orders)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m2",
+      "from": "broker",
+      "to": "risk",
+      "y": 195,
+      "label": "pre_trade_risk_check(7规则)",
+      "variant": "security"
+    },
+    {
+      "id": "m3",
+      "from": "risk",
+      "to": "journal",
+      "y": 225,
+      "label": "log_risk_audit → jsonl",
+      "variant": "dashed"
+    },
+    {
+      "id": "m4",
+      "from": "risk",
+      "to": "broker",
+      "y": 250,
+      "label": "PASS / SKIP / BLOCK",
+      "variant": "return"
+    },
+    {
+      "id": "m5",
+      "from": "broker",
+      "to": "match",
+      "y": 290,
+      "label": "收盘价撮合 + FeeModel 算费",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m6",
+      "from": "match",
+      "to": "broker",
+      "y": 345,
+      "label": "fill_price + fees（无价→REJECTED）",
+      "variant": "return"
+    },
+    {
+      "id": "m7",
+      "from": "broker",
+      "to": "account",
+      "y": 405,
+      "label": "execute_fill(order, price, fees)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m8",
+      "from": "account",
+      "to": "journal",
+      "y": 438,
+      "label": "写 ORDER / TRADE / POSITION",
+      "variant": "dashed"
+    },
+    {
+      "id": "m9",
+      "from": "account",
+      "to": "broker",
+      "y": 468,
+      "label": "更新 cash / holdings",
+      "variant": "return"
+    },
+    {
+      "id": "m10",
+      "from": "broker",
+      "to": "runner",
+      "y": 498,
+      "label": "fills / rejections",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "broker",
+      "from": 165,
+      "to": 498,
+      "type": "backend"
+    },
+    {
+      "participant": "risk",
+      "from": 195,
+      "to": 250,
+      "type": "security"
+    },
+    {
+      "participant": "match",
+      "from": 290,
+      "to": 345,
+      "type": "cloud"
+    },
+    {
+      "participant": "account",
+      "from": 405,
+      "to": 468,
+      "type": "backend"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "风控两级拦截与金额过滤",
+      "items": [
+        "7 规则检查 PASS / BLOCK（单票<=25%、总仓位<=95%、禁空、禁ST）+ <5000 元单笔 SKIP 不拒整批",
+        "换手>150% 与 流动性>1% 仅发告警不硬拦截，所有拦截 append-only 写 risk_audit.jsonl"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Sim / Qmt 同路径对拍",
+      "items": [
+        "Broker ABC 封顶 4 方法；V1 停牌无价即整单 REJECTED，不模拟部分成交",
+        "模拟盘 2–4 周对拍信号一致率、成交价/率偏差与净值跟踪误差后方可切实盘"
+      ]
+    }
+  ]
+}

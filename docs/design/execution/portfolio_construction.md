@@ -8,10 +8,9 @@ Signal → Portfolio 的**约束满足层**：接受策略产出的连续目标�
 
 **权重分配（等权 / score 加权 / 风险平价 / 均值-方差四法）发生在策略内部**（scores → weights），本模块**不求最优、只做约束满足**。信号链三层拆分：
 
-```text
-Signal（我觉得这些票好）→ Portfolio（我要持有这些仓位）→ Order（买卖差额）
-CrossSignal.target_weights → PortfolioOptimizer.solve() → TargetPortfolio.positions
-```
+![信号 → 目标组合 → 交易订单三层换算流](../.diagrams/11-portfolio-order-dataflow.png)
+
+> [打开 Archify 交互图](../.diagrams/11-portfolio-order-dataflow.html)
 
 时序策略无此层：`SignalData` 直接转 Order（逐票决策，无组合级约束）。CTA 组合约束（如总保证金上限）将来再做简化版。
 

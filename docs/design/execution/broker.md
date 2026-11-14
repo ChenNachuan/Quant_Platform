@@ -6,6 +6,12 @@
 
 柜台抽象与撮合：`Broker` ABC 四方法封顶，`SimBroker`（回测/paper 共用）与 `QmtBroker`（V2 实盘）经工厂切换——**回测与实盘同一代码路径**，差异只注入在 Broker 实现。`submit_orders()` 内部三步 = 风控 + 撮合 + 记账。不做撤单/改单/行情/事件回调。
 
+### submit_orders() 闭环时序
+
+![broker.submit_orders() 风控、撮合与记账时序](../.diagrams/13-broker-submit-sequence.png)
+
+> [打开 Archify 交互图](../.diagrams/13-broker-submit-sequence.html)
+
 ## 接口签名
 
 ```python

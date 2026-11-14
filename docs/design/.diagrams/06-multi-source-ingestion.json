@@ -1,0 +1,271 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "多源入库仲裁、补缺与交叉校验流程",
+    "subtitle": "单源写 asset/ 保证血缘唯一 · 备源仅校验与降级补缺（4 个激活源）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/design/.diagrams/06-multi-source-ingestion.html",
+    "legend": {
+      "entries": {
+        "security": { "label": "仲裁与质检网关" },
+        "backend": { "label": "主链路处理引擎" },
+        "database": { "label": "数据落盘存储" },
+        "external": { "label": "备用数据源" },
+        "cloud": { "label": "恢复覆盖策略" },
+        "messagebus": { "label": "交叉校验报告" }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "primary",
+      "label": "主源入库链路"
+    },
+    {
+      "id": "fallback",
+      "label": "备源降级补数",
+      "variant": "exception"
+    },
+    {
+      "id": "crosscheck",
+      "label": "备源交叉校验"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p1",
+      "label": "仲裁与拉取",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "p2",
+      "label": "质检与写入",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "p3",
+      "label": "跨源比对与次日修复",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_pri",
+      "label": "唯一主源写入通道",
+      "lane": "primary",
+      "fromCol": 1,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "g_fb",
+      "label": "降级补缺闭环",
+      "lane": "fallback",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "priority",
+    "pri_fetch",
+    "pri_dqc",
+    "asset_write",
+    "cross_chk",
+    "cross_out"
+  ],
+  "nodes": [
+    {
+      "id": "priority",
+      "lane": "primary",
+      "col": 0,
+      "type": "security",
+      "label": "source_priority.yaml",
+      "sublabel": "唯一主源 + field_override",
+      "tag": "51 表仲裁",
+      "width": 138
+    },
+    {
+      "id": "pri_fetch",
+      "lane": "primary",
+      "col": 1,
+      "type": "backend",
+      "label": "主源 fetch & 转换",
+      "sublabel": "tushare / qdc / ad / ths",
+      "width": 138
+    },
+    {
+      "id": "pri_dqc",
+      "lane": "primary",
+      "col": 2,
+      "type": "security",
+      "label": "DQC 网关校验",
+      "sublabel": "HARD 拦截 + SOFT 标",
+      "width": 138
+    },
+    {
+      "id": "asset_write",
+      "lane": "primary",
+      "col": 3,
+      "type": "database",
+      "label": "写入 asset/ 层",
+      "sublabel": "source_tag 写 metadata",
+      "tag": "单源真相",
+      "width": 138
+    },
+    {
+      "id": "bak_fetch",
+      "lane": "fallback",
+      "col": 2,
+      "type": "external",
+      "label": "启用备源 Normalizer",
+      "sublabel": "主源 HARD 失败触发",
+      "width": 138
+    },
+    {
+      "id": "backfill",
+      "lane": "fallback",
+      "col": 3,
+      "type": "database",
+      "label": "备源补数落盘",
+      "sublabel": "tag={backup}:backfill",
+      "tag": "降级告警",
+      "width": 138
+    },
+    {
+      "id": "next_day",
+      "lane": "fallback",
+      "col": 4,
+      "type": "cloud",
+      "label": "主源恢复次日覆盖",
+      "sublabel": "不自动回填 · 手动 --force",
+      "width": 138
+    },
+    {
+      "id": "bak_raw",
+      "lane": "crosscheck",
+      "col": 1,
+      "type": "database",
+      "label": "备源 raw 到齐",
+      "sublabel": "should_cross_check()",
+      "width": 138
+    },
+    {
+      "id": "cross_chk",
+      "lane": "crosscheck",
+      "col": 4,
+      "type": "backend",
+      "label": "cross_source_check",
+      "sublabel": "按字段容差比对",
+      "tag": "Normalizer 后",
+      "width": 138
+    },
+    {
+      "id": "cross_out",
+      "lane": "crosscheck",
+      "col": 5,
+      "type": "messagebus",
+      "label": "cross_check/ 落盘",
+      "sublabel": "<0.1% 静默 / >1% ERR",
+      "tag": "adj 差异必警",
+      "width": 138
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "priority",
+      "to": "pri_fetch",
+      "label": "指定主源",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e2",
+      "from": "pri_fetch",
+      "to": "pri_dqc",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e3",
+      "from": "pri_dqc",
+      "to": "asset_write",
+      "label": "通过",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e4",
+      "from": "pri_dqc",
+      "to": "bak_fetch",
+      "label": "HARD 失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e5",
+      "from": "bak_fetch",
+      "to": "backfill",
+      "label": "补缺",
+      "variant": "security"
+    },
+    {
+      "id": "e6",
+      "from": "backfill",
+      "to": "next_day",
+      "variant": "dashed"
+    },
+    {
+      "id": "e7",
+      "from": "priority",
+      "to": "bak_raw",
+      "label": "备源队列",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e8",
+      "from": "asset_write",
+      "to": "cross_chk",
+      "label": "主源入库",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e9",
+      "from": "bak_raw",
+      "to": "cross_chk",
+      "label": "双源就绪",
+      "variant": "dashed"
+    },
+    {
+      "id": "e10",
+      "from": "cross_chk",
+      "to": "cross_out",
+      "label": "分级响应",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "单源写入与字段覆盖",
+      "items": [
+        "priority[0] 为唯一主写源，严禁多源混合写入污染血缘",
+        "field_override 可指定单字段权威源（如 adjfactor / pe_ttm 强制信 tushare）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "不做自动选主 + 跨源分级",
+      "items": [
+        "主源故障时备源仅打 {backup}:backfill 写入 metadata 临时顶替，待主源恢复次日覆盖",
+        "跨源比对在 Normalizer 之后执行；adjfactor 不一致始终告警"
+      ]
+    }
+  ]
+}

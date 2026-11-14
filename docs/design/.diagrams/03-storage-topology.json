@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "$QUANT_DATA_ROOT 五层存储与 DuckDB 拓扑",
+    "subtitle": "Parquet 唯一持久化真相 + catalog.duckdb 持久化视图与缓存",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/03-storage-topology.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "external": { "label": "外部采集输入" },
+        "database": { "label": "Parquet 分区存储" },
+        "security": { "label": "隔离区与校验审计" },
+        "backend": { "label": "查询与调度服务" },
+        "cloud": { "label": "运维日志旁路" }
+      }
+    }
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [65, 95],
+    "cols": 4,
+    "gapX": 95,
+    "gapY": 95,
+    "cellW": 195,
+    "cellH": 72
+  },
+  "components": [
+    {
+      "id": "adapters",
+      "type": "external",
+      "label": "SourceAdapters",
+      "sublabel": "tushare / qdc / ad / ths",
+      "row": 0,
+      "col": 0,
+      "size": [195, 68]
+    },
+    {
+      "id": "raw_dir",
+      "type": "database",
+      "label": "raw/",
+      "sublabel": "{source}/{asset}/{date}.parquet",
+      "row": 0,
+      "col": 1,
+      "size": [195, 68],
+      "tag": "原样落盘 · 保留 1 年"
+    },
+    {
+      "id": "quarantine_dir",
+      "type": "security",
+      "label": "quarantine/",
+      "sublabel": "{asset}/{date} + rejection.json",
+      "row": 0,
+      "col": 2,
+      "size": [195, 68],
+      "tag": "DQC 拒收 · T+30 清理"
+    },
+    {
+      "id": "audit_dirs",
+      "type": "security",
+      "label": "dqc/ · cross_check/ · manifest/",
+      "sublabel": "质检报告 / 交叉比对 / 清单",
+      "row": 0,
+      "col": 3,
+      "size": [205, 68]
+    },
+    {
+      "id": "asset_dir",
+      "type": "database",
+      "label": "asset/（51 张规范表）",
+      "sublabel": "47 A 股(日历/股/ETF/基金) + 4 期货",
+      "row": 1,
+      "col": 1,
+      "size": [205, 72],
+      "tag": "单目录单 Schema · 永久"
+    },
+    {
+      "id": "duckdb_cat",
+      "type": "backend",
+      "label": "catalog.duckdb",
+      "sublabel": "持久化视图定义与统计缓存",
+      "row": 1,
+      "col": 2,
+      "size": [195, 68],
+      "tag": "read_parquet"
+    },
+    {
+      "id": "data_api",
+      "type": "backend",
+      "label": "DataAPI / load_bars()",
+      "sublabel": "统一查询 + qfq/hfq 读时派生",
+      "row": 1,
+      "col": 3,
+      "size": [195, 68]
+    },
+    {
+      "id": "factors_dir",
+      "type": "database",
+      "label": "factors/（第 52 张表）",
+      "sublabel": "cn_stock_factors/{name}_v{ver}/",
+      "row": 2,
+      "col": 1,
+      "size": [205, 70],
+      "tag": "年分区 + metadata.json"
+    },
+    {
+      "id": "ops_logs",
+      "type": "cloud",
+      "label": "logs/runs/",
+      "sublabel": "jobs / backtests / live .jsonl",
+      "row": 2,
+      "col": 2,
+      "size": [195, 68]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "$QUANT_DATA_ROOT 持久化数据根（无 ext/ 与 cn_reference/ 混合目录）",
+      "wraps": ["raw_dir", "quarantine_dir", "audit_dirs", "asset_dir", "duckdb_cat", "factors_dir", "ops_logs"],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-adp-raw",
+      "from": "adapters",
+      "to": "raw_dir",
+      "label": "save_raw（DQC 前）",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-raw-asset",
+      "from": "raw_dir",
+      "to": "asset_dir",
+      "label": "Normalize + DQC 通过",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-raw-quar",
+      "from": "raw_dir",
+      "to": "quarantine_dir",
+      "label": "HARD 拒收",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-quar-audit",
+      "from": "quarantine_dir",
+      "to": "audit_dirs",
+      "label": "写 DQC / 比对日志",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-asset-duck",
+      "from": "asset_dir",
+      "to": "duckdb_cat",
+      "label": "注册 Parquet 视图",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-factors-duck",
+      "from": "factors_dir",
+      "to": "duckdb_cat",
+      "label": "注册因子视图",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "c-duck-api",
+      "from": "duckdb_cat",
+      "to": "data_api",
+      "label": "SQL / Arrow 导出",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-duck-logs",
+      "from": "duckdb_cat",
+      "to": "ops_logs",
+      "label": "运行与巡检记录",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "52 张表平铺命名规范",
+      "items": [
+        "取消独立 ext/ 与混合 cn_reference/，asset/ 统一按 {nation}_{asset_type}_{data_type} 建表",
+        "factors/ 与 asset/ 平级存放，旧 10 个短名通过 LEGACY_TO_CANONICAL 透明兼容"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "分区与复权红线",
+      "items": [
+        "高频行情按 {date}.parquet、日频小截面按 {month}.parquet、财报事件按 {year}.parquet 分区",
+        "表内只存未复权价格与 adjfactor；前/后复权均由 DataAPI 在读时派生，绝不落盘"
+      ]
+    }
+  ]
+}

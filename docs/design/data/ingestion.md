@@ -8,6 +8,12 @@
 
 核心原则一句话：**单源写入 asset 层、多源交叉校验**——备源只校验补缺，不混合写入。
 
+### 多源仲裁与交叉校验流程
+
+![多源入库仲裁、补缺与交叉校验流程](../.diagrams/06-multi-source-ingestion.png)
+
+> [打开 Archify 交互图](../.diagrams/06-multi-source-ingestion.html)
+
 ## 接口签名
 
 ```yaml
@@ -77,7 +83,7 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 
 入库流程:
 1. 主源fetch→DQC→写asset
-2. 备源raw到达后交叉校验→落 cross_check/乡结果 分级响应
+2. 备源raw到达后交叉校验→落 `cross_check/` 结果并分级响应
 3. 主源HARD失败+备源可用→fallback补数(带backfill标记+降级告警)
 
 核心约定:

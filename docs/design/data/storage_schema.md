@@ -15,6 +15,10 @@
 
 ## 目录布局
 
+![$QUANT_DATA_ROOT 五层存储与 DuckDB 拓扑](../.diagrams/03-storage-topology.png)
+
+> [打开 Archify 交互图](../.diagrams/03-storage-topology.html)
+
 扁平一层，资产与数据类型编码在文件夹前缀 `{nation}_{asset_type}_{data_type}`：
 
 ```text

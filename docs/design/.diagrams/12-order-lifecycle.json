@@ -1,0 +1,103 @@
+{
+  "schema_version": 2,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "订单六态状态机与冻结资金流转",
+    "subtitle": "Created 冻结资金 → 每笔 fill 从 frozen 转支出 → 终态剩余全额退回 cash",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/12-order-lifecycle.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "main", "label": "订单成交主路径" },
+    { "id": "terminal", "label": "拒单与撤单终态" }
+  ],
+  "states": [
+    {
+      "id": "created",
+      "type": "start",
+      "label": "Created 已创建",
+      "sublabel": "计算并冻结 frozen_cash",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "策略意图分界线"
+    },
+    {
+      "id": "submitted",
+      "type": "active",
+      "label": "Submitted 已报单",
+      "sublabel": "通过 pre_trade 风控",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "等待撮合"
+    },
+    {
+      "id": "partial",
+      "type": "waiting",
+      "label": "PartialFilled 部成",
+      "sublabel": "每笔成交从 frozen 转支出",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "V2 实盘增量"
+    },
+    {
+      "id": "filled",
+      "type": "success",
+      "label": "Filled 全部成交",
+      "sublabel": "终态退回剩余 frozen",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "1:N 关联 Trade"
+    },
+    {
+      "id": "rejected",
+      "type": "failure",
+      "label": "Rejected 已拒单",
+      "sublabel": "停牌/风控拦截 · 全退 frozen",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "终态"
+    },
+    {
+      "id": "cancelled",
+      "type": "failure",
+      "label": "Cancelled 已撤单",
+      "sublabel": "未成部分退回 · 已成保留",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "终态"
+    }
+  ],
+  "transitions": [
+    { "from": "created", "to": "submitted", "label": "通过风控", "variant": "emphasis" },
+    { "from": "submitted", "to": "partial", "label": "部分撮合" },
+    { "from": "partial", "to": "filled", "label": "余量全成", "variant": "emphasis" },
+    { "from": "submitted", "to": "filled", "label": "V1 整单成交", "variant": "emphasis" },
+    { "from": "created", "to": "rejected", "label": "风控 BLOCK", "variant": "security" },
+    { "from": "submitted", "to": "rejected", "label": "柜台/停牌拒单", "variant": "security" },
+    { "from": "submitted", "to": "cancelled", "label": "未成撤单", "variant": "dashed" },
+    { "from": "partial", "to": "cancelled", "label": "部成后撤单", "variant": "security" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "资金与成本归属不变式",
+      "items": [
+        "保留 CREATED 状态以区分「策略想下但被风控拦截」与「策略未发单」",
+        "下单即冻结 frozen_cash；每笔 Trade 按实际成交额+佣金滑点从 frozen 扣除，终态剩余全额回退 cash"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Order : Trade = 1 : N 与事件流本体",
+      "items": [
+        "Order 追踪意图与状态，Trade 记录每笔成交费用/滑点；V1 回测 N=1 亦保留双层结构对齐实盘",
+        "状态变更以 append-only Parquet 事件流写入 Journal，任意时刻快照均可 replay 重建"
+      ]
+    }
+  ]
+}

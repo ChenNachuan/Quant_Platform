@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "核心投研与执行主链数据流",
+    "subtitle": "DataFrame 流水线 → AlphaSignal → TargetPortfolio → Execution",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/02-main-pipeline-dataflow.html",
+    "viewBox": [1080, 560],
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "emphasis": { "label": "主链数据流" },
+        "default": { "label": "落盘存储" },
+        "dashed": { "label": "快速筛选门控" },
+        "security": { "label": "风控与执行契约" }
+      }
+    }
+  },
+  "stages": [
+    { "label": "数据访问" },
+    { "label": "因子计算" },
+    { "label": "后处理与合成" },
+    { "label": "组合优化" },
+    { "label": "执行与留痕" }
+  ],
+  "nodes": [
+    {
+      "id": "asset_db",
+      "type": "database",
+      "label": "asset/ 资产表",
+      "sublabel": "51 张 Parquet",
+      "stage": 0,
+      "row": 0,
+      "tag": "未复权 + adj"
+    },
+    {
+      "id": "data_api",
+      "type": "backend",
+      "label": "DataAPI",
+      "sublabel": "DuckDB + 复权",
+      "stage": 0,
+      "row": 1
+    },
+    {
+      "id": "factor_dag",
+      "type": "backend",
+      "label": "FactorDAG",
+      "sublabel": "拓扑分层并行",
+      "stage": 1,
+      "row": 1,
+      "tag": "原始因子值"
+    },
+    {
+      "id": "factor_store",
+      "type": "database",
+      "label": "factors/ 因子表",
+      "sublabel": "单因子单目录",
+      "stage": 1,
+      "row": 2
+    },
+    {
+      "id": "eval_gate",
+      "type": "cloud",
+      "label": "Alphalens 门控",
+      "sublabel": "快速 IC / 分组",
+      "stage": 2,
+      "row": 0
+    },
+    {
+      "id": "post_proc",
+      "type": "backend",
+      "label": "PostProcessor",
+      "sublabel": "去极值 / 标准化",
+      "stage": 2,
+      "row": 1,
+      "tag": "按日截面"
+    },
+    {
+      "id": "combiner",
+      "type": "backend",
+      "label": "FactorCombiner",
+      "sublabel": "IC 加权 / ML",
+      "stage": 2,
+      "row": 2
+    },
+    {
+      "id": "alpha_signal",
+      "type": "messagebus",
+      "label": "AlphaSignal",
+      "sublabel": "截面预测分数",
+      "stage": 3,
+      "row": 1,
+      "tag": "research 边界"
+    },
+    {
+      "id": "portfolio_opt",
+      "type": "backend",
+      "label": "PortfolioOpt",
+      "sublabel": "裁剪 + 手数取整",
+      "stage": 3,
+      "row": 2,
+      "tag": "TargetPortfolio"
+    },
+    {
+      "id": "broker",
+      "type": "security",
+      "label": "Broker.submit",
+      "sublabel": "风控+撮合+记账",
+      "stage": 4,
+      "row": 1,
+      "tag": "Sim / QMT"
+    },
+    {
+      "id": "journal",
+      "type": "database",
+      "label": "Journal 账本",
+      "sublabel": "Order/Trade/Pos",
+      "stage": 4,
+      "row": 2,
+      "tag": "append-only"
+    }
+  ],
+  "flows": [
+    {
+      "id": "f-asset-api",
+      "from": "asset_db",
+      "to": "data_api",
+      "label": "读时复权",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [100, 214]
+    },
+    {
+      "id": "f-api-dag",
+      "from": "data_api",
+      "to": "factor_dag",
+      "label": "行情 / 财务",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-dag-store",
+      "from": "factor_dag",
+      "to": "factor_store",
+      "label": "年分区落盘",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [315, 328]
+    },
+    {
+      "id": "f-dag-post",
+      "from": "factor_dag",
+      "to": "post_proc",
+      "label": "原始因子",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-post-eval",
+      "from": "post_proc",
+      "to": "eval_gate",
+      "label": "IC 筛选",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight",
+      "labelAt": [530, 214]
+    },
+    {
+      "id": "f-post-comb",
+      "from": "post_proc",
+      "to": "combiner",
+      "label": "清洗因子",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [530, 328]
+    },
+    {
+      "id": "f-comb-signal",
+      "from": "combiner",
+      "to": "alpha_signal",
+      "label": "预测分数",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-signal-port",
+      "from": "alpha_signal",
+      "to": "portfolio_opt",
+      "label": "目标权重",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [745, 328]
+    },
+    {
+      "id": "f-port-broker",
+      "from": "portfolio_opt",
+      "to": "broker",
+      "label": "TargetPortfolio",
+      "variant": "security"
+    },
+    {
+      "id": "f-broker-journal",
+      "from": "broker",
+      "to": "journal",
+      "label": "成交与持仓",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [960, 328]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "三步主链契约",
+      "items": [
+        "时间推进采用 for date in rebalance_dates() 顺序调用，无事件驱动引擎",
+        "AlphaSignal 与 TargetPortfolio 是 research/ 与 execution/ 的唯一薄壳边界"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "因子流水线与落盘分离",
+      "items": [
+        "factors/ 仅持久化原始因子值，去极值/标准化/中性化在消费时按日截面执行",
+        "alphalens 仅作回测前快速筛选门控，结论冲突时以正式回测为准"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "执行闭环内聚",
+      "items": [
+        "风控检查 + 撮合 + 费用 + 记账统一封装在 broker.submit_orders() 内",
+        "SimBroker 与 QmtBroker 共用同一主链，消除回测与实盘代码分歧"
+      ]
+    }
+  ]
+}

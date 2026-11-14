@@ -28,13 +28,9 @@ ops/          运维（调度 / 监控 / 归因 / 告警）
 
 ### 2.1 依赖方向
 
-```text
-research/ ──┐
-            ├──→ core/ ←──┐
-execution/ ─┘             │
-data/     ──→（提供数据访问，不反向依赖）
-ops/      ──→（观测所有域，不被依赖）
-```
+![Quant Platform 五域架构与依赖边界](.diagrams/01-five-domain-architecture.png)
+
+> [打开 Archify 交互图](.diagrams/01-five-domain-architecture.html)
 
 **硬规则**：`core/` 不 import 任何其他域；`research/` 与 `execution/` 互不依赖；`ops/` 只读观测，不被依赖。
 
@@ -60,10 +56,9 @@ for date in rebalance_dates():
 
 ### 3.2 三步主链
 
-```text
-AlphaSignal → Portfolio → Execution
-                            └── broker.submit_orders() 内部封装：风控 + 撮合 + 记账
-```
+![核心投研与执行主链数据流](.diagrams/02-main-pipeline-dataflow.png)
+
+> [打开 Archify 交互图](.diagrams/02-main-pipeline-dataflow.html)
 
 - AlphaSignal：截面分数 DataFrame ->  [research/alpha_signal.md](research/alpha_signal.md)
 - Portfolio：目标持仓构建 ->  [execution/portfolio_construction.md](execution/portfolio_construction.md)
@@ -73,10 +68,9 @@ AlphaSignal → Portfolio → Execution
 
 ### 3.3 因子组织：Factor ABC + FactorDAG
 
-```text
-Factor(compute) → FactorDAG(拓扑) → PostProcessor → per-factor-one-table
-  → FactorCombiner → AlphaSignal   =  "DataFrame 流水线"
-```
+![FactorDAG 拓扑分层执行与增量缓存机制](.diagrams/09-factor-dag-runtime.png)
+
+> [打开 Archify 交互图](.diagrams/09-factor-dag-runtime.html)
 
 静态拓扑DAG，不用时间订阅————离线计算无实时事件流、依赖关系静态、DataFrame天然批量。详见[research/factor_interface.md](research/factor_interface.md)和[research/factor_runtime.md](research/factor_runtime.md)。
 

@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "三层数据流与隔离区修复闭环",
+    "subtitle": "raw（证据起点）→ normalize（格式转换）→ DQC → asset/ | quarantine/",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/04-quarantine-raw-dataflow.html",
+    "viewBox": [1080, 560],
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "emphasis": { "label": "正常入库主路径" },
+        "security": { "label": "HARD 拒收路径" },
+        "dashed": { "label": "修复与清理路径" }
+      }
+    }
+  },
+  "stages": [
+    { "label": "原始采集" },
+    { "label": "原样落盘" },
+    { "label": "格式转换" },
+    { "label": "DQC 门控" },
+    { "label": "入库与修复" }
+  ],
+  "nodes": [
+    {
+      "id": "download",
+      "type": "external",
+      "label": "SourceAdapter",
+      "sublabel": "按源拉取数据",
+      "stage": 0,
+      "row": 1
+    },
+    {
+      "id": "save_raw",
+      "type": "database",
+      "label": "raw/ 原样落盘",
+      "sublabel": "source/asset/date",
+      "stage": 1,
+      "row": 1,
+      "tag": "DQC 前 · 1 年"
+    },
+    {
+      "id": "normalize",
+      "type": "backend",
+      "label": "Normalizer",
+      "sublabel": "仅转列名与类型",
+      "stage": 2,
+      "row": 1,
+      "tag": "不做清洗"
+    },
+    {
+      "id": "dqc_gate",
+      "type": "security",
+      "label": "DQC 网关",
+      "sublabel": "HARD + SOFT",
+      "stage": 3,
+      "row": 1
+    },
+    {
+      "id": "asset_layer",
+      "type": "database",
+      "label": "asset/ 资产层",
+      "sublabel": "Schema + flag",
+      "stage": 4,
+      "row": 0,
+      "tag": "通过 · 永久"
+    },
+    {
+      "id": "quarantine_layer",
+      "type": "security",
+      "label": "quarantine/",
+      "sublabel": "rejection.json",
+      "stage": 3,
+      "row": 2,
+      "tag": "拒收 · T+30"
+    },
+    {
+      "id": "repair_paths",
+      "type": "cloud",
+      "label": "修复路径 A/B/C",
+      "sublabel": "重拉 / 重验 / 清理",
+      "stage": 4,
+      "row": 2
+    }
+  ],
+  "flows": [
+    {
+      "id": "f-dl-raw",
+      "from": "download",
+      "to": "save_raw",
+      "label": "原样写盘",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-raw-norm",
+      "from": "save_raw",
+      "to": "normalize",
+      "label": "raw_df",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-norm-dqc",
+      "from": "normalize",
+      "to": "dqc_gate",
+      "label": "标准化 df",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-dqc-asset",
+      "from": "dqc_gate",
+      "to": "asset_layer",
+      "label": "通过 · 原子写",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-dqc-quar",
+      "from": "dqc_gate",
+      "to": "quarantine_layer",
+      "label": "HARD 拒收",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [745, 328]
+    },
+    {
+      "id": "f-quar-repair",
+      "from": "quarantine_layer",
+      "to": "repair_paths",
+      "label": "三路径修复",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "职责严格切分",
+      "items": [
+        "raw 在 DQC 前写盘保证证据链，保留原始列名/类型/值，不做任何计算",
+        "Normalizer 每源一文件，只负责列名映射与类型修正，不掺杂清洗规则"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "隔离区三路径闭环",
+      "items": [
+        "路径 A（源端损坏）：修源后运行 ingest --force 重新下载",
+        "路径 B（规则误杀）：调宽规则后执行 recheck --from-quarantine 无需重拉",
+        "路径 C（放弃修复）：保留 30 天后由 cleanup_quarantine 自动清理（不越界删 watermark）"
+      ]
+    }
+  ]
+}

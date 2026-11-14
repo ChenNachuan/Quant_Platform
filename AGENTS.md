@@ -59,13 +59,9 @@ ops/          运维闭环（Scheduler / Monitoring / Reporting / Alerting）
 
 **依赖方向硬规则**：
 
-```text
-research/ ──┐
-            ├──→ core/ ←──┐
-execution/ ─┘             │
-data/     ──→（提供数据访问，不反向依赖）
-ops/      ──→（只读观测所有域，不被业务域依赖）
-```
+![Quant Platform 五域架构与依赖边界](docs/design/.diagrams/01-five-domain-architecture.png)
+
+> [打开 Archify 交互图](docs/design/.diagrams/01-five-domain-architecture.html)
 
 - `core/` **不 import 任何业务域**：无引擎、无事件循环、无时间模型。
 - `research/` 与 `execution/` 互不依赖，通过 `AlphaSignal` / `TargetPortfolio` 解耦。
@@ -73,10 +69,9 @@ ops/      ──→（只读观测所有域，不被业务域依赖）
 
 ### 2. 三步主链与 `for-loop` 时间模型
 
-```text
-AlphaSignal → Portfolio → Execution
-                            └── broker.submit_orders() 内部封装：风控 + 撮合 + 记账
-```
+![核心投研与执行主链数据流](docs/design/.diagrams/02-main-pipeline-dataflow.png)
+
+> [打开 Archify 交互图](docs/design/.diagrams/02-main-pipeline-dataflow.html)
 
 - 回测与实盘时间推进统一使用 `for date in rebalance_dates(): ...` 顺序调用，**不引入事件驱动内核**。
 - 实盘与回测共用同一主链逻辑，差异仅注入在 `Broker` 实现（`SimBroker` / `QmtBroker`）。
@@ -84,10 +79,9 @@ AlphaSignal → Portfolio → Execution
 
 ### 3. 因子体系（`Factor ABC` + `FactorDAG`）
 
-```text
-Factor(compute) → FactorDAG(拓扑并行) → PostProcessor → per-factor-one-table
-  → FactorCombiner → AlphaSignal
-```
+![FactorDAG 拓扑分层执行与增量缓存机制](docs/design/.diagrams/09-factor-dag-runtime.png)
+
+> [打开 Archify 交互图](docs/design/.diagrams/09-factor-dag-runtime.html)
 
 - **`Factor` ABC**：`depends_on() -> list[str]` + `compute(data) -> DataFrame[date, ticker, {factor_name}]`（仅存原始因子值，后处理在消费时执行）。上游数据表可用规范名或兼容别名（如 `cn_stock_bars_daily` / `bars_daily`），上游因子使用 `"factor:<name>"` 前缀。
 - **`FactorRegistry`**：`@register_factor` 装饰器即注册表（`draft → production → deprecated`）。
@@ -100,16 +94,9 @@ Factor(compute) → FactorDAG(拓扑并行) → PostProcessor → per-factor-one
 
 ## 数据接入与存储架构（52 张规范表）
 
-```text
-SourceAdapter.fetch() → save_raw → Normalizer → DQC → asset/     （通过）
-                                           └→ quarantine/        （拒收：保留 30 天）
-                                                    ↓
-                                DataAPI / load_bars()（DuckDB read_parquet + catalog.duckdb）
-                                                    ↓
-                        ├──→ Factor → FactorDAG → factors/cn_stock_factors/{name}_v{ver}/{year}.parquet
-                        ├──→ FactorCombiner → AlphaSignal
-                        └──→ Portfolio (TargetPortfolio) → Execution (SimBroker/QmtBroker) → Journal
-```
+![$QUANT_DATA_ROOT 五层存储与 DuckDB 拓扑](docs/design/.diagrams/03-storage-topology.png)
+
+> [打开 Archify 交互图](docs/design/.diagrams/03-storage-topology.html)
 
 ### 存储布局（`$QUANT_DATA_ROOT`，默认 `/Users/nachuan/Documents/Quant_Data`）
 

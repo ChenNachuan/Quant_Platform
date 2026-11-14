@@ -40,7 +40,13 @@ def plot_factor_report(factor_values, returns, factor_name,
     # 2×2 四图 → research/reports/{factor_name}_tearsheet.png（§27.8）
 ```
 
+### 因子三态生命周期与健康监控
+
 生命周期：`draft →(入库检验通过)→ production →(衰减检测触发)→ deprecated`；production 期间 rolling 监控可进 `warning`（提前重训/降权）再降级。deprecated 不物理删除（保留代码+历史数据）。
+
+![因子三态生命周期与健康监控](../.diagrams/10-factor-lifecycle.png)
+
+> [打开 Archify 交互图](../.diagrams/10-factor-lifecycle.html)
 
 ## 关键决策
 

@@ -1,0 +1,267 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "daily_pipeline 日频运维编排与失败传导链",
+    "subtitle": "BlockingScheduler + for 顺序执行 5 类 Job · 数据错跳下游 / 信号错 hold 不清仓",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/design/.diagrams/14-ops-daily-pipeline.html",
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "定时触发器"
+        },
+        "backend": {
+          "label": "日频流水线 Job"
+        },
+        "security": {
+          "label": "失败传导 / hold 保护"
+        },
+        "cloud": {
+          "label": "巡检告警与报告"
+        },
+        "database": {
+          "label": "运行日志存储"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "schedule",
+      "label": "APScheduler 日频主链"
+    },
+    {
+      "id": "fail_path",
+      "label": "失败传导与保护策略",
+      "variant": "exception"
+    },
+    {
+      "id": "logs",
+      "label": "运行审计存储"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p1",
+      "label": "盘后拉数与算子",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "p2",
+      "label": "信号与巡检",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "p3",
+      "label": "日报归因与留痕",
+      "fromCol": 5,
+      "toCol": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_pipe",
+      "label": "daily_pipeline() 顺序编排（Job<10 不用 DAG）",
+      "lane": "schedule",
+      "fromCol": 1,
+      "toCol": 5,
+      "variant": "emphasis"
+    }
+  ],
+  "mainPath": [
+    "trigger",
+    "j_data",
+    "j_factor",
+    "j_signal",
+    "j_health",
+    "j_report"
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "lane": "schedule",
+      "col": 0,
+      "type": "frontend",
+      "label": "CronTrigger 触发",
+      "sublabel": "周一至五 + 手动 run_job",
+      "width": 138
+    },
+    {
+      "id": "j_data",
+      "lane": "schedule",
+      "col": 1,
+      "type": "backend",
+      "label": "16:00 数据采集",
+      "sublabel": "retry=2 · 超时 300s",
+      "tag": "fetch_stock_daily",
+      "width": 138
+    },
+    {
+      "id": "j_factor",
+      "lane": "schedule",
+      "col": 2,
+      "type": "backend",
+      "label": "16:30 compute_all",
+      "sublabel": "retry=1 · 因子增量计算",
+      "width": 138
+    },
+    {
+      "id": "j_signal",
+      "lane": "schedule",
+      "col": 3,
+      "type": "backend",
+      "label": "16:45 信号产出",
+      "sublabel": "run_daily_signal · retry=1",
+      "width": 138
+    },
+    {
+      "id": "j_health",
+      "lane": "schedule",
+      "col": 4,
+      "type": "cloud",
+      "label": "17:00 health_check",
+      "sublabel": "retry=1 · 全域巡检",
+      "width": 138
+    },
+    {
+      "id": "j_report",
+      "lane": "schedule",
+      "col": 5,
+      "type": "cloud",
+      "label": "日报 / 月末归因",
+      "sublabel": "daily + monthly report",
+      "width": 138
+    },
+    {
+      "id": "skip_down",
+      "lane": "fail_path",
+      "col": 2,
+      "type": "security",
+      "label": "下游标 SKIPPED",
+      "sublabel": "on_failure='skip' 阻断",
+      "width": 138
+    },
+    {
+      "id": "hold_pos",
+      "lane": "fail_path",
+      "col": 3,
+      "type": "security",
+      "label": "触发 hold 保持持仓",
+      "sublabel": "严禁失败清仓铁律",
+      "tag": "on_failure='hold'",
+      "width": 138
+    },
+    {
+      "id": "alert",
+      "lane": "fail_path",
+      "col": 4,
+      "type": "cloud",
+      "label": "Alerting 告警通知",
+      "sublabel": "失败 / 巡检异常外发",
+      "width": 138
+    },
+    {
+      "id": "job_jsonl",
+      "lane": "logs",
+      "col": 5,
+      "type": "database",
+      "label": "logs/runs/jobs.jsonl",
+      "sublabel": "SUCCESS/FAIL/RETRY/SKIP",
+      "width": 138
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "trigger",
+      "to": "j_data",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e2",
+      "from": "j_data",
+      "to": "j_factor",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e3",
+      "from": "j_factor",
+      "to": "j_signal",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e4",
+      "from": "j_signal",
+      "to": "j_health",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e5",
+      "from": "j_health",
+      "to": "j_report",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e6",
+      "from": "j_data",
+      "to": "skip_down",
+      "label": "重试耗尽",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e7",
+      "from": "j_factor",
+      "to": "skip_down",
+      "label": "算子失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e8",
+      "from": "j_signal",
+      "to": "hold_pos",
+      "label": "信号失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e9",
+      "from": "j_health",
+      "to": "alert",
+      "label": "巡检告警",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e10",
+      "from": "j_report",
+      "to": "job_jsonl",
+      "label": "一条一跑追加",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "零运维进程内调度",
+      "items": [
+        "V1 采用 APScheduler BlockingScheduler 顺序执行 5 类 Job，拒绝 Celery/Airflow 重部署",
+        "每次 run_job 记录 run_id / duration_s / retry_count / 四态结果到 logs/runs/jobs.jsonl"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "非对称失败传导铁律",
+      "items": [
+        "数据或因子失败时，下游信号与执行立即标 SKIPPED 避免脏算",
+        "信号 Job 失败强制执行 hold（保持上日 Portfolio）并告警，绝不自动清仓"
+      ]
+    }
+  ]
+}

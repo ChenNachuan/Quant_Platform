@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "信号 → 目标组合 → 交易订单三层换算流",
+    "subtitle": "权重分配在策略内完成 · 组合层只做约束裁剪与手数取整 · 订单层算差额",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/11-portfolio-order-dataflow.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "emphasis": { "label": "截面组合主链" },
+        "dashed": { "label": "时序策略直通" },
+        "security": { "label": "风控与涨跌停拦截" }
+      }
+    }
+  },
+  "stages": [
+    { "label": "策略与信号" },
+    { "label": "组合约束层" },
+    { "label": "订单生成层" },
+    { "label": "执行入口" }
+  ],
+  "nodes": [
+    {
+      "id": "cross_signal",
+      "type": "frontend",
+      "label": "CrossSignal",
+      "sublabel": "策略内算 target_weights",
+      "stage": 0,
+      "row": 0,
+      "tag": "截面策略"
+    },
+    {
+      "id": "timing_signal",
+      "type": "frontend",
+      "label": "SignalData",
+      "sublabel": "逐票择时/CTA 信号",
+      "stage": 0,
+      "row": 2,
+      "tag": "时序策略"
+    },
+    {
+      "id": "optimizer",
+      "type": "backend",
+      "label": "PortfolioOptimizer",
+      "sublabel": "权重上限 / 换手 / 100股取整",
+      "stage": 1,
+      "row": 0,
+      "tag": "约束满足不求最优"
+    },
+    {
+      "id": "target_port",
+      "type": "messagebus",
+      "label": "TargetPortfolio",
+      "sublabel": "target_quantity + 现金缓冲",
+      "stage": 2,
+      "row": 0,
+      "tag": "execution 入口"
+    },
+    {
+      "id": "order_gen",
+      "type": "backend",
+      "label": "OrderGenerator",
+      "sublabel": "先卖后买 · 跌停禁卖",
+      "stage": 2,
+      "row": 2,
+      "tag": "涨跌停过滤"
+    },
+    {
+      "id": "orders_out",
+      "type": "security",
+      "label": "Order[] 订单列表",
+      "sublabel": "交 broker.submit_orders()",
+      "stage": 3,
+      "row": 1,
+      "tag": "含大单拆单告警"
+    }
+  ],
+  "flows": [
+    {
+      "id": "f1",
+      "from": "cross_signal",
+      "to": "optimizer",
+      "label": "连续目标权重",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f2",
+      "from": "optimizer",
+      "to": "target_port",
+      "label": "solve() 取整",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f3",
+      "from": "target_port",
+      "to": "order_gen",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "label": "对比现有持仓",
+      "labelAt": [530, 212],
+      "variant": "emphasis"
+    },
+    {
+      "id": "f4",
+      "from": "timing_signal",
+      "to": "order_gen",
+      "label": "跳过组合优化",
+      "variant": "dashed"
+    },
+    {
+      "id": "f5",
+      "from": "order_gen",
+      "to": "orders_out",
+      "label": "过滤后可执行单",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "三层职责清晰分离",
+      "items": [
+        "Signal（我觉得这些票好）→ Portfolio（我要持有的整数手仓位）→ Order（先卖后买的买卖差额）",
+        "执行域只认 TargetPortfolio，不关心上游因子与模型实现"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "A 股实务约束内置",
+      "items": [
+        "100 股整数手硬约束、5% 现金缓冲、单票/总权重与换手率上限",
+        "涨停不买、跌停不卖及流动性 >1% 日成交量预警均在订单生成与风控层把关"
+      ]
+    }
+  ]
+}

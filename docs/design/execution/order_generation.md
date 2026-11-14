@@ -6,6 +6,12 @@
 
 目标权重 vs 当前持仓 → 差分 → 订单列表。输入 `TargetPortfolio`/目标权重与账户状态，输出 `list[dict]` 订单；**不撮合、不收费用、不做风控**（那是 broker.submit_orders() 内部三步）。
 
+上下游信号 → 组合 → 订单三层换算见下图：
+
+![信号 → 目标组合 → 交易订单三层换算流](../.diagrams/11-portfolio-order-dataflow.png)
+
+> [打开 Archify 交互图](../.diagrams/11-portfolio-order-dataflow.html)
+
 ## 接口签名
 
 ```python

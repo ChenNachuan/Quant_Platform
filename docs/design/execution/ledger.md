@@ -67,14 +67,11 @@ class JournalEntry:
     payload: dict            # Order/Trade/Position/Account 序列化快照
 ```
 
-**订单状态机（6 态）**：
+### 订单六态状态机与冻结资金流转
 
-```text
-Created → Submitted → PartialFilled → Filled
-                      ↳ Rejected（柜台拒单）
-                      ↳ Cancelled（未成交撤单）
-PartialFilled → Cancelled（部分成交后撤单，已成交部分保留）
-```
+![订单六态状态机与冻结资金流转](../.diagrams/12-order-lifecycle.png)
+
+> [打开 Archify 交互图](../.diagrams/12-order-lifecycle.html)
 
 ## 关键决策
 

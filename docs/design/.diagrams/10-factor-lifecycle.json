@@ -1,0 +1,123 @@
+{
+  "schema_version": 2,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "因子三态生命周期与健康监控",
+    "subtitle": "代码即注册表 · draft → production（含 warning 预警）→ deprecated（保留不物理删除）",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/10-factor-lifecycle.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "main", "label": "核心生命周期主轨" },
+    { "id": "waiting", "label": "观察与预警缓冲" },
+    { "id": "terminal", "label": "退出归档" }
+  ],
+  "states": [
+    {
+      "id": "draft",
+      "type": "start",
+      "label": "draft 草稿",
+      "sublabel": "@register_factor 注册",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "研发探索"
+    },
+    {
+      "id": "gate",
+      "type": "decision",
+      "label": "入库 8 指标门控",
+      "sublabel": "IC>0.04 / IR>0.5 / 去重",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "t>√(2lnN)"
+    },
+    {
+      "id": "production",
+      "type": "success",
+      "label": "production 投产",
+      "sublabel": "参与合成 · 上限 20-50",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "healthy"
+    },
+    {
+      "id": "monitor",
+      "type": "active",
+      "label": "滚动健康监控",
+      "sublabel": "rolling 6/12月 IC",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "定期巡检"
+    },
+    {
+      "id": "gray_zone",
+      "type": "waiting",
+      "label": "灰色地带观察",
+      "sublabel": "0.03~0.04 继续迭代",
+      "lane": "waiting",
+      "col": 1,
+      "tag": "暂不入库"
+    },
+    {
+      "id": "warning",
+      "type": "waiting",
+      "label": "warning 衰减预警",
+      "sublabel": "6月<0.5×均值 · 降权/重训",
+      "lane": "waiting",
+      "col": 3,
+      "tag": "人工干预"
+    },
+    {
+      "id": "redundant_exit",
+      "type": "failure",
+      "label": "去重淘汰",
+      "sublabel": "截面相关 >0.9 留高IC者",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "不做合并"
+    },
+    {
+      "id": "deprecated",
+      "type": "failure",
+      "label": "deprecated 退役",
+      "sublabel": "IC<0.03 或 36月 t<1.5",
+      "lane": "terminal",
+      "col": 3,
+      "tag": "保留不物理删除"
+    }
+  ],
+  "transitions": [
+    { "from": "draft", "to": "gate", "label": "提交评估" },
+    { "from": "gate", "to": "production", "label": "门控通过", "variant": "emphasis" },
+    { "from": "production", "to": "monitor", "label": "入库上线" },
+    { "from": "gate", "to": "gray_zone", "label": "未达入库线", "variant": "dashed" },
+    { "from": "gray_zone", "to": "draft", "label": "继续改进", "variant": "dashed" },
+    { "from": "gate", "to": "redundant_exit", "label": "高度冗余", "variant": "security" },
+    { "from": "monitor", "to": "warning", "label": "IC 衰减触发", "variant": "security" },
+    { "from": "warning", "to": "monitor", "label": "重训恢复", "variant": "emphasis" },
+    { "from": "warning", "to": "deprecated", "label": "12月<0.3×均值", "variant": "security" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "入库与退出双线分离",
+      "items": [
+        "入库线严格高于退出线（IC>0.04 / IR>0.5 / 相关<0.5），防止灰色因子频繁震荡上下线",
+        "多重检验校正 t>√(2·ln N)，避免大量试错挖掘伪因子"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "去重与退役不删除原则",
+      "items": [
+        "Spearman >0.7 触发冗余审查、>0.9 仅保留 IC 更高者，不做等权平均合并",
+        "deprecated 仅改 status 属性，代码与历史因子值保留以支持回测复现与排查"
+      ]
+    }
+  ]
+}

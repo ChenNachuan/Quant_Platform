@@ -5,6 +5,12 @@
 
 下单前风控：逐规则检查订单列表，返回 PASS/BLOCK 两级结果。目标是防「策略失控 / 操作错误」，**不是防市场风险**。只做 pre-trade，不做盘中 intra-trade 监控。
 
+pre-trade 风控在 `broker.submit_orders()` 提交闭环中的位置及审计落盘见下：
+
+![broker.submit_orders() 风控、撮合与记账时序](../.diagrams/13-broker-submit-sequence.png)
+
+> [打开 Archify 交互图](../.diagrams/13-broker-submit-sequence.html)
+
 ## 接口签名
 
 ```python

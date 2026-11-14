@@ -45,17 +45,11 @@ docker-compose run --rm amazingdata \
 
 ## 核心数据流
 
-```text
-AmazingData
-    ↓
-scripts/data_fetcher
-    ↓
-data_lake (Parquet) ←→ infra (DuckDB)
-    ↓                       ↓
-factor_library          engine / strategies
-    ↓                       ↓
-data_lake/factors       backtest / execution
-```
+五域架构与主链契约详见 [平台架构总纲](docs/design/ARCHITECTURE.md)（全套交互式示意图索引见 [设计文档总览](docs/design/README.md)）：
+
+![核心投研与执行主链数据流](docs/design/.diagrams/02-main-pipeline-dataflow.png)
+
+> [打开 Archify 交互图](docs/design/.diagrams/02-main-pipeline-dataflow.html)
 
 `data_lake/`、`artifacts/`、原始期货 Level-2 数据和本地备份都属于工作区数据，不进入 Git。
 

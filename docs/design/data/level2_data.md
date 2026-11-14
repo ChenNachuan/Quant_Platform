@@ -6,18 +6,13 @@
 
 L2 / Tick 数据的**使用路径裁决**：只做「离线因子原料」 + C++LOB重建。Level2数据不进时间流，不做tick实时策略。
 
-两条路径:
-```text
-路径A:L2Parquet→离线因子计算→因子值(日频/分钟频) - FactorPipeline
-路径 B:L2Parquet→C++LOB重建→微观结构特征→[因子值 FactorPipeline
-```
-两条路径的输出都是日频/分钟频因子值,走既有 factor存储和评价流水线。L2是因子的原材料,不是事件流的一部部分。
+### Level-2 / Tick 两条离线因子路径
 
-```text
-L2 Parquet → 离线因子计算脚本 → 因子值（日频/分钟频） → FactorPipeline
-                                        ↓
-                                  不经过事件系统
-```
+![Level-2 / Tick 离线因子与 C++ LOB 重建路径](../.diagrams/05-level2-dataflow.png)
+
+> [打开 Archify 交互图](../.diagrams/05-level2-dataflow.html)
+
+两条路径的输出都是日频/分钟频因子值，走既有 `factor` 存储和评价流水线。
 
 边界：L2 是因子的原材料，不是事件流的一部分——如同「每日成交量」是 BarData 的字段而不是事件。**80% 的 L2 使用场景走这条路**，零新增架构。
 
@@ -32,13 +27,9 @@ L2 Parquet → 离线因子计算脚本 → 因子值（日频/分钟频） → 
 | cpp通过 pybind11输出DataFrame | cpp独立系统 | 薄壳架构，cpp只做计算密集的部分 |
 
 ## LOB重建路径
-L2 Parquet (tick/五档)
-    →C++LOB重建引擎(libs/lob_engine/,pybind11封装)
-        →逐笔回放构建 OrderBook快照序列
-        →提取微观结构特征:
-            买卖价差/盘口不平衡/深度分布/成交速率/大单占比/...
-    →输出:DataFrame (ticker,datetime,feature_1,feature_1,feature2, ...)
-    →聚合为日频/分钟频因子 + factor存储 >FactorPipeline/alphalens
+
+逐笔回放构建 OrderBook 快照序列后，提取微观结构特征（买卖价差 / 盘口不平衡 / 深度分布 / 成交速率 / 大单占比等），输出 `DataFrame (ticker, datetime, feature_1, feature_2, ...)` 并聚合为日频/分钟频因子进入既有 `FactorPipeline / alphalens`。
+
 C++部分的边界:
 - 输入:读Parquet(ArrowC++或  或 pandas 传入)
 - 输出:特征 DataFrame(通过 pybind11 返回)

@@ -8,6 +8,12 @@ FactorDAG 的构建与执行：依赖解析、拓扑排序、缓存、增量更�
 
 不做：按日期切分并行、per-di 精细增量、状态持久化（5 色灯）、外部调度框架、AST 静态分析。
 
+### 拓扑分层与增量缓存流程
+
+![FactorDAG 拓扑分层执行与增量缓存机制](../.diagrams/09-factor-dag-runtime.png)
+
+> [打开 Archify 交互图](../.diagrams/09-factor-dag-runtime.html)
+
 ## 接口签名
 
 ```python

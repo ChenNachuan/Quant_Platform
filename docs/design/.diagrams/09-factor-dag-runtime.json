@@ -1,0 +1,230 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "FactorDAG 拓扑分层执行与增量缓存机制",
+    "subtitle": "声明式 depends_on → Kahn 分层并行（普通因子并行 / MLFactor 串行隔离）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/design/.diagrams/09-factor-dag-runtime.html",
+    "legend": {
+      "entries": {
+        "backend": { "label": "DAG 调度与并行池" },
+        "security": { "label": "缓存指纹与容错" },
+        "database": { "label": "缓存与结果落盘" },
+        "cloud": { "label": "ML 串行隔离" }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "parallel",
+      "label": "普通因子分层并行"
+    },
+    {
+      "id": "plan",
+      "label": "DAG 规划与落盘"
+    },
+    {
+      "id": "ml",
+      "label": "ML 串行与容错分支",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p1",
+      "label": "建图与分层",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "p2",
+      "label": "缓存与混合调度",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "p3",
+      "label": "结果输出",
+      "fromCol": 5,
+      "toCol": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_layer",
+      "label": "逐层执行循环（topological_layers）",
+      "lane": "parallel",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    }
+  ],
+  "mainPath": [
+    "dag",
+    "layers",
+    "cache_chk",
+    "pool_run",
+    "save_out"
+  ],
+  "nodes": [
+    {
+      "id": "dag",
+      "lane": "plan",
+      "col": 0,
+      "type": "backend",
+      "label": "FactorDAG 建图",
+      "sublabel": "解析 factor: 前缀 · 判环",
+      "width": 138
+    },
+    {
+      "id": "layers",
+      "lane": "plan",
+      "col": 1,
+      "type": "backend",
+      "label": "topological_layers",
+      "sublabel": "Kahn 算法生成分层",
+      "width": 138
+    },
+    {
+      "id": "cache_chk",
+      "lane": "plan",
+      "col": 2,
+      "type": "security",
+      "label": "缓存与依赖指纹",
+      "sublabel": "(name, ver, range, hash)",
+      "tag": "version 变更全量",
+      "width": 138
+    },
+    {
+      "id": "cache_hit",
+      "lane": "parallel",
+      "col": 3,
+      "type": "database",
+      "label": "命中 / 增量 append",
+      "sublabel": "仅补算新交易日",
+      "width": 138
+    },
+    {
+      "id": "pool_run",
+      "lane": "parallel",
+      "col": 4,
+      "type": "backend",
+      "label": "ProcessPoolExecutor",
+      "sublabel": "层内无依赖因子并行",
+      "width": 138
+    },
+    {
+      "id": "ml_run",
+      "lane": "ml",
+      "col": 3,
+      "type": "cloud",
+      "label": "MLFactor 串行隔离",
+      "sublabel": "train_end 切分 + joblib",
+      "tag": "防内存爆炸",
+      "width": 138
+    },
+    {
+      "id": "safe_skip",
+      "lane": "ml",
+      "col": 4,
+      "type": "security",
+      "label": "compute_all_safe",
+      "sublabel": "上游失败跳过，同层继续",
+      "width": 138
+    },
+    {
+      "id": "save_out",
+      "lane": "plan",
+      "col": 5,
+      "type": "database",
+      "label": "存盘并返回 DF",
+      "sublabel": "factors/ + {name: df}",
+      "width": 138
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "dag",
+      "to": "layers",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e2",
+      "from": "layers",
+      "to": "cache_chk",
+      "label": "逐层分派",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e3",
+      "from": "cache_chk",
+      "to": "cache_hit",
+      "label": "命中/append",
+      "variant": "dashed"
+    },
+    {
+      "id": "e4",
+      "from": "cache_chk",
+      "to": "pool_run",
+      "label": "miss/force",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e5",
+      "from": "cache_hit",
+      "to": "pool_run",
+      "variant": "dashed"
+    },
+    {
+      "id": "e6",
+      "from": "cache_chk",
+      "to": "ml_run",
+      "label": "ML 子类",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e7",
+      "from": "pool_run",
+      "to": "safe_skip",
+      "label": "异常捕获",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e8",
+      "from": "pool_run",
+      "to": "save_out",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e9",
+      "from": "ml_run",
+      "to": "save_out",
+      "label": "串行汇总",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "简洁高效两模式缓存",
+      "items": [
+        "缓存键为 (factor_name, version, date_range, depends_hash)；version 变或上游修订一律触发 full 重算",
+        "普通因子通过 ProcessPoolExecutor 层内全日期向量化并行，无需按日期切分多 pod"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "ML 隔离与失败传导",
+      "items": [
+        "MLFactor 强制串行执行并严格按 train_end 切分防 look-ahead，模型用 joblib 持久化",
+        "compute_all_safe 下某因子失败仅跳过其下游依赖节点，同层独立因子不受阻塞"
+      ]
+    }
+  ]
+}

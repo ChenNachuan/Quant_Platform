@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Quant Platform 五域架构与依赖边界",
+    "subtitle": "薄壳 + pandas 优先 · 按运营域切分（无事件驱动内核）",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/01-five-domain-architecture.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "backend": { "label": "核心业务域" },
+        "security": { "label": "共享工具 / 约束边界" },
+        "database": { "label": "数据存储层" },
+        "cloud": { "label": "运维观测域" },
+        "frontend": { "label": "策略与脚本入口" },
+        "external": { "label": "外部数据源 / 柜台" }
+      }
+    }
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [70, 95],
+    "cols": 4,
+    "gapX": 100,
+    "gapY": 95,
+    "cellW": 195,
+    "cellH": 70
+  },
+  "components": [
+    {
+      "id": "sources",
+      "type": "external",
+      "label": "多数据源",
+      "sublabel": "Tushare / QDC / AD / 同花顺",
+      "row": 0,
+      "col": 0,
+      "size": [195, 68]
+    },
+    {
+      "id": "factor_lib",
+      "type": "frontend",
+      "label": "factor_library/",
+      "sublabel": "资产因子注册库",
+      "row": 0,
+      "col": 1,
+      "size": [195, 68],
+      "tag": "@register_factor"
+    },
+    {
+      "id": "strategies",
+      "type": "frontend",
+      "label": "strategies / scripts",
+      "sublabel": "策略组装与 CLI 编排",
+      "row": 0,
+      "col": 2,
+      "size": [195, 68],
+      "tag": "for-loop 推进"
+    },
+    {
+      "id": "data_domain",
+      "type": "database",
+      "label": "data/ 数据域",
+      "sublabel": "Adapter / DQC / DataAPI",
+      "row": 1,
+      "col": 0,
+      "size": [195, 68],
+      "tag": "52 表 Parquet + DuckDB"
+    },
+    {
+      "id": "research",
+      "type": "backend",
+      "label": "research/ 投研域",
+      "sublabel": "Factor / DAG / 合成 / 评价",
+      "row": 1,
+      "col": 1,
+      "size": [195, 68],
+      "tag": "输出 AlphaSignal"
+    },
+    {
+      "id": "execution",
+      "type": "backend",
+      "label": "execution/ 执行域",
+      "sublabel": "组合 / 风控 / 账本 / 柜台",
+      "row": 1,
+      "col": 2,
+      "size": [195, 68],
+      "tag": "输入 TargetPortfolio"
+    },
+    {
+      "id": "ops",
+      "type": "cloud",
+      "label": "ops/ 运维域",
+      "sublabel": "调度 / 监控 / 归因 / 告警",
+      "row": 1,
+      "col": 3,
+      "size": [195, 68],
+      "tag": "只读观测，不被依赖"
+    },
+    {
+      "id": "core",
+      "type": "security",
+      "label": "core/ 共享基础设施",
+      "sublabel": "config / registry / types / rules",
+      "row": 2,
+      "col": 1,
+      "size": [195, 68],
+      "tag": "零业务依赖，无引擎"
+    },
+    {
+      "id": "qmt",
+      "type": "external",
+      "label": "模拟 / 实盘柜台",
+      "sublabel": "SimBroker / QmtBroker",
+      "row": 2,
+      "col": 2,
+      "size": [195, 68]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "核心运营域（research 与 execution 互不 import）",
+      "wraps": ["data_domain", "research", "execution", "core", "ops"],
+      "pad": 28
+    },
+    {
+      "kind": "security-group",
+      "label": "core/ 零业务依赖隔离区",
+      "wraps": ["core"],
+      "pad": 14
+    }
+  ],
+  "connections": [
+    {
+      "id": "src-to-data",
+      "from": "sources",
+      "to": "data_domain",
+      "label": "fetch → raw → DQC",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "data-to-research",
+      "from": "data_domain",
+      "to": "research",
+      "label": "DataAPI 只读",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "lib-to-research",
+      "from": "factor_lib",
+      "to": "research",
+      "label": "注册 Factor 子类",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "strat-to-research",
+      "from": "strategies",
+      "to": "research",
+      "label": "调用因子流水线",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "top"
+    },
+    {
+      "id": "strat-to-exec",
+      "from": "strategies",
+      "to": "execution",
+      "label": "TargetPortfolio",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "data-to-core",
+      "from": "data_domain",
+      "to": "core",
+      "label": "依赖",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "res-to-core",
+      "from": "research",
+      "to": "core",
+      "label": "依赖",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "exec-to-core",
+      "from": "execution",
+      "to": "core",
+      "label": "依赖",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "ops-observe-exec",
+      "from": "ops",
+      "to": "execution",
+      "label": "只读巡检 / 归因",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "exec-to-qmt",
+      "from": "execution",
+      "to": "qmt",
+      "label": "submit_orders()",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "依赖方向硬规则",
+      "items": [
+        "core/ 绝不 import 任何业务域，无引擎、无事件循环、无时间模型",
+        "research/ 与 execution/ 互不依赖，通过 AlphaSignal / TargetPortfolio 薄壳 dataclass 解耦",
+        "data/ 提供统一 DataAPI，不反向依赖投研或执行域"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "主链与推进方式",
+      "items": [
+        "时间推进使用简单 for date in rebalance_dates() 顺序调用",
+        "策略层将 AlphaSignal 交由组合优化生成 TargetPortfolio，再交 Broker 执行"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "运维与扩展边界",
+      "items": [
+        "ops/ 只读观测所有域并写 JSONL 运行日志，不被业务域依赖",
+        "factor_library/ 与 strategies/ 复用主干契约，禁止私自造轮子"
+      ]
+    }
+  ]
+}

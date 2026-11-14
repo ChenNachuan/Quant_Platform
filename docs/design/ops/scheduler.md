@@ -8,6 +8,12 @@
 - 不做：分布式调度、DAG 引擎、手动触发的 Web 界面（手动 = 直接调 `run_job`）。
 - 与 [logging.md](../core/logging.md) 的边界：日志格式由 `core/logging.py` 负责；本模块写运行记录 `logs/runs/jobs.jsonl`。
 
+### 日频运维编排与失败传导链
+
+![daily_pipeline 日频运维编排与失败传导链](../.diagrams/14-ops-daily-pipeline.png)
+
+> [打开 Archify 交互图](../.diagrams/14-ops-daily-pipeline.html)
+
 ## 接口签名
 
 ```python

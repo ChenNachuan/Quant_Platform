@@ -1,0 +1,217 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ingest_with_dqc 七步入库与三级拒收闸门",
+    "subtitle": "规则级 escalation_threshold + 全局 max_hard_drop_rate 双保险",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/design/.diagrams/07-dqc-seven-step-gate.html",
+    "legend": {
+      "entries": {
+        "backend": { "label": "DQC 规则引擎" },
+        "security": { "label": "安全阀与位掩码" },
+        "database": { "label": "隔离 / 资产落盘" },
+        "cloud": { "label": "SOFT 软告警" }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "ingest_with_dqc 主链"
+    },
+    {
+      "id": "reject",
+      "label": "硬拒收隔离闸门",
+      "variant": "exception"
+    },
+    {
+      "id": "soft",
+      "label": "软标记与报告"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p1",
+      "label": "规则检测与展开",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "p2",
+      "label": "双保险安全阀",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "p3",
+      "label": "位掩码与原子落盘",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_valve",
+      "label": "行 / 分区 / 批次三级硬拒",
+      "lane": "main",
+      "fromCol": 1,
+      "toCol": 3,
+      "variant": "emphasis"
+    }
+  ],
+  "mainPath": [
+    "s1_rules",
+    "s2_collect",
+    "s3_valve",
+    "s4_drop",
+    "s5_flag",
+    "s7_write"
+  ],
+  "nodes": [
+    {
+      "id": "s1_rules",
+      "lane": "main",
+      "col": 0,
+      "type": "backend",
+      "label": "1. 执行全部 DQC 规则",
+      "sublabel": "HARD + SOFT 并行检查",
+      "width": 138
+    },
+    {
+      "id": "s2_collect",
+      "lane": "main",
+      "col": 1,
+      "type": "backend",
+      "label": "2. 收集 HARD 异常行",
+      "sublabel": "partition 展开 ticker×date",
+      "width": 138
+    },
+    {
+      "id": "s3_valve",
+      "lane": "main",
+      "col": 2,
+      "type": "security",
+      "label": "3. 批次双保险安全阀",
+      "sublabel": "规则阈值 + 全局 20%",
+      "tag": "BatchRejectConfig",
+      "width": 138
+    },
+    {
+      "id": "quar_out",
+      "lane": "reject",
+      "col": 2,
+      "type": "database",
+      "label": "整批进 quarantine/",
+      "sublabel": "先写 DQC 报告再隔离",
+      "tag": "T03 1行即拒",
+      "width": 138
+    },
+    {
+      "id": "s4_drop",
+      "lane": "main",
+      "col": 3,
+      "type": "backend",
+      "label": "4. 丢弃 HARD 问题行",
+      "sublabel": "未超阀值仅清坏行/分区",
+      "width": 138
+    },
+    {
+      "id": "s5_flag",
+      "lane": "main",
+      "col": 4,
+      "type": "security",
+      "label": "5. QualityFlag 打标",
+      "sublabel": "5-bit 位掩码按位或",
+      "tag": "int64 列随行走",
+      "width": 138
+    },
+    {
+      "id": "s6_alarm",
+      "lane": "soft",
+      "col": 4,
+      "type": "cloud",
+      "label": "6. SOFT 软告警",
+      "sublabel": "flag≠0 >50% 只警不拒",
+      "width": 138
+    },
+    {
+      "id": "s7_write",
+      "lane": "main",
+      "col": 5,
+      "type": "database",
+      "label": "7. Schema + 原子写入",
+      "sublabel": "写入 asset/ + dqc/",
+      "width": 138
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "s1_rules",
+      "to": "s2_collect",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e2",
+      "from": "s2_collect",
+      "to": "s3_valve",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e3",
+      "from": "s3_valve",
+      "to": "quar_out",
+      "label": "超阈 / T03",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e4",
+      "from": "s3_valve",
+      "to": "s4_drop",
+      "label": "通过安全阀",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e5",
+      "from": "s4_drop",
+      "to": "s5_flag",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e6",
+      "from": "s5_flag",
+      "to": "s6_alarm",
+      "label": ">50% 告警",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e7",
+      "from": "s5_flag",
+      "to": "s7_write",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "三级硬拒与双保险阈值",
+      "items": [
+        "行级丢弃、分区级拒收（时间戳倒流）、批次级整拒（T03 未来日期 1 行即整拒）",
+        "规则级 escalation（损坏类 1% / 结构缺失 5% / 空值 C04 20%）+ 全局 max_hard_drop_rate 20%"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "QualityFlag 5-bit 设计",
+      "items": [
+        "C02(bit0) / C05(bit1) / L04(bit2) / L07(bit3) / K01(bit4) 按位或叠加，bit5+ 预留",
+        "DataAPI 默认不过滤异常行，由研究者按需通过 DuckDB 位运算（quality_flag & mask = 0）筛选"
+      ]
+    }
+  ]
+}

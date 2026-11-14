@@ -2,14 +2,15 @@
 
 > 唯一权威架构总纲：[ARCHITECTURE.md](ARCHITECTURE.md) · 仓库文档总入口：[docs/README.md](../README.md) · 代码放置边界：[PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)
 
-本目录存放量化平台的五域设计契约（40 份模块文档，含 1 份契约软链共 41 项）以及 `asset/` 资产表分域字段字典（8 份）。
+本目录存放量化平台的五域设计契约（40 份模块文档，含 1 份契约软链共 41 项）、`asset/` 资产表分域字段字典（8 份），以及 `.diagrams/` 下的 14 份 Archify 交互式架构与流程示意图（含 `.json` 源定义、`.html` 交互图与 `.png` 静态预览）。
 
 ## 整体结构
 
 ```text
 docs/design/
 ├── ARCHITECTURE.md                  # 唯一权威架构总纲：五域骨架、三步主链、选型定稿、红线
-├── README.md                        # 本文件：design/ 目录结构与各域文档索引
+├── README.md                        # 本文件：design/ 目录结构、各域文档索引与示意图目录
+├── .diagrams/                       # 14 份 Archify 交互式架构/数据流/状态机示意图（.json/.html/.png）
 ├── core/                            # 共享基础设施（6 份：无跨域名依赖）
 │   ├── asset_rules.md               # 多资产规则查表 & ticker 前缀/正则校验（92/52/53/55、指数、基金）
 │   ├── config.md                    # 三层 TOML + .env 配置加载与 config_snapshot
@@ -48,6 +49,25 @@ docs/design/
 └── ops/                             # 调度、监控、日报与告警（4 份）
     └── scheduler.md / monitoring.md / reporting.md / alerting.md
 ```
+
+## 交互式架构与流程示意图（`.diagrams/`）
+
+| 编号 | 主题 | 类型 | 关联文档 | 预览 / 交互图 |
+|---|---|---|---|---|
+| 01 | 五域骨架与单向依赖边界 | `architecture` | [ARCHITECTURE.md](ARCHITECTURE.md) | [PNG](.diagrams/01-five-domain-architecture.png) · [HTML](.diagrams/01-five-domain-architecture.html) |
+| 02 | 核心投研与执行主链数据流 | `dataflow` | [ARCHITECTURE.md](ARCHITECTURE.md) | [PNG](.diagrams/02-main-pipeline-dataflow.png) · [HTML](.diagrams/02-main-pipeline-dataflow.html) |
+| 03 | `$QUANT_DATA_ROOT` 五层存储拓扑 | `architecture` | [data/storage_schema.md](data/storage_schema.md) | [PNG](.diagrams/03-storage-topology.png) · [HTML](.diagrams/03-storage-topology.html) |
+| 04 | Raw 原始层与 Quarantine 隔离闭环 | `dataflow` | [data/quarantine_raw.md](data/quarantine_raw.md) | [PNG](.diagrams/04-quarantine-raw-dataflow.png) · [HTML](.diagrams/04-quarantine-raw-dataflow.html) |
+| 05 | Level-2 / Tick 离线因子与 LOB 路径 | `dataflow` | [data/level2_data.md](data/level2_data.md) | [PNG](.diagrams/05-level2-dataflow.png) · [HTML](.diagrams/05-level2-dataflow.html) |
+| 06 | 多源入库仲裁、补缺与交叉校验 | `workflow` | [data/ingestion.md](data/ingestion.md) | [PNG](.diagrams/06-multi-source-ingestion.png) · [HTML](.diagrams/06-multi-source-ingestion.html) |
+| 07 | `ingest_with_dqc` 七步入库与三级拒收闸门 | `workflow` | [data/dqc_severity.md](data/dqc_severity.md) | [PNG](.diagrams/07-dqc-seven-step-gate.png) · [HTML](.diagrams/07-dqc-seven-step-gate.html) |
+| 08 | 数据回溯修正与因子过期重算闭环 | `workflow` | [data/data_revision.md](data/data_revision.md) | [PNG](.diagrams/08-data-revision-loop.png) · [HTML](.diagrams/08-data-revision-loop.html) |
+| 09 | `FactorDAG` 拓扑分层执行与增量缓存 | `workflow` | [research/factor_runtime.md](research/factor_runtime.md) | [PNG](.diagrams/09-factor-dag-runtime.png) · [HTML](.diagrams/09-factor-dag-runtime.html) |
+| 10 | 因子三态生命周期与健康监控 | `lifecycle` | [research/factor_governance.md](research/factor_governance.md) | [PNG](.diagrams/10-factor-lifecycle.png) · [HTML](.diagrams/10-factor-lifecycle.html) |
+| 11 | 信号 → 目标组合 → 交易订单三层换算流 | `dataflow` | [execution/portfolio_construction.md](execution/portfolio_construction.md) | [PNG](.diagrams/11-portfolio-order-dataflow.png) · [HTML](.diagrams/11-portfolio-order-dataflow.html) |
+| 12 | 订单六态状态机与冻结资金流转 | `lifecycle` | [execution/ledger.md](execution/ledger.md) | [PNG](.diagrams/12-order-lifecycle.png) · [HTML](.diagrams/12-order-lifecycle.html) |
+| 13 | `broker.submit_orders()` 风控撮合记账时序 | `sequence` | [execution/broker.md](execution/broker.md) | [PNG](.diagrams/13-broker-submit-sequence.png) · [HTML](.diagrams/13-broker-submit-sequence.html) |
+| 14 | `daily_pipeline` 日频运维编排与失败传导链 | `workflow` | [ops/scheduler.md](ops/scheduler.md) | [PNG](.diagrams/14-ops-daily-pipeline.png) · [HTML](.diagrams/14-ops-daily-pipeline.html) |
 
 ## 数据存储与命名约定要点
 

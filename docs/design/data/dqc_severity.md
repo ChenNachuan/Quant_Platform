@@ -12,6 +12,12 @@ DQC 检出问题后的**处置判定**：硬/软边界怎么切、硬拒的粒�
 - `QualityFlag` int64 位掩码（行级问题标签）
 - `BatchRejectConfig` 全局安全阀
 
+### 七步入库与三级拒收闸门
+
+![ingest_with_dqc 七步入库与三级拒收闸门](../.diagrams/07-dqc-seven-step-gate.png)
+
+> [打开 Archify 交互图](../.diagrams/07-dqc-seven-step-gate.html)
+
 ## 接口签名
 
 ```python
@@ -84,4 +90,3 @@ def ingest_with_dqc(df, date, config) -> None: ...   # 七步入库（见实现�
 - quality_flag与数据同行写 Parquet,位定义与 storage_schema.md 的 QualityFlag 同源
 - 规则级escalation 用partition展开后的drop rate 检查，与全局阈门口径统一
 - 被拒批次先写DQC报告再进quarantine,保证拒收事实有记录
-

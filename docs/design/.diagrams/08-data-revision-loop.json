@@ -1,0 +1,226 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "数据回溯修正与因子过期重算闭环",
+    "subtitle": "检测静默修改 → 审计后覆盖写入 → 标 stale 等人工重算（不自动级联）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/design/.diagrams/08-data-revision-loop.html",
+    "legend": {
+      "entries": {
+        "cloud": { "label": "定期全量重拉" },
+        "backend": { "label": "差异比对与写回" },
+        "messagebus": { "label": "变更记录事件" },
+        "database": { "label": "修正审计日志" },
+        "security": { "label": "影响评估与标旧" },
+        "frontend": { "label": "人工重算入口" }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "detect",
+      "label": "定期扫描检测"
+    },
+    {
+      "id": "apply",
+      "label": "审计与覆盖写回"
+    },
+    {
+      "id": "impact",
+      "label": "影响传播与重算",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p1",
+      "label": "差异检测",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "p2",
+      "label": "审计与覆盖",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "p3",
+      "label": "传播与人工确认",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_manual",
+      "label": "人工决策边界（不自动级联重算）",
+      "lane": "impact",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "scan",
+    "compare",
+    "changes",
+    "daily_ing",
+    "stale",
+    "manual"
+  ],
+  "nodes": [
+    {
+      "id": "scan",
+      "lane": "detect",
+      "col": 0,
+      "type": "cloud",
+      "label": "定期全量重拉",
+      "sublabel": "周日 30 日 / 季扫 1 年",
+      "width": 138
+    },
+    {
+      "id": "compare",
+      "lane": "detect",
+      "col": 1,
+      "type": "backend",
+      "label": "detect_corrections",
+      "sublabel": "CORRECTION_TOLERANCES",
+      "tag": "逐行比对",
+      "width": 138
+    },
+    {
+      "id": "changes",
+      "lane": "detect",
+      "col": 2,
+      "type": "messagebus",
+      "label": "FieldChange 列表",
+      "sublabel": "close/vol/amt/adj 超差",
+      "width": 138
+    },
+    {
+      "id": "corr_log",
+      "lane": "apply",
+      "col": 2,
+      "type": "database",
+      "label": "corrections/*.jsonl",
+      "sublabel": "先追加修正审计日志",
+      "width": 138
+    },
+    {
+      "id": "daily_ing",
+      "lane": "apply",
+      "col": 3,
+      "type": "backend",
+      "label": "daily_ingest 覆盖写",
+      "sublabel": "同步更新 raw / DQC / 水位",
+      "tag": "无历史多版本",
+      "width": 138
+    },
+    {
+      "id": "severity",
+      "lane": "impact",
+      "col": 3,
+      "type": "security",
+      "label": "影响分级评估",
+      "sublabel": "HIGH=adj / MED=>1%",
+      "tag": "只 MED+ 告警",
+      "width": 138
+    },
+    {
+      "id": "stale",
+      "lane": "impact",
+      "col": 4,
+      "type": "security",
+      "label": "mark_factors_stale",
+      "sublabel": "写 metadata stale_since",
+      "width": 138
+    },
+    {
+      "id": "manual",
+      "lane": "impact",
+      "col": 5,
+      "type": "frontend",
+      "label": "人工触发重算",
+      "sublabel": "recompute-stale → clear",
+      "width": 138
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "scan",
+      "to": "compare",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e2",
+      "from": "compare",
+      "to": "changes",
+      "label": "超容差",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e3",
+      "from": "changes",
+      "to": "corr_log",
+      "label": "写日志",
+      "variant": "dashed"
+    },
+    {
+      "id": "e4",
+      "from": "changes",
+      "to": "daily_ing",
+      "label": "重放写回",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e5",
+      "from": "daily_ing",
+      "to": "severity",
+      "label": "影响评估",
+      "variant": "security"
+    },
+    {
+      "id": "e6",
+      "from": "daily_ing",
+      "to": "stale",
+      "label": "反查 depends_on",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e7",
+      "from": "severity",
+      "to": "stale",
+      "variant": "security"
+    },
+    {
+      "id": "e8",
+      "from": "stale",
+      "to": "manual",
+      "label": "factor list --stale",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "单真相覆盖 + 修正审计",
+      "items": [
+        "不做数据多版本化（防存储膨胀），修正先写 corrections/{asset}/{date}.jsonl 再走完整 daily_ingest",
+        "使用 close/volume/amount/adjfactor 四字段容差过滤源端浮点微差噪音"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "人工决策不自动级联",
+      "items": [
+        "仅 MEDIUM（价格差 >1%）与 HIGH（adjfactor 变动）发告警",
+        "只给受影响因子写 stale_since 标记，由人工评估后再运行 recompute-stale"
+      ]
+    }
+  ]
+}

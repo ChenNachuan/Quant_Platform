@@ -5,12 +5,11 @@
 
 三件事：**隔离区**（DQC 拒收的数据放哪、留多久、怎么修复）、 **raw 层**（数据源原样落盘，证据链起点）、**Normalizer**（格式转换，不做清洗）。
 
-三层数据流：
+### 三层数据流与隔离区修复闭环
 
-```text
-download → save_raw → normalize → DQC → asset/        通过
-                                  └→ quarantine/      拒收（≠ 不写盘）
-```
+![三层数据流与隔离区修复闭环](../.diagrams/04-quarantine-raw-dataflow.png)
+
+> [打开 Archify 交互图](../.diagrams/04-quarantine-raw-dataflow.html)
 
 **HARD 拒收 ≠ 不写盘**——拒收批次写入 quarantine 存 30 天，raw 在 DQC **前**落盘。
 

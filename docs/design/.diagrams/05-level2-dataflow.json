@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Level-2 / Tick 离线因子与 C++ LOB 重建路径",
+    "subtitle": "L2 只作离线因子原料，不接入事件驱动模型（V3+ 规划预留）",
+    "locale": "zh-CN",
+    "output": "docs/design/.diagrams/05-level2-dataflow.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "emphasis": { "label": "离线因子主路径" },
+        "default": { "label": "C++ LOB 重建路径" },
+        "security": { "label": "架构红线 / 禁止路径" }
+      }
+    }
+  },
+  "stages": [
+    { "label": "高维数据源" },
+    { "label": "离线特征提取" },
+    { "label": "微观特征输出" },
+    { "label": "因子流水线与边界" }
+  ],
+  "nodes": [
+    {
+      "id": "l2_parquet",
+      "type": "database",
+      "label": "L2 / Tick Parquet",
+      "sublabel": "stock / futures_l2",
+      "stage": 0,
+      "row": 1,
+      "tag": "十档 / 五档"
+    },
+    {
+      "id": "path_a",
+      "type": "backend",
+      "label": "路径 A：离线脚本",
+      "sublabel": "Python 批量降频",
+      "stage": 1,
+      "row": 0,
+      "tag": "80% 场景"
+    },
+    {
+      "id": "path_b",
+      "type": "backend",
+      "label": "路径 B：C++ LOB",
+      "sublabel": "libs/lob_engine",
+      "stage": 1,
+      "row": 2,
+      "tag": "逐笔回放"
+    },
+    {
+      "id": "features_df",
+      "type": "messagebus",
+      "label": "微观特征因子",
+      "sublabel": "价差 / 盘口不平衡",
+      "stage": 2,
+      "row": 1,
+      "tag": "日/分钟频 DF"
+    },
+    {
+      "id": "factor_pipe",
+      "type": "backend",
+      "label": "FactorPipeline",
+      "sublabel": "存储 + 后处理 + 评价",
+      "stage": 3,
+      "row": 0
+    },
+    {
+      "id": "no_event",
+      "type": "security",
+      "label": "禁止进事件系统",
+      "sublabel": "无 TICK/DEPTH 事件",
+      "stage": 3,
+      "row": 2,
+      "tag": "架构红线"
+    }
+  ],
+  "flows": [
+    {
+      "id": "f-l2-a",
+      "from": "l2_parquet",
+      "to": "path_a",
+      "label": "向量化聚合",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-l2-b",
+      "from": "l2_parquet",
+      "to": "path_b",
+      "label": "OrderBook 重建",
+      "variant": "default"
+    },
+    {
+      "id": "f-a-feat",
+      "from": "path_a",
+      "to": "features_df",
+      "label": "降频指标",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-b-feat",
+      "from": "path_b",
+      "to": "features_df",
+      "label": "pybind11 DF",
+      "variant": "default"
+    },
+    {
+      "id": "f-feat-pipe",
+      "from": "features_df",
+      "to": "factor_pipe",
+      "label": "复用既有流水线",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-feat-ban",
+      "from": "features_df",
+      "to": "no_event",
+      "label": "不直连实时策略",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "统一收敛为低频因子",
+      "items": [
+        "L2 数据定位等同于「成交量是 BarData 的字段」，作为因子原材料而非事件流",
+        "两条路径产出统一落入日频/分钟频 DataFrame，零新增架构即可接入现有评价体系"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "薄壳扩展边界",
+      "items": [
+        "Python 计算瓶颈才下沉至 C++ libs/lob_engine/，通过 pybind11 返回 DataFrame",
+        "严禁在时间模型中扩展 tick 级实时回调或事件枚举"
+      ]
+    }
+  ]
+}

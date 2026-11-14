@@ -12,6 +12,12 @@
 
 边界：不做数据版本化（历史版本不保留，只留修正日志）；不自动级联重算因子/回测。
 
+### 回溯修正与过期传播流程
+
+![数据回溯修正与因子过期重算闭环](../.diagrams/08-data-revision-loop.png)
+
+> [打开 Archify 交互图](../.diagrams/08-data-revision-loop.html)
+
 ## 接口签名
 
 ```python
