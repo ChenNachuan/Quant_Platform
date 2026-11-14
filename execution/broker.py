@@ -1,14 +1,8 @@
-"""Broker: order submission with risk control, matching, and settlement.
+"""券商模块：串联盘前风控、成交撮合与账本结算。
 
-Design authority: ``docs/design/execution/broker.md`` (§22, §66.4, §66.5).
-Seams settled in QUANT-28 ``kb_snapshot`` (1)-(4) — implement exactly.
-
-``submit_orders`` internal three-step order (AC-1): (a) risk
-``pre_trade_risk_check`` + ``log_risk_audit``, (b) fill price lookup via
-``execution.market_data`` at ``fill_basis``, (c) ledger ``settle_fill``.
-
-Red line 4: backtest and live share one ``submit_orders`` path; the only
-difference is the ``Broker`` implementation selected by ``create_broker``.
+回测与实盘共用 ``submit_orders`` 路径，仅通过 ``create_broker`` 选择具体实现。
+``submit_orders`` 内部固定三步顺序：(a) 盘前风控校验与审计日志，(b) 通过
+``execution.market_data`` 按 ``fill_basis`` 查询原始成交价，(c) 账本结算。
 """
 
 from __future__ import annotations
@@ -27,8 +21,7 @@ from execution.risk_control import log_risk_audit, pre_trade_risk_check
 
 logger = logging.getLogger(__name__)
 
-# Fill-basis switch (gap #5 ruling B).  "t1_open" gates; "decision_close" is
-# comparison-only — written to the baseline, never gates acceptance.
+# 成交价基准开关："t1_open" 为正式基准；"decision_close" 仅作对照实验
 FILL_BASIS_T1_OPEN = "t1_open"
 FILL_BASIS_DECISION_CLOSE = "decision_close"
 VALID_FILL_BASES = (FILL_BASIS_T1_OPEN, FILL_BASIS_DECISION_CLOSE)
@@ -37,7 +30,7 @@ _order_seq = itertools.count(1)
 
 
 class Broker(ABC):
-    """Broker abstraction.  Capped at 4 methods (§22)."""
+    """券商抽象基类（统一 4 个核心接口）。"""
 
     @abstractmethod
     def submit_orders(self, orders: list[dict]) -> list[dict]: ...
@@ -53,14 +46,10 @@ class Broker(ABC):
 
 
 class SimAccountAdapter:
-    """Adapter over ``ledger.SimAccount`` exposing the risk_control surface.
+    """适配器：将 ``ledger.SimAccount`` 暴露为风控所需的账户接口。
 
-    ``risk_control.pre_trade_risk_check`` needs ``cash: float`` and
-    ``holdings: dict[str, int]``; the book of record is ``ledger.SimAccount``
-    with ``positions: dict[str, Position]``.  ``holdings`` is a derived view
-    over ledger positions — never a parallel book.  Settlement goes through
-    ``ledger.SimAccount.settle_fill``.  cost_basis / trade_log from broker.md's
-    sketch map to ``Position.avg_cost`` / ``Journal`` — not reimplemented here.
+    ``holdings`` 是基于账本持仓的只读派生视图，不维护平行账本；
+    结算统一经由 ``ledger.SimAccount.settle_fill`` 完成。
     """
 
     def __init__(self, initial_cash: float, account_id: str = "sim"):
@@ -84,15 +73,15 @@ class SimAccountAdapter:
 
 
 class SimBroker(Broker):
-    """Simulated broker: risk + matching + settlement in ``submit_orders``.
+    """模拟券商：在 ``submit_orders`` 中依次执行风控、撮合与结算。
 
-    Parameters in *config*:
-    - ``initial_cash`` — starting cash.
-    - ``bars`` — ``load_bars`` long table (date / ticker / OHLCV).
-    - ``fill_date`` — date fills execute at (broker clock for ``t1_open``).
-    - ``fill_basis`` — ``"t1_open"`` (default, gates) | ``"decision_close"``.
-    - ``risk`` — config dict for ``pre_trade_risk_check``.
-    - ``account_id``, ``portfolio_id`` — optional identifiers.
+    config 参数：
+    - ``initial_cash``：初始资金。
+    - ``bars``：长表行情数据（date / ticker / OHLCV）。
+    - ``fill_date``：成交执行日期（``t1_open`` 模式使用）。
+    - ``fill_basis``：``"t1_open"``（默认）或 ``"decision_close"``。
+    - ``risk``：传给 ``pre_trade_risk_check`` 的风控配置字典。
+    - ``account_id``、``portfolio_id``：可选账户与组合标识。
     """
 
     def __init__(self, config: dict):
@@ -134,14 +123,13 @@ class SimBroker(Broker):
         return self._account
 
     def submit_orders(self, orders: list[dict]) -> list[dict]:
-        """Submit a batch: risk -> fill -> ledger (AC-1 three-step order).
+        """批量提交订单：风控 -> 询价 -> 账本结算。
 
-        Returns one result dict per input: ``{**order, status: FILLED|REJECTED}``
-        with ``fill_price`` on fills.  No price (suspended) -> REJECTED, never
-        silently skipped.  Risk-blocked -> REJECTED.  Partial fills not
-        simulated (all-or-none).
+        每笔输入返回一个含 ``status``（``FILLED`` 或 ``REJECTED``）的结果字典，
+        成交附带 ``fill_price``。停牌无价格或风控拦截均明确返回 ``REJECTED``，
+        不静默跳过，且不模拟部分成交（全成或全拒）。
         """
-        # (a) risk
+        # (a) 盘前风控
         check = pre_trade_risk_check(
             orders, self._account, self.get_nav(), self._risk_config
         )
@@ -162,7 +150,7 @@ class SimBroker(Broker):
                 })
                 continue
 
-            # (b) fill price lookup
+            # (b) 查询成交价
             price = self._lookup_fill_price(o)
             if price is None:
                 results.append({
@@ -171,7 +159,7 @@ class SimBroker(Broker):
                 })
                 continue
 
-            # (c) ledger settle
+            # (c) 账本结算
             try:
                 self._settle(o, price)
             except (ValueError, TypeError) as exc:
@@ -195,14 +183,10 @@ class SimBroker(Broker):
     def get_nav(self) -> float:
         return self._account.nav
 
-    # ── internals ────────────────────────────────────────────────────────────
+    # --- 内部方法 ---
 
     def _lookup_fill_price(self, order: dict) -> float | None:
-        """Fill price at *fill_basis*.  Raw, never pre-skewed (kb_snapshot 2).
-
-        Both bases go through ``get_latest_price`` so a suspended ticker
-        yields ``None`` -> REJECTED (AC-2), never a silent fill.
-        """
+        """按 ``fill_basis`` 获取原始未调整成交价；停牌缺失时返回 ``None`` 触发拒单。"""
         if self._fill_basis == FILL_BASIS_DECISION_CLOSE:
             if self._decision_date is None:
                 raise ValueError(
@@ -211,7 +195,7 @@ class SimBroker(Broker):
             return get_latest_price(
                 self._bars, order["ticker"], self._decision_date, field="close"
             )
-        # t1_open: T+1 open via market_data — raw, FeeModel bills slippage.
+        # T+1 开盘价取原始价格，滑点由 FeeModel 统一计费
         if self._fill_date is None:
             raise ValueError(
                 "fill_date is required for fill_basis='t1_open' — set it via "
@@ -222,7 +206,7 @@ class SimBroker(Broker):
         )
 
     def _settle(self, order_dict: dict, fill_price: float) -> None:
-        """Step 3: settle through ledger (cash-flow + position bookkeeping)."""
+        """执行账本结算（资金流转与持仓记账）。"""
         fees = self._fee_model.compute(
             order_dict["side"],
             fill_price,
@@ -263,10 +247,7 @@ class SimBroker(Broker):
 
 
 def create_broker(mode: str, config: dict) -> Broker:
-    """Factory: selects the Broker implementation only (red line 4).
-
-    V1 ``"sim"`` -> ``SimBroker``.  ``"qmt"`` is the V2 slot.
-    """
+    """券商工厂：按模式选择具体实现（``"sim"`` 返回 ``SimBroker``，``"qmt"`` 预留）。"""
     if mode == "sim":
         return SimBroker(config)
     if mode == "qmt":

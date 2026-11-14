@@ -1,6 +1,6 @@
-"""Data source adapters — one subclass per external source.
+"""数据源适配器注册表。
 
-Register new sources in :data:`REGISTRY`; access via :func:`get_adapter`.
+在 :data:`REGISTRY` 中注册新数据源，通过 :func:`get_adapter` 获取实例。
 """
 
 from __future__ import annotations
@@ -24,9 +24,6 @@ REGISTRY: dict[str, type[SourceAdapter]] = {
 
 
 def get_adapter(source: str, **kwargs) -> SourceAdapter:
-    """Instantiate and return the adapter for *source*.
-
-    Raises ``KeyError`` for an unregistered source name.
-    """
+    """实例化并返回指定 *source* 的适配器；未注册时抛出 ``KeyError``。"""
     cls = REGISTRY[source]
     return cls(**kwargs)

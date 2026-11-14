@@ -1,8 +1,4 @@
-"""Tushare source adapter — A-share daily market data.
-
-Wraps ``tushare`` Pro API to pull raw daily bars.  Supports date-based
-watermark for incremental fetch.  API constraints handled internally.
-"""
+"""Tushare 数据源适配器（A 股日线行情，支持按日期水位线增量拉取）。"""
 
 from __future__ import annotations
 
@@ -20,14 +16,14 @@ __all__ = ["TushareAdapter"]
 
 
 class TushareAdapter(SourceAdapter):
-    """Fetch A-share daily bars via Tushare Pro API."""
+    """通过 Tushare Pro API 拉取 A 股日线行情。"""
 
     requests_per_second = 5.0
 
     _ASSET_TYPES = ["stock"]
 
     def __init__(self, token: str | None = None) -> None:
-        # Token from config key, never from .env directly (S6).
+        # 仅从入参或环境变量读取 token
         self._token = token or os.environ.get("TUSHARE_TOKEN", "")
 
     def list_asset_types(self) -> list[str]:
@@ -49,7 +45,7 @@ class TushareAdapter(SourceAdapter):
 
         if asset_type == "stock":
             df = pro.daily(trade_date=date_str)
-        else:  # pragma: no cover — guarded above
+        else:  # pragma: no cover
             raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
         if df is None:
@@ -61,5 +57,5 @@ class TushareAdapter(SourceAdapter):
             asset_type=asset_type,
             trade_date=trade_date,
             row_count=len(df),
-            watermark=date_str,  # watermark = last successful trade date
+            watermark=date_str,  # 以最近成功交易日作为水位线
         )

@@ -1,10 +1,7 @@
-"""Industry classification -> ``data_platform/asset/reference/industry.parquet``.
+"""申万行业分类拉取脚本 -> ``data_platform/asset/reference/industry.parquet``。
 
-Source: tushare 申万 tree (``index_classify`` + ``index_member``), i.e.
-``classification="sw"``.  One reference file, PK ``(ticker, classification)``.
-
-``industry_l3`` is schema-nullable and left null unless the L3 members are
-reachable.  Optional for the golden sample.
+从 tushare ``index_classify`` + ``index_member``（``classification="sw"``）拉取一二级行业归属，
+主键为 ``(ticker, classification)``，``industry_l3`` 按 schema 留空。
 """
 
 from __future__ import annotations
@@ -61,7 +58,7 @@ def build_frame(pro, tickers: list[str]) -> pd.DataFrame:
 
 
 def _l2_name_for(members, member, l2_by_parent: dict) -> str:
-    """Best-effort L2 label; falls back to the L1 name when no L2 is linked."""
+    """获取二级行业名称，无关联时回退至索引代码或 unknown。"""
     code = str(member.get("index_code") or "")
     return str(l2_by_parent.get(code, {}).get("index_name", code or "unknown"))
 

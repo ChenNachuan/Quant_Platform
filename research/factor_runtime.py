@@ -1,21 +1,8 @@
-"""FactorDAG scheduling — topological execution, caching, and failure isolation.
+"""FactorDAG 调度层：静态拓扑执行、内存缓存与故障隔离。
 
-Consumes :mod:`research.factor_interface`'s ``Factor`` contract.  Builds a
-static dependency graph from ``depends_on()`` via :func:`parse_dependency`
-(T1 — no second prefix parser), executes in topological order with an
-in-memory cache keyed on ``(name, version, date_range, depends_hash)``.
-
-Scope (T2 only — S5 / S11 own the rest):
-
-- no factor storage to disk (S5 owns ``factor_storage``)
-- no post-processing (S5 owns ``PostProcessor``)
-- no ML training (S11) — :class:`MLFactor` is a shape skeleton
-- no executor-parallel layer execution — :meth:`FactorDAG.topological_layers`
-  declares the parallelism shape; the executor choice (thread vs process) is
-  a pending design question
-
-The time model is a for-loop (red line 1).  The DAG is a static topological
-declaration, not an event subscription graph (red line 2).
+基于 ``research.factor_interface.Factor`` 契约，使用 ``parse_dependency`` 解析
+``depends_on()`` 构建静态有向无环图，按拓扑顺序执行并维护以
+``(name, version, date_range, depends_hash)`` 为键的内存缓存。
 """
 
 from __future__ import annotations
@@ -45,40 +32,32 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Cache key
+# 缓存键定义
 # ---------------------------------------------------------------------------
 
-#: Cache key = ``(factor_name, version, date_range, depends_hash)``.
+#: 缓存键格式：``(factor_name, version, date_range, depends_hash)``。
 CacheKey = tuple[str, str, tuple[str, str], str]
 
 # ---------------------------------------------------------------------------
-# Default data loader — bare dependency names resolve through ``load_bars``
+# 默认数据加载器：裸表名通过 load_bars 解析
 # ---------------------------------------------------------------------------
 
 
 def _table_family() -> dict[str, tuple[str, str]]:
-    """Invert :data:`data.data_api.TABLE_MAP` — table name → (asset_type, freq).
-
-    Derived at call time so the mapping can never drift from the source.
-    """
+    """运行时反转 ``data.data_api.TABLE_MAP``，映射表名到 ``(asset_type, freq)``。"""
     from data.data_api import TABLE_MAP
 
     return {v: k for k, v in TABLE_MAP.items()}
 
 
 def _default_table_loader(table_name: str, start: str, end: str) -> pd.DataFrame:
-    """Load a raw data table via :func:`data.data_api.load_bars`.
-
-    The dependency name *table_name* is looked up in the inverse of
-    :data:`data.data_api.TABLE_MAP` — no duplicate dict to drift.
-    """
+    """通过 ``data.data_api.load_bars`` 加载原始数据表。"""
     from data.data_api import load_bars
 
     families = _table_family()
     if table_name not in families:
         raise ValueError(
-            f"unknown data table {table_name!r}; "
-            f"expected one of {sorted(families)}"
+            f"unknown data table {table_name!r}; expected one of {sorted(families)}"
         )
     asset_type, freq = families[table_name]
     return load_bars(start=start, end=end, freq=freq, asset_type=asset_type)
@@ -90,19 +69,9 @@ def _default_table_loader(table_name: str, start: str, end: str) -> pd.DataFrame
 
 
 class FactorDAG:
-    """Static dependency graph over registered factors.
+    """基于已注册因子的静态依赖有向无环图。
 
-    Edges come from ``depends_on()`` entries with the ``"factor:"`` prefix
-    (parsed by T1's :func:`parse_dependency`).  Bare names are data tables
-    and do not create graph edges.
-
-    Parameters
-    ----------
-    data_loader
-        Callable ``(table_name, start, end) -> DataFrame`` used to resolve
-        bare table dependencies.  Defaults to :func:`_default_table_loader`
-        (backed by ``data.data_api.load_bars``).  Tests inject synthetic
-        loaders.
+    ``depends_on()`` 中的 ``"factor:"`` 条目构成因子依赖边，裸表名通过 ``data_loader`` 加载。
     """
 
     def __init__(
@@ -110,47 +79,31 @@ class FactorDAG:
         data_loader: Callable[[str, str, str], pd.DataFrame] | None = None,
     ) -> None:
         self.factors: dict[str, Factor] = {}
-        #: factor name → list of upstream factor names (from ``factor:`` deps)
+        #: 因子名 → 上游因子名列表
         self._upstream: dict[str, list[str]] = {}
         self._data_loader = data_loader or _default_table_loader
-        #: In-memory result cache.  Disk persistence is S5.
+        #: 内存结果缓存（不负责磁盘持久化）
         self._cache: dict[CacheKey, pd.DataFrame] = {}
 
-    # -- graph construction -----------------------------------------------
+    # -- 图构建 -------------------------------------------------------------
 
     def register(self, factor: Factor) -> None:
-        """Register *factor* and add graph edges from ``depends_on()``.
-
-        Uses T1's :func:`parse_dependency` — bare names are data tables
-        (no edge), ``"factor:xxx"`` creates an edge to upstream factor *xxx*.
-
-        All dependencies are parsed and validated **before** either dict is
-        mutated.  A rejected dep leaves the DAG exactly as it was.
-        """
+        """注册因子并解析 ``depends_on()`` 添加依赖边；全部校验通过后原子提交。"""
         name = factor.name
         if name in self.factors:
             raise ValueError(f"factor {name!r} is already registered")
-        # Validate first — do not commit a node whose edges are unparseable.
         upstream: list[str] = []
         for dep in factor.depends_on():
             kind, dep_name = parse_dependency(dep)
             if kind == KIND_FACTOR:
                 upstream.append(dep_name)
-        # Both dicts commit together.
         self.factors[name] = factor
         self._upstream[name] = upstream
 
-    # -- topological ordering ---------------------------------------------
+    # -- 拓扑排序 -----------------------------------------------------------
 
     def topological_sort(self) -> list[str]:
-        """Kahn's algorithm.  Returns factor names in dependency order.
-
-        Raises
-        ------
-        ValueError
-            If the graph contains a cycle (sort length ≠ node count), or if
-            a ``factor:`` dependency references an unregistered name.
-        """
+        """Kahn 算法拓扑排序，返回依赖顺序的因子名列表；存在环或悬空依赖时抛出 ``ValueError``。"""
         self._check_dangling()
         in_degree = {n: 0 for n in self.factors}
         for name, ups in self._upstream.items():
@@ -158,7 +111,6 @@ class FactorDAG:
                 if u in self.factors:
                     in_degree[name] += 1
 
-        # Reverse edges: upstream → [downstream, ...]
         downstream: dict[str, list[str]] = {n: [] for n in self.factors}
         for name, ups in self._upstream.items():
             for u in ups:
@@ -183,12 +135,7 @@ class FactorDAG:
         return result
 
     def topological_layers(self) -> list[list[str]]:
-        """Layered topological order — factors in one layer are independent.
-
-        Same source as :meth:`topological_sort` (Kahn's algorithm).  Layer
-        *i* contains all nodes whose in-degree reaches zero after layer
-        *i-1* is removed.  Same-layer factors can run in parallel.
-        """
+        """按 Kahn 算法分层输出拓扑序，同层因子彼此独立。"""
         self._check_dangling()
         in_degree = {n: 0 for n in self.factors}
         for name, ups in self._upstream.items():
@@ -224,7 +171,7 @@ class FactorDAG:
         return layers
 
     def _check_dangling(self) -> None:
-        """Raise if any ``factor:`` dependency names an unregistered factor."""
+        """检查是否存在引用未注册因子的依赖，有则抛出 ``ValueError``。"""
         for name, ups in self._upstream.items():
             for u in ups:
                 if u not in self.factors:
@@ -234,18 +181,12 @@ class FactorDAG:
 
 
 # ---------------------------------------------------------------------------
-# Dependency fingerprint
+# 依赖内容指纹
 # ---------------------------------------------------------------------------
 
 
 def _dataframe_fingerprint(df: pd.DataFrame) -> str:
-    """Value-sensitive digest of a DataFrame's contents.
-
-    Row-wise value hashes (``pandas.util.hash_pandas_object``, index
-    excluded) over the frame's natural row order, plus a schema signature
-    of column names and dtypes.  Same shape with different values digests
-    differently — the fingerprint is of the content, not of the shape.
-    """
+    """计算 DataFrame 列结构与行数据的值敏感 12 位指纹。"""
     if df is None:
         return "missing"
     if df.empty:
@@ -257,13 +198,7 @@ def _dataframe_fingerprint(df: pd.DataFrame) -> str:
 
 
 def compute_depends_hash(factor: Factor, data: dict[str, pd.DataFrame]) -> str:
-    """Compute a 12-char md5 fingerprint of the factor's dependency contents.
-
-    For each dependency (sorted by name) the fingerprint includes the
-    dependency name and a value-sensitive digest of its rows.  Two data
-    dicts with the same shape but different values produce different
-    hashes; the same values always produce the same hash.
-    """
+    """计算因子全部输入依赖内容的 12 位 MD5 指纹。"""
     parts: list[str] = []
     for dep in sorted(factor.depends_on()):
         df = data.get(dep)
@@ -276,35 +211,26 @@ def compute_depends_hash(factor: Factor, data: dict[str, pd.DataFrame]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Canonical row order
+# 规范行序
 # ---------------------------------------------------------------------------
 
-#: Sort keys for canonical output — applied in this order where present.
+#: 规范化输出排序键。
 _CANON_KEYS: tuple[str, ...] = ("date", "ticker")
 
 
 def _canonicalise(df: pd.DataFrame) -> pd.DataFrame:
-    """Put *df* into canonical row order: ``date``, then ``ticker``.
-
-    Every frame that enters or leaves :func:`compute_factor` goes through
-    this, so a factor's values never depend on which cache path (hit /
-    append / full) produced its inputs.  Order-sensitive compute
-    (``diff`` / ``shift`` / ``rolling`` without ``groupby``) is only
-    reproducible under one row order.
-    """
+    """将 DataFrame 排序为规范行序（先 ``date`` 后 ``ticker``），确保结果与缓存路径无关。"""
     if df is None:
         return df
     keys = [c for c in _CANON_KEYS if c in df.columns]
     if not keys:
         return df
-    # mergesort: stable, so a frame with unique (date, ticker) keys — the
-    # output contract — always canonicalises to the same order for the same
-    # content, whatever order the rows arrived in.
+    # 使用稳定排序 mergesort，保证相同内容始终映射为一致的行序
     return df.sort_values(keys, kind="mergesort").reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
-# Data assembly (Dev default — see PR description)
+# 数据装配
 # ---------------------------------------------------------------------------
 
 
@@ -315,13 +241,7 @@ def _assemble_data(
     end: str,
     _visited: set[str] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Build the ``data`` dict for ``factor.compute()``.
-
-    Bare dependency names → data tables loaded via the DAG's ``data_loader``.
-    ``"factor:xxx"`` → recursively computed upstream factor results.  Each
-    frame is canonicalised so the consumer sees one row order regardless of
-    where the frame came from.
-    """
+    """为 ``factor.compute()`` 装配依赖数据字典并统一规范行序。"""
     data: dict[str, pd.DataFrame] = {}
     for dep in factor.depends_on():
         kind, name = parse_dependency(dep)
@@ -335,7 +255,7 @@ def _assemble_data(
 
 
 # ---------------------------------------------------------------------------
-# compute_factor — cache hit / append / full
+# compute_factor：缓存命中 / 追加拼接 / 全量计算
 # ---------------------------------------------------------------------------
 
 
@@ -354,7 +274,7 @@ def _slice_data_to_range(
     start: str,
     end: str,
 ) -> dict[str, pd.DataFrame]:
-    """Subset each dependency frame to rows whose date falls in ``[start, end]``."""
+    """将各依赖表裁剪至 ``[start, end]`` 日期区间。"""
     start10, end10 = str(start)[:10], str(end)[:10]
     sliced: dict[str, pd.DataFrame] = {}
     for dep, df in data.items():
@@ -373,15 +293,7 @@ def _find_append_candidate(
     start: str,
     end: str,
 ) -> tuple[CacheKey, pd.DataFrame] | None:
-    """Find a cache entry covering ``[start, X]`` with ``X < end`` whose
-    dependency content over its own range is still unchanged.
-
-    The cached key's ``depends_hash`` was computed over the *cached* range,
-    so it is compared against the hash of the current *data* sliced to that
-    same range — not against the hash of the full requested range.  A pure
-    range extension therefore matches, while an upstream revision (values
-    changed under the same dates) does not and falls through to full.
-    """
+    """查找同 ``(name, version)``、起始日相同、覆盖 ``[start, X]``（``X < end``）且该前缀依赖内容未变的缓存项。"""
     start_s, end_s = str(start), str(end)
     for key, df in dag._cache.items():
         c_name, c_version, c_range, c_hash = key
@@ -406,50 +318,17 @@ def compute_factor(
     force: bool = False,
     _visited: set[str] | None = None,
 ) -> pd.DataFrame:
-    """Compute one factor over ``[start, end]`` with caching.
+    """计算单个因子在 ``[start, end]`` 区间的值并维护内存缓存。
 
-    Three modes:
-
-    - **cache hit** — exact key match and ``force=False`` → return cached
-    - **append** — same (name, version) cached for a shorter range starting
-      at *start*, with dependency content over that range unchanged →
-      the cached prefix is reused and the rows past it are filled in
-    - **full** — no cache, ``force=True``, version change, or an upstream
-      revision under the cached range → compute the full range
-
-    The cache key is exactly ``(name, version, date_range, depends_hash)``.
-
-    Every returned frame — and every frame handed to ``compute()`` — is in
-    canonical row order (``date``, then ``ticker``), whatever path produced
-    it.  A factor's values therefore never depend on which cache path its
-    inputs came from.
-
-    Raises
-    ------
-    ValueError
-        If *factor_name* is not registered, or if following ``factor:``
-        dependencies leads back to *factor_name* (circular dependency).
-
-    **Append is a provenance guarantee, not a speed-up.**  The historical
-    rows come from the cache bit-identical, so a range extension never
-    re-derives them; the new rows are computed with full dependency context
-    so lookback factors get the boundary values a full compute would give.
-    Because :meth:`Factor.compute` is a black box with no lookback
-    declaration, that context is the whole range — append therefore costs
-    the same compute as full, and earns reproducibility rather than CPU.
-    A genuine tail-only compute needs a ``lookback`` / ``compute_delta``
-    contract on :class:`~research.factor_interface.Factor` (T1, not
-    extended here).  The splice assumes ``compute()`` is a pure function of
-    ``data``; an impure factor would make any cache path unsound, not just
-    this one.
+    支持三种路径：精确缓存命中、前缀不变时的追加拼接（复用缓存历史前缀以保证
+    溯源一致性，在全量上下文上重算以保留回溯窗口并截取尾部拼接），以及全量计算。
+    所有输入输出均经规范行序处理；未注册因子或存在循环依赖时抛出 ``ValueError``。
     """
     if factor_name not in dag.factors:
         raise ValueError(f"factor {factor_name!r} is not registered")
     factor = dag.factors[factor_name]
 
-    # Cycle guard: track the in-flight recursion path.  If we re-enter a
-    # factor already on the path, the graph has a cycle — raise ValueError,
-    # not RecursionError.
+    # 递归路径防环检查，显式抛出 ValueError 而非触发 RecursionError
     if _visited is None:
         _visited = set()
     if factor_name in _visited:
@@ -459,34 +338,22 @@ def compute_factor(
         )
     _visited.add(factor_name)
     try:
-        # Assemble inputs (tables + upstream factors) for depends_hash + compute.
         data = _assemble_data(dag, factor, start, end, _visited=_visited)
         dep_hash = compute_depends_hash(factor, data)
         key = _make_cache_key(factor.name, factor.version, start, end, dep_hash)
     finally:
         _visited.discard(factor_name)
 
-    # 1. Exact cache hit.
+    # 1. 精确缓存命中
     if not force and key in dag._cache:
         return dag._cache[key]
 
-    # 2. Append: same identity (name, version) with unchanged dependency
-    #    content over a shorter cached range → reuse that prefix, compute
-    #    the tail.
+    # 2. 追加拼接：复用历史缓存前缀以保证溯源一致性，截取尾部新行拼接
     if not force:
         candidate = _find_append_candidate(dag, factor, data, start, end)
         if candidate is not None:
             _old_key, cached_df = candidate
             _c_start, c_end = _old_key[2]
-            # Compute over the full assembled range so lookback factors
-            # (pct_change, rolling windows) see the history a full compute
-            # would give them, then keep only the rows past the cached end.
-            # The prefix itself is taken from the cache, bit-identical.
-            #
-            # Same CPU as the full branch — see the compute_factor docstring.
-            # The win is provenance (cached history reused, not re-derived),
-            # not speed; a cheaper tail needs Factor to declare its lookback,
-            # which is T1's to add.
             tail_result = factor.compute(data)
             validate_output(factor.name, tail_result)
             tail_dates = tail_result["date"].astype(str).str[:10]
@@ -497,7 +364,7 @@ def compute_factor(
             dag._cache[key] = result
             return result
 
-    # 3. Full compute.
+    # 3. 全量计算
     result = factor.compute(data)
     validate_output(factor.name, result)
     result = _canonicalise(result)
@@ -511,7 +378,7 @@ def compute_factor(
 
 
 def _warn_max_workers(max_workers: int | None) -> None:
-    """Warn that *max_workers* has no effect until the executor is selected."""
+    """提示当前版本下 ``max_workers`` 参数尚不生效（仍为顺序执行）。"""
     if max_workers is not None:
         warnings.warn(
             "max_workers has no effect until the layer-parallel executor "
@@ -527,20 +394,12 @@ def compute_all(
     max_workers: int | None = None,
     force: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    """Compute all registered factors in topological order.
-
-    Iterates :meth:`FactorDAG.topological_layers` and computes each factor
-    in dependency order.  ML factors are computed serially (isolated from
-    any future parallel pool).  *max_workers* is reserved for when the
-    layer-parallel executor is selected; execution is sequential for now
-    and a non-``None`` value triggers a warning.
-    """
+    """按拓扑分层顺序计算全部已注册因子（``MLFactor`` 单独串行隔离执行）。"""
     _warn_max_workers(max_workers)
     results: dict[str, pd.DataFrame] = {}
     for layer in dag.topological_layers():
         ml_names = {n for n in layer if isinstance(dag.factors[n], MLFactor)}
         normal = [n for n in layer if n not in ml_names]
-        # Sequential within layer — executor choice is a pending question.
         for name in normal:
             results[name] = compute_factor(dag, name, start, end, force=force)
         for name in sorted(ml_names):
@@ -555,16 +414,7 @@ def compute_all_safe(
     max_workers: int | None = None,
     force: bool = False,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Exception]]:
-    """Fault-tolerant compute: upstream failure skips downstream, same-layer
-    independent factors continue.
-
-    Returns ``(results, errors)`` where *errors* maps factor name → exception
-    (or a ``RuntimeError`` explaining that an upstream dependency failed).
-
-    *max_workers* is reserved for when the layer-parallel executor is
-    selected; execution is sequential for now, matching :func:`compute_all`.
-    A non-``None`` value triggers a warning.
-    """
+    """容错批量计算：上游失败时跳过下游因子，同层独立因子继续执行，返回 ``(results, errors)``。"""
     _warn_max_workers(max_workers)
     results: dict[str, pd.DataFrame] = {}
     errors: dict[str, Exception] = {}
@@ -573,7 +423,6 @@ def compute_all_safe(
     for layer in dag.topological_layers():
         for name in layer:
             factor = dag.factors[name]
-            # Check if any upstream factor has already failed.
             upstream_failed = False
             for dep in factor.depends_on():
                 kind, dep_name = parse_dependency(dep)
@@ -596,54 +445,37 @@ def compute_all_safe(
 
 
 # ---------------------------------------------------------------------------
-# MLFactor skeleton (training is S11)
+# MLFactor 接口骨架
 # ---------------------------------------------------------------------------
 
 
 class MLFactor(Factor):
-    """Skeleton for ML-based factors.
+    """机器学习因子抽象骨架，定义 ``train`` / ``predict`` 分离及重训与超时配置接口。"""
 
-    Only the interface shape lands here: ``train`` / ``predict`` separation,
-    ``retrain_freq`` placeholder, and ``timeout_seconds`` placeholder.
-    Training, model persistence and prediction logic land at S11.
-
-    Subclasses must override :attr:`name` (and normally implement
-    ``depends_on`` / ``train`` / ``predict`` / ``compute``).
-    """
-
-    #: Placeholder name — concrete subclasses must override.
+    #: 占位名称，具体子类必须覆盖。
     name: str = "ml_factor"
     description: str = "ML factor skeleton (training lands at S11)"
 
-    #: Path to the persisted model file (joblib).  Managed by S11.
+    #: 持久化模型文件路径（joblib）。
     model_path: str = ""
 
-    #: Retrain frequency trigger.  Dev default: checked on each full compute
-    #: run by comparing the model's last-train timestamp against the
-    #: frequency window.  Concrete trigger mechanism is a Dev default
-    #: (see PR description).
-    retrain_freq: str = "monthly"  # monthly / quarterly / yearly
+    #: 重训频率（monthly / quarterly / yearly）。
+    retrain_freq: str = "monthly"
 
-    #: Seconds before an ML compute is considered stalled.  Dev default: 300
-    #: seconds, after which the factor is recorded as failed (compute_all_safe
-    #: treats it like any other failure).  Value is a Dev default (see PR).
+    #: 单次计算超时阈值（秒），超时按失败处理。
     timeout_seconds: int = 300
 
     def depends_on(self) -> list[str]:
         return []
 
     def train(self, data: dict[str, pd.DataFrame], train_end: str) -> Any:
-        """Train a model on *data* up to *train_end*.
-
-        *train_end* strictly separates training from prediction to prevent
-        look-ahead.  Implementation lands at S11.
-        """
+        """使用截至 ``train_end`` 的数据训练模型（严格隔离未来数据以防前视）。"""
         raise NotImplementedError("MLFactor.train() lands at S11")
 
     def predict(self, model: Any, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """Generate predictions from a trained *model*.  Lands at S11."""
+        """基于已训练模型生成预测结果。"""
         raise NotImplementedError("MLFactor.predict() lands at S11")
 
     def compute(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """Load-or-train then predict.  Lands at S11."""
+        """加载或训练模型并执行预测。"""
         raise NotImplementedError("MLFactor.compute() lands at S11")

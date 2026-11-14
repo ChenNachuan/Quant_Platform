@@ -1,40 +1,13 @@
-"""Alert governance: dedup key, severity only-up, 8-condition table, channel tiering.
+"""告警治理模块：去重键、级别只升不降、8 项条件表与分级通知通道。
 
-``docs/design/ops/alerting.md`` is the contract. Three rule classes
-(threshold / mutation / trend), eight concrete conditions, and the two
-governance red lines:
+核心红线：
+- 每日每键 ``{date}_{alert_type}_{alpha_type_id}`` 在 ``logs/ops/alerts.jsonl`` 仅保留一行；
+  同级或更低级别的重复触发完全静默。
+- 告警级别只升不降：升级时原地覆写当日记录并按新级别重新推送，降级则忽略。
+- 通道分级：终端输出覆盖所有级别，桌面通知（macOS ``osascript``）仅在 CRITICAL 触发。
 
-* one row per ``{date}_{alert_type}_{alpha_type_id}`` per day in
-  ``logs/ops/alerts.jsonl`` — a repeat at equal or lower level fires nothing
-  at all;
-* severity only ever rises — an upgrade rewrites the day's single row upward
-  and re-fires the channels at the new level (so an escalation reaches the
-  desktop); a downgrade is a no-op.
-
-Channels: the terminal at every level, the desktop (macOS ``osascript``) at
-CRITICAL only. ``evaluate_alerts`` is pure — it maps a facts dict to firings;
-``send_alert`` is the stateful sink. The ``health_check`` body (monitoring)
-evaluates and then sends each firing; the scheduler's direct job-failure
-alert converges on the same dedup key via ``alert_type="job_failure"`` and
-``alpha_type_id=<job name>``.
-
-``evaluate_alerts`` facts contract — ``None``, NaN, or missing means "no
-computable source" and never fires (a non-numeric value is a caller bug and
-raises)::
-
-    alpha_type_id           strategy scope for conditions 3-7
-    failed_jobs             [{"job_name": str, "error": str | None}] -> cond 1
-    data_delay_days         float, days since latest data     -> cond 2 (> 1)
-    mdd, backtest_mdd       floats, current vs backtest MDD   -> cond 3 (> 1.5x)
-    sharpe_6m               float, rolling 6-month sharpe     -> cond 4 (< 0)
-    excess_negative_months  float, months running negative    -> cond 5 (>= 6)
-    nav_daily_return        float, decimal single-day return  -> cond 6 (< -0.03)
-    turnover                float, ratio                      -> cond 7 (> 1.5)
-    risk_reject_count       float, day's BLOCK count          -> cond 8 (> 3)
-
-Alert row schema (pinned here per the issue's open items): ``date`` (ISO day),
-``ts`` (UTC ISO), ``level``, ``msg``, ``alert_type``, ``alpha_type_id``,
-``key`` — the dedup key whose day part is ``%Y%m%d`` per the design formula.
+``evaluate_alerts`` 为纯函数，``None``、NaN 或缺失字段视为“无可用数据源”而不触发；
+传入非数值类型属于调用方契约错误并直接抛出异常。
 """
 
 from __future__ import annotations
@@ -49,54 +22,48 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-#: Runtime landing spot for alert rows (``data/`` is gitignored runtime data).
+#: 告警记录持久化路径
 ALERTS_JSONL = Path("logs/ops/alerts.jsonl")
 
 
 class AlertLevel(Enum):
-    """The design's three levels; CRITICAL is the one that reaches the desktop."""
+    """告警级别枚举；仅 CRITICAL 触发桌面通知。"""
 
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
 
 
-#: Severity order. The only direction a key's level may move is up.
+#: 级别严重度顺序（同键告警级别只升不降）
 _LEVEL_RANK: dict[AlertLevel, int] = {
     AlertLevel.MEDIUM: 0,
     AlertLevel.HIGH: 1,
     AlertLevel.CRITICAL: 2,
 }
 
-#: The design's 3 rule classes, one per row of the condition table.
+#: 三类告警规则分类
 RULE_THRESHOLD = "threshold"
 RULE_MUTATION = "mutation"
 RULE_TREND = "trend"
 
 
 def _num(facts: Mapping[str, Any], key: str) -> float | None:
-    """``facts[key]`` as a float; ``None`` means "no computable source".
+    """读取 ``facts[key]`` 数值；``None`` 与 NaN 均视为无可用数据源。
 
-    NaN — pandas' missing marker, which ``float()`` accepts — is a missing
-    value, not a number, and maps to ``None`` too: every comparison against
-    NaN is False, so an unguarded NaN would fall through each threshold check
-    into its breach branch and fire the condition.
+    NaN 在阈值比较中恒为 False，必须提前转为 ``None`` 防止误入触发分支。
     """
     raw = facts.get(key)
     if raw is None:
         return None
-    val = float(raw)  # a non-numeric value is a caller contract violation
-    return None if val != val else val  # NaN is the only value not equal to itself
+    val = float(raw)  # 非数值属于调用方契约错误
+    return None if val != val else val  # NaN 是唯一不等于自身的值
 
 
 def _scope(facts: Mapping[str, Any]) -> str:
     return str(facts.get("alpha_type_id") or "")
 
 
-# ---------------------------------------------------------------------------
-# Condition predicates — one per alert_type. Each returns (msg, scope) pairs
-# for concrete breaches only; an empty list means the condition did not fire.
-# ---------------------------------------------------------------------------
+# --- 条件谓词：返回实际触发的 (msg, scope) 列表 ---
 
 
 def _breach_job_failure(facts: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -160,7 +127,7 @@ def _breach_risk_reject(facts: Mapping[str, Any]) -> list[tuple[str, str]]:
 
 @dataclass(frozen=True)
 class AlertCondition:
-    """One row of the design's 8-condition table (id / type / level / rule / facts predicate)."""
+    """8 项告警条件表中的单条规则定义。"""
 
     id: int
     alert_type: str
@@ -170,7 +137,7 @@ class AlertCondition:
     breach: Callable[[Mapping[str, Any]], Sequence[tuple[str, str]]]
 
 
-#: The 8-condition table (docs/design/ops/alerting.md), verbatim level + type.
+#: 8 项告警条件配置表
 ALERT_CONDITIONS: tuple[AlertCondition, ...] = (
     AlertCondition(
         1,
@@ -240,12 +207,7 @@ ALERT_CONDITIONS: tuple[AlertCondition, ...] = (
 
 
 def evaluate_alerts(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Evaluate the 8-condition table against ``facts``; return the firings.
-
-    Pure: no I/O, no state. Each firing is ``{"alert_type", "level", "msg",
-    "alpha_type_id", "rule"}`` with ``level`` an :class:`AlertLevel`; the
-    caller feeds them to :func:`send_alert`.
-    """
+    """根据 8 项条件对 ``facts`` 进行纯函数求值，返回待发送的告警条目。"""
     if not isinstance(facts, Mapping):
         raise TypeError(f"facts must be a mapping, got {type(facts).__name__}")
     firings: list[dict[str, Any]] = []
@@ -263,23 +225,16 @@ def evaluate_alerts(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
     return firings
 
 
-# ---------------------------------------------------------------------------
-# Channels
-# ---------------------------------------------------------------------------
+# --- 通知通道 ---
 
 
 def _osa_str(text: str) -> str:
-    """AppleScript double-quoted string literal."""
+    """转义 AppleScript 双引号字符串字面量。"""
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def desktop_notify(msg: str) -> None:
-    """Desktop notification via macOS ``osascript`` (the issue's pinned default).
-
-    Best-effort: a missing or broken notifier degrades to a terminal line —
-    the terminal channel has already fired either way and an alert must not
-    take the pipeline down with it.
-    """
+    """通过 macOS ``osascript`` 发送桌面通知（异常时降级至终端输出，不阻断主流程）。"""
     script = f'display notification {_osa_str(msg)} with title "Quant Alert"'
     try:
         subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
@@ -293,9 +248,7 @@ def _fire_channels(level: AlertLevel, msg: str) -> None:
         desktop_notify(msg)
 
 
-# ---------------------------------------------------------------------------
-# Stateful sink — one row per key per day, severity only up
-# ---------------------------------------------------------------------------
+# --- 有状态接收器：每日每键单行，级别只升不降 ---
 
 _write_lock = threading.RLock()
 _alert_state: dict[str, AlertLevel] = {}
@@ -303,14 +256,14 @@ _loaded_dates: set[str] = set()
 
 
 def reset_state() -> None:
-    """Drop the in-memory dedup state; a fresh process reseeds from the file."""
+    """清空内存去重状态，供进程重启或测试时重新从文件加载。"""
     with _write_lock:
         _alert_state.clear()
         _loaded_dates.clear()
 
 
 def _seed_state(iso_day: str) -> None:
-    """Load the day's rows into the dedup state (a restart keeps its place)."""
+    """从当日已落盘的告警文件中恢复去重级别状态。"""
     if iso_day in _loaded_dates:
         return
     _loaded_dates.add(iso_day)
@@ -341,12 +294,7 @@ def _seed_state(iso_day: str) -> None:
 
 
 def log_alert(payload: dict) -> None:
-    """Append one row to ``logs/ops/alerts.jsonl`` (design signature).
-
-    A tail left without its trailing newline by an interrupted append would
-    glue the new row onto the fragment and lose both rows to one unparseable
-    line — so the tail is checked and a break line goes in first.
-    """
+    """向 ``logs/ops/alerts.jsonl`` 追加一行告警（写入前检查末尾换行符防粘连）。"""
     with _write_lock:
         path = ALERTS_JSONL
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,13 +310,7 @@ def log_alert(payload: dict) -> None:
 
 
 def _replace_row(key: str, payload: dict) -> None:
-    """Rewrite the key's single row in place (the severity-upgrade path).
-
-    Corrupt lines are skipped the way ``_seed_state`` skips them — a partial
-    append must not kill the escalation — and the rewrite lands through
-    ``os.replace`` so an interrupted write can never truncate the day's
-    history.
-    """
+    """级别升级时原地替换对应键的当日记录（使用 ``os.replace`` 原子写入）。"""
     path = ALERTS_JSONL
     rows: list[dict] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -411,11 +353,9 @@ def send_alert(
     alert_type: str = "generic",
     alpha_type_id: str = "",
 ) -> None:
-    """Alert send + persist. Dedup key = ``{date}_{alert_type}_{alpha_type_id}``.
+    """发送并持久化告警；去重键为 ``{date}_{alert_type}_{alpha_type_id}``。
 
-    A repeat at equal or lower level is a complete no-op. A repeat at a
-    HIGHER level rewrites the day's row upward and re-fires the channels at
-    the new level. A lower level never rewrites (severity only rises).
+    同级或更低级别重复调用直接静默忽略；更高级别调用将覆写当日记录并重新推送各通道。
     """
     new_level = _normalize_level(level)
     today = date.today()
@@ -440,5 +380,5 @@ def send_alert(
         else:
             _replace_row(dedup_key, row)
         _alert_state[dedup_key] = new_level
-    # Channels fire outside the lock: notify I/O must not block dedup state.
+    # 锁外执行通道推送，避免通知 I/O 阻塞去重状态更新
     _fire_channels(new_level, msg)

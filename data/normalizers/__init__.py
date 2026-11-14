@@ -1,10 +1,6 @@
-"""Per-source normalizers — format conversion only (C3).
+"""各数据源标准化器（仅做字段映射、单位换算与类型规范，不做 DQC 清洗）。
 
-Each module exposes ``normalize(asset_type, raw_df) -> df`` that maps
-source-native columns to the unified bars_daily schema.  Dispatch is by
-source name: ``data/normalizers/{source}_normalizer.py``.
-
-No DQC, no cleaning — only column-name mapping and type fixes.
+各子模块暴露 ``normalize(asset_type, raw_df) -> df``，输出对齐统一的 ``bars_daily`` 表结构。
 """
 
 from __future__ import annotations
@@ -16,7 +12,7 @@ import pandas as pd
 
 __all__ = ["get_normalizer", "UNIFIED_COLUMNS"]
 
-# Unified output columns (BARS_DAILY_SCHEMA minus quality_flag, which DQC adds)
+# 统一输出列（含由 DQC 阶段填充的 quality_flag 占位列）
 UNIFIED_COLUMNS: list[str] = [
     "ticker",
     "trade_date",
@@ -44,10 +40,7 @@ _NORMALIZER_MODULES: dict[str, str] = {
 
 
 def get_normalizer(source: str) -> Callable[[str, pd.DataFrame], pd.DataFrame]:
-    """Return the ``normalize`` function for *source*.
-
-    Raises ``ValueError`` for unknown source names.
-    """
+    """返回指定 *source* 对应的 ``normalize`` 函数；未知数据源抛出 ``ValueError``。"""
     module_path = _NORMALIZER_MODULES.get(source)
     if module_path is None:
         raise ValueError(f"no normalizer for source: {source!r}")

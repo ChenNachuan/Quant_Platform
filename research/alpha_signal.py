@@ -1,39 +1,11 @@
-"""Unified signal layer — :class:`AlphaSignal` and score → position weights.
+"""统一信号层：AlphaSignal 与分数到无约束目标权重的转换。
 
-Collapses the combined multi-factor score and the ML score onto one contract
-(alpha_signal.md §32, §63.5) and turns that score into unconstrained target
-weights.  This is the first artefact of the three-step main chain
-(``AlphaSignal → Portfolio → Execution``).
-
-Three responsibilities and nothing else:
-
-1. :class:`AlphaSignal` — a frozen ``frame``/``meta``/``reason``/
-   ``factor_snapshot`` bundle whose ``frame`` is ``[date, ticker, score]``
-   after a **cross-sectional z-score** (comparable and additive across
-   factors).
-2. Two aggregation paths — :meth:`AlphaSignal.from_multi_factor`
-   (``FactorCombiner`` output ``[date, ticker, combined_score]``) and
-   :meth:`AlphaSignal.from_ml_factor` (``MLSignalAdapter`` output
-   ``[date, ticker, score]``).
-3. :func:`signal_to_weights` — ``top_k`` equal weight (the default, robust and
-   parameter-free) or ``proportional`` with **negative scores clipped to 0**
-   (A-share cannot short; a negative weight is a directional bet this layer is
-   not licensed to make).  End-of-day Parquet archives land under
-   ``data_platform/signals/cross/`` and ``data_platform/signals/timeseries/``.
-
-Not this module: factor combination (S6-T1 ``factor_combiner``), weight
-constraint solving (the authority is ``PortfolioConstraints``, S7
-``portfolio_construction``), time-series single-ticker or intraday signals
-(the Tick layer is out of scope), and order generation (S7
-``order_generation``).  ``to_weights`` output is an **unconstrained initial
-value**; concentration / turnover / capital constraints are solved downstream.
-
-Gap #14 (clip-0 proposal): ``proportional`` truncates negative scores to 0 and
-normalises over the remainder.  A cross-section with at least one strictly
-negative score and no positive score produces no rows — those names are
-rejected.  A cross-section whose scores are all zero (zero dispersion after
-z-score) is *uninformative, not rejected*, and falls back to ``1/n`` equal
-weight so ``proportional`` does not hold nothing while ``top_k`` invests.
+职责边界：
+1. ``AlphaSignal``：不可变信号载体，``frame`` 为按日截面 z-score 后的 ``[date, ticker, score]``。
+2. 双路径聚合：``from_multi_factor``（接收 ``[date, ticker, combined_score]``）与
+   ``from_ml_factor``（接收 ``[date, ticker, score]``），统一标准化尺度。
+3. ``signal_to_weights``：支持 ``top_k``（等权）与 ``proportional``（负分截断为 0；全 0 回退 ``1/n`` 等权），
+   输出无约束初始权重并支持归档至 ``cross/`` 与 ``timeseries/``。
 """
 
 from __future__ import annotations
@@ -56,19 +28,16 @@ __all__ = [
     "write_signal",
 ]
 
-#: ``top_k`` breadth.  20 names is the design default (§63.5); a caller that
-#: needs a different book passes ``k=`` and says why in the PR.
+# top_k 默认选股数量
 DEFAULT_K: int = 20
 
-#: The two methods the design allows.  ``top_k`` is the primary path — equal
-#: weight is robust and adds no parameter to overfit; ``proportional`` is the
-#: optional score-weighted alternative.
+# 允许的权重生成方法（top_k 为主路径，proportional 为按分加权备选）
 WEIGHT_METHODS: tuple[str, ...] = ("top_k", "proportional")
 
-#: The contract every signal frame honours: one score per (date, ticker).
+# 信号表必需列契约
 REQUIRED_FRAME_COLS: tuple[str, ...] = ("date", "ticker", "score")
 
-#: Column contract of the end-of-day cross archive.
+# 日终 cross 归档表列契约
 CROSS_COLS: tuple[str, ...] = (
     "signal_time",
     "ticker",
@@ -78,7 +47,7 @@ CROSS_COLS: tuple[str, ...] = (
     "trade_date",
 )
 
-#: Column contract of the end-of-day timeseries archive.
+# 日终 timeseries 归档表列契约
 TIMESERIES_COLS: tuple[str, ...] = (
     "datetime",
     "ticker",
@@ -89,19 +58,17 @@ TIMESERIES_COLS: tuple[str, ...] = (
     "reason",
 )
 
-#: Tolerance for the ``weights.sum() ≤ 1`` property.  1e-9 absorbs the float
-#: error of summing ``1/k`` k times without ever letting a real over-allocation
-#: through.
+# 权重和上限容差，用于吸收 1/k 累加浮点误差
 WEIGHT_SUM_TOL: float = 1e-9
 
 
 # ---------------------------------------------------------------------------
-# frame helpers
+# 信号表辅助函数
 # ---------------------------------------------------------------------------
 
 
 def _validate_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Check the ``[date, ticker, score]`` contract; return *frame* unchanged."""
+    """校验 ``[date, ticker, score]`` 列存在且 ``(date, ticker)`` 无重复，原样返回。"""
     missing = [c for c in REQUIRED_FRAME_COLS if c not in frame.columns]
     if missing:
         raise ValueError(f"signal frame is missing columns {missing}")
@@ -111,12 +78,7 @@ def _validate_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _cross_zscore(frame: pd.DataFrame, col: str = "score") -> pd.DataFrame:
-    """Cross-sectional z-score of *col* — one standardisation per date.
-
-    A full-sample mean/σ would let tomorrow's names decide today's score; each
-    date is standardised alone, so the score is comparable across names without
-    borrowing from the future.
-    """
+    """按日截面计算 ``col`` 的 z-score，避免引入未来样本统计量。"""
     out = frame.copy()
     out[col] = out.groupby("date")[col].transform(standardize_zscore)
     return out
@@ -127,12 +89,12 @@ def _empty_weights() -> pd.DataFrame:
 
 
 def _date_str(value) -> str:
-    """Normalise a date cell to the ``YYYY-MM-DD`` used in archive filenames."""
+    """将日期规范化为 ``YYYY-MM-DD`` 字符串。"""
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
 def _jsonable(value):
-    """JSON cannot carry numpy scalars or NaN; normalise them."""
+    """将 numpy 标量与非有限浮点数转换为可 JSON 序列化的 Python 原生类型。"""
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -151,20 +113,10 @@ def _jsonable(value):
 
 @dataclass(frozen=True)
 class AlphaSignal:
-    """One cross-sectional signal: scores, provenance, and why.
+    """截面信号不可变载体，包含标准化分数、元数据、归因说明与因子快照。
 
-    ``frame`` is ``[date, ticker, score]`` and is expected to already carry the
-    cross-sectional z-score (both factories apply one).  ``meta`` carries at
-    least ``strategy_id``; ``trade_date`` / ``signal_time`` / ``config_snapshot``
-    ride along when the caller has them.  ``reason`` and ``factor_snapshot``
-    exist so a signal can say *why* it exists and *which factor values* pushed
-    it — a bare number is not an auditable signal.
-
-    Frozen, because a signal is a point-in-time artefact: handing the same
-    object to portfolio construction and to the archive must not let one
-    mutate what the other reads.  ``eq=False`` — a DataFrame-bearing dataclass
-    cannot generate a meaningful ``__eq__``/``__hash__``, and a half-working
-    one is worse than identity comparison.
+    ``frame`` 为已做按日截面 z-score 的 ``[date, ticker, score]``；
+    ``meta`` 至少需在归档时提供 ``strategy_id``。
     """
 
     frame: pd.DataFrame
@@ -174,15 +126,13 @@ class AlphaSignal:
 
     def __post_init__(self) -> None:
         _validate_frame(self.frame)
-        # Defensive copies: ``frozen`` blocks attribute reassignment but not
-        # in-place mutation of the DataFrame or dicts stored by reference.
-        # Mutating the caller's frame must not rewrite the archived score.
+        # 防御性拷贝，防止外部修改引用对象影响已冻结的信号
         object.__setattr__(self, "frame", self.frame.copy())
         object.__setattr__(self, "meta", dict(self.meta))
         if self.factor_snapshot is not None:
             object.__setattr__(self, "factor_snapshot", dict(self.factor_snapshot))
 
-    # -- aggregation paths -------------------------------------------------
+    # -- 聚合工厂方法 ---------------------------------------------------------
 
     @classmethod
     def from_multi_factor(
@@ -193,13 +143,7 @@ class AlphaSignal:
         factor_snapshot: dict | None = None,
         **meta,
     ) -> "AlphaSignal":
-        """Build from ``FactorCombiner`` output ``[date, ticker, combined_score]``.
-
-        The combiner returns a weighted mean of already z-scored factors; that
-        mean does not itself have σ = 1, so the combined score is z-scored
-        again per date before it becomes the signal.  Extra keyword arguments
-        land in ``meta`` (``strategy_id=…``, ``trade_date=…``, …).
-        """
+        """从多因子合成输出 ``[date, ticker, combined_score]`` 构造信号并重做按日 z-score。"""
         if "combined_score" not in combined.columns:
             raise ValueError("combined must carry a 'combined_score' column")
         missing = [c for c in ("date", "ticker") if c not in combined.columns]
@@ -223,12 +167,7 @@ class AlphaSignal:
         factor_snapshot: dict | None = None,
         **meta,
     ) -> "AlphaSignal":
-        """Build from ``MLSignalAdapter`` output ``[date, ticker, score]``.
-
-        Applies the same cross-sectional z-score as the multi-factor path —
-        the design unifies both onto one score scale (§63.5), and re-scoring
-        an already standardised column is a no-op.
-        """
+        """从 ML 信号输出 ``[date, ticker, score]`` 构造信号并统一按日 z-score 尺度。"""
         missing = [c for c in REQUIRED_FRAME_COLS if c not in ml_scores.columns]
         if missing:
             raise ValueError(f"ml_scores is missing columns {missing}")
@@ -240,12 +179,12 @@ class AlphaSignal:
             factor_snapshot=factor_snapshot,
         )
 
-    # -- score → weights ---------------------------------------------------
+    # -- 分数转权重 -----------------------------------------------------------
 
     def to_weights(
         self, method: str = "top_k", k: int = DEFAULT_K, **kw
     ) -> pd.DataFrame:
-        """Return ``[date, ticker, target_weight]`` via :func:`signal_to_weights`."""
+        """通过 :func:`signal_to_weights` 将信号分数转换为 ``[date, ticker, target_weight]``。"""
         return signal_to_weights(self.frame, method=method, k=k, **kw)
 
 
@@ -260,26 +199,12 @@ def signal_to_weights(
     k: int = DEFAULT_K,
     **kw,
 ) -> pd.DataFrame:
-    """Convert ``[date, ticker, score]`` to ``[date, ticker, target_weight]``.
+    """将 ``[date, ticker, score]`` 转为无约束目标权重 ``[date, ticker, target_weight]``。
 
-    Two methods (§63.5):
+    - ``top_k``（默认）：每日取分数最高的前 *k* 只各配 ``1/k``（不足 *k* 只仍按 ``1/k``，其余为现金）。
+    - ``proportional``：截断负分为 0 后按日归一化；含负分且无正分则空仓，全 0 分则回退 ``1/n`` 等权。
 
-    * ``top_k`` (default) — the *k* highest scores each get ``1/k``.  Fewer
-      than *k* names means every name still gets ``1/k``, so the book is
-      ``n/k`` invested and the rest is cash; the sum never exceeds 1.
-    * ``proportional`` — ``w_i ∝ max(score_i, 0)``, normalised within the
-      date.  Negative scores clip to 0 (A-share cannot short).  A cross-section
-      with strictly negative scores and no positive score holds nothing (the
-      score rejected those names); a cross-section of all zeros (zero
-      dispersion) falls back to ``1/n``.
-
-    Only rows with positive weight are returned.  The result is the
-    **unconstrained** initial book — concentration / turnover / capital limits
-    belong to ``PortfolioConstraints`` (S7), not here.
-
-    Raises ``ValueError`` for an unknown *method*, a non-positive *k*, an
-    unexpected keyword, or a frame that breaks the ``[date, ticker, score]``
-    contract.
+    仅返回正权重行；参数或列契约不合法时抛出 ``ValueError``。
     """
     if method not in WEIGHT_METHODS:
         raise ValueError(f"method must be one of {WEIGHT_METHODS}, got {method!r}")
@@ -295,11 +220,7 @@ def signal_to_weights(
 
 
 def _top_k_weights(frame: pd.DataFrame, k: int) -> pd.DataFrame:
-    """Top *k* by score per date, each at ``1/k``.
-
-    Selection is deterministic under ties: higher score first, then ticker
-    ascending.  A name with a NaN score cannot be ranked and is skipped.
-    """
+    """按日取分数最高的前 *k* 只等权（``1/k``），同分按 ``ticker`` 升序确定性排序，跳过 NaN。"""
     valid = frame.dropna(subset=["score"])
     if valid.empty:
         return _empty_weights()
@@ -313,18 +234,9 @@ def _top_k_weights(frame: pd.DataFrame, k: int) -> pd.DataFrame:
 
 
 def _proportional_weights(frame: pd.DataFrame) -> pd.DataFrame:
-    """``w_i ∝ max(score_i, 0)`` per date, normalised; zero weights dropped.
+    """按日计算 ``max(score, 0)`` 归一化权重并剔除 0 权重行。
 
-    Clipping before the normalisation is the no-short rule made arithmetic:
-    a negative score contributes nothing to the denominator and holds nothing.
-
-    Two edge cases distinguish *rejected* from *uninformative*:
-
-    - At least one strictly negative score and no positive score → no rows.
-      Those names were rejected by the score; holding nothing is the answer.
-    - All scores zero (zero dispersion after z-score) → ``1/n`` equal weight.
-      A flat or single-name section is uninformative, not rejected; ``top_k``
-      would invest and ``proportional`` must not sit in cash by comparison.
+    仅当全截面均为 0 分（无离散度）时回退 ``1/n`` 等权；含负分且无正分则不持仓。
     """
     valid = frame.dropna(subset=["score"]).copy()
     if valid.empty:
@@ -343,12 +255,12 @@ def _proportional_weights(frame: pd.DataFrame) -> pd.DataFrame:
             part["target_weight"] = w[keep]
             parts.append(part)
         elif (scores == 0).all():
-            # Zero dispersion: uninformative, not rejected.
+            # 零离散度截面回退等权
             n = len(scores)
             part = group[["date", "ticker"]].copy()
             part["target_weight"] = 1.0 / n
             parts.append(part)
-        # else — strictly negative present, no positive: hold nothing.
+        # 含负分且无正分时不生成持仓
 
     if not parts:
         return _empty_weights()
@@ -356,7 +268,7 @@ def _proportional_weights(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# end-of-day archive
+# 日终归档
 # ---------------------------------------------------------------------------
 
 
@@ -366,22 +278,10 @@ def write_signal(
     *,
     base_dir: str = str(DATA_ROOT / "signals"),
 ) -> dict[str, list[Path]]:
-    """Archive *signal* and *weights* under ``cross/`` and ``timeseries/``.
+    """按交易日将 *signal* 与 *weights* 归档至 ``cross/`` 与 ``timeseries/`` Parquet。
 
-    One Parquet per trade date present in ``signal.frame``:
-
-    * ``{base_dir}/cross/{strategy_id}/{date}.parquet`` —
-      ``signal_time / ticker / target_weight / score / strategy_id / trade_date``
-    * ``{base_dir}/timeseries/{strategy_id}/{date}.parquet`` —
-      ``datetime / ticker / direction / strength / quantity / factor_snapshot / reason``
-
-    Runtime objects stay in memory (a signal is a middle product); these files
-    are the end-of-day archive the review and Journal reconciliation read.
-    ``quantity`` is always 0 here — turning a weight into shares is order
-    generation (S7), not this layer.
-
-    Returns ``{"cross": [...], "timeseries": [...]}`` with the written paths in
-    date order.
+    ``timeseries`` 中 ``quantity`` 恒为 0（具体股数由下游订单生成阶段计算）。
+    返回 ``{"cross": [...], "timeseries": [...]}``，按日期升序排列路径。
     """
     _validate_frame(signal.frame)
     strategy_id = signal.meta.get("strategy_id")
@@ -406,9 +306,7 @@ def write_signal(
     for date, group in frame.groupby("date", sort=True):
         date_key = _date_str(date)
 
-        # Join on a normalised date key so a Parquet/DB round-trip
-        # (datetime.date vs str) cannot silently miss the merge and
-        # archive an all-cash book under fillna(0.0).
+        # 统一格式化为字符串日期键再合并，避免日期类型差异导致匹配失败
         group = group.copy()
         group["_date_key"] = group["date"].map(_date_str)
         day_w = weights.loc[

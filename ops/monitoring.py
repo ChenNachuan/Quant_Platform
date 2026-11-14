@@ -1,48 +1,14 @@
-"""Metrics collection + tiering: the 12-metric snapshot and the health_check body.
+"""监控采集与分级模块：12 项指标快照与健康巡检主逻辑。
 
-``docs/design/ops/monitoring.md`` is the contract — 8 strategy metrics judged
-in three tiers (``healthy`` / ``warning`` / ``exit``) and 4 system metrics
-judged in two ( ``ok`` / the breach level in ``status`` : ``HIGH`` / ``MEDIUM`` ).
-``collect_metrics(date)`` returns the design's ``{"strategy": {...}, "system":
-{...}}`` shape (each entry ``{"value", "status"}``); ``append_metrics_snapshot``
-appends the 12-row snapshot to ``logs/ops/metrics.jsonl`` (row schema pinned by
-the PR: ``date / ts / scope / name / value / status``); ``health_check`` is the
-scheduler job body (seam 3) — collect → snapshot → facts →
-``ops.alerting.evaluate_alerts`` → ``send_alert`` per firing.
+包含 8 项策略级指标（``healthy`` / ``warning`` / ``exit``）与 4 项系统级指标
+（``ok`` / ``HIGH`` / ``MEDIUM``）。分级优先判定 ``exit`` 区间，其次 ``warning``，
+其余区间记为 ``healthy``；无可用数据源时数值落为 ``null``，状态记为 ``warning``
+（策略）或 ``MEDIUM``（系统）且不触发告警。
 
-Tier gaps resolve by severity priority — exit band first, then warning, else
-healthy — so an unlisted value reads healthy (seam 5: sharpe ∈ [0.3, 0.5] and
-MDD ∈ [1.0, 1.2]× backtest are healthy). A metric with no computable source
-lands ``value=null`` + status ``warning`` (strategy) / ``MEDIUM`` (system) and
-never alerts (seam 6). The snapshot always lands, sources or not.
-
-Sources (seam 4). Every reader is null-safe and a broken source degrades to
-"no computable source" rather than raising — health_check must survive the
-book it monitors. The journal readers bind to :class:`execution.ledger.Journal`
-'s on-disk format (daily ``{YYYY-MM-DD}.parquet``, ``event_type`` + JSON-text
-``payload``) and consume these payload contracts:
-
-* ``DAY_END`` — the day-end book snapshot:
-  ``{"nav": float, "benchmark_nav": float, "position_count": int,
-  "design_position_count": int}`` — the nav series (累计收益 / rolling sharpe /
-  MDD / 超额 / single-day NAV) and 持仓数 (snapshot vs its design size).
-* ``PORTFOLIO`` — ``{"target_weights": {ticker: weight}}``; the latest two
-  books feed :func:`research.alpha_type.compute_turnover` (换手).
-* ``SIGNAL`` — ``{"ic": float}``; the trailing 20 observations are rolling IC
-  (window pinned here, §64.7 states none), judged against the eval report's
-  ``ic_mean`` baseline.
-* ``TRADE`` — ``{"fill_price", "filled_qty", "commission", "slippage"}`` per
-  fill (``slippage`` optional, default 0) — the realized
-  :mod:`execution.fee_model` costs behind 单笔成本.
-
-Backtest MDD + the IC baseline come from ``research.factor_combiner``'s
-``data/signals/{name}/eval_report.json`` (``metrics.max_drawdown`` is negative
-there and normalised to a magnitude here; the most recently modified report is
-the monitored strategy and its ``alpha_name`` scopes the alert facts). The
-system side reads ``logs/runs/jobs.jsonl`` run records directly — monitoring
-never imports the scheduler — and the data lake through
-:class:`data.data_api.DataAPI` (``bars_daily``: latest ``trade_date`` and
-per-day row counts vs the historical mean).
+所有数据源读取保持只读且空值安全，损坏文件或不可达数据源降级为无可用数据源，
+绝不因读取异常中断巡检。数据源包括 ``Journal`` 每日 Parquet（``DAY_END`` /
+``PORTFOLIO`` / ``SIGNAL`` / ``TRADE``）、最新 ``eval_report.json``、
+``logs/runs/jobs.jsonl``、``logs/audit/risk_audit.jsonl`` 及 ``DataAPI``（``bars_daily``）。
 """
 
 from __future__ import annotations
@@ -62,17 +28,17 @@ from ops import alerting
 from research.alpha_type import compute_turnover
 from core.config import DATA_ROOT
 
-#: Snapshot landing spot (``data/`` is gitignored runtime data).
+#: 指标时点快照追加写路径
 METRICS_JSONL = Path("logs/ops/metrics.jsonl")
 
-#: Source locations (seam 4). Every one degrades to None when absent.
+#: 各数据源路径（缺失时降级为无可用数据源）
 JOURNAL_DIR = Path("journal")
 SIGNALS_DIR = DATA_ROOT / "signals"
 JOBS_JSONL = Path("logs/runs/jobs.jsonl")
 RISK_AUDIT_JSONL = Path("logs/audit/risk_audit.jsonl")
 DATA_ROOT = str(DATA_ROOT / "asset")
 
-#: The 8 strategy metrics, monitoring.md table order.
+#: 8 项策略级指标（按指标表顺序）
 STRATEGY_METRICS = (
     "cum_return",
     "sharpe_6m",
@@ -84,7 +50,7 @@ STRATEGY_METRICS = (
     "trade_cost",
 )
 
-#: The 4 system metrics, monitoring.md table order.
+#: 4 项系统级指标（按指标表顺序）
 SYSTEM_METRICS = (
     "job_success_rate_7d",
     "pipeline_duration_min",
@@ -92,8 +58,7 @@ SYSTEM_METRICS = (
     "data_count_deviation",
 )
 
-# Status vocab (seam 5) — the system breach levels ride in ``status`` and
-# reuse the alerting level strings verbatim.
+# 状态枚举常量（系统级告警状态直接复用 alerting 级别名）
 STATUS_HEALTHY = "healthy"
 STATUS_WARNING = "warning"
 STATUS_EXIT = "exit"
@@ -101,7 +66,7 @@ STATUS_OK = "ok"
 STATUS_HIGH = alerting.AlertLevel.HIGH.value
 STATUS_MEDIUM = alerting.AlertLevel.MEDIUM.value
 
-#: rolling-IC window (observations), pinned here — §64.7 states no window.
+#: rolling IC 统计窗口长度（观测期数）
 IC_WINDOW = 20
 
 _EVENT_DAY_END = "DAY_END"
@@ -112,21 +77,18 @@ _EVENT_TRADE = "TRADE"
 _write_lock = threading.RLock()
 
 
-# ---------------------------------------------------------------------------
-# Tier helpers — the monitoring.md band tables, pure. ``None`` inputs mean "no
-# computable source" and fall back to the seam-6 status.
-# ---------------------------------------------------------------------------
+# --- 指标分级纯函数（None 表示无可用数据源，按降级状态返回） ---
 
 
 def tier_cum_return(value: float | None, neg_streak_months: int | None) -> str:
-    """累计收益: warning iff negative 6 months running; no exit band."""
+    """累计收益：连续 6 个月为负触发 warning，无 exit 档。"""
     if value is None or neg_streak_months is None:
         return STATUS_WARNING
     return STATUS_WARNING if neg_streak_months >= 6 else STATUS_HEALTHY
 
 
 def tier_sharpe_6m(value: float | None) -> str:
-    """rolling 6月夏普: exit < 0, warning < 0.3; [0.3, 0.5] reads healthy."""
+    """滚动 6 个月夏普：< 0 触发 exit，< 0.3 触发 warning，[0.3, 0.5] 视为 healthy。"""
     if value is None:
         return STATUS_WARNING
     if value < 0:
@@ -137,7 +99,7 @@ def tier_sharpe_6m(value: float | None) -> str:
 
 
 def tier_mdd(mdd: float | None, backtest_mdd: float | None) -> str:
-    """最大回撤: exit > 1.5x backtest, warning > 1.2x; [1.0, 1.2]x healthy."""
+    """最大回撤：> 1.5 倍回测值触发 exit，> 1.2 倍触发 warning，[1.0, 1.2] 倍视为 healthy。"""
     if mdd is None or backtest_mdd is None or backtest_mdd <= 0:
         return STATUS_WARNING
     ratio = mdd / backtest_mdd
@@ -149,7 +111,7 @@ def tier_mdd(mdd: float | None, backtest_mdd: float | None) -> str:
 
 
 def tier_excess_return(value: float | None, neg_streak_months: int | None) -> str:
-    """超额收益: exit >= 12 months running negative, warning >= 6."""
+    """超额收益：连续 >= 12 个月为负触发 exit，>= 6 个月触发 warning。"""
     if value is None or neg_streak_months is None:
         return STATUS_WARNING
     if neg_streak_months >= 12:
@@ -160,7 +122,7 @@ def tier_excess_return(value: float | None, neg_streak_months: int | None) -> st
 
 
 def tier_rolling_ic(value: float | None, baseline: float | None) -> str:
-    """rolling IC: exit < 30% of the historical mean, warning < 50%."""
+    """滚动 IC：< 历史均值 30% 触发 exit，< 50% 触发 warning。"""
     if value is None or baseline is None or baseline <= 0:
         return STATUS_WARNING
     ratio = value / baseline
@@ -172,7 +134,7 @@ def tier_rolling_ic(value: float | None, baseline: float | None) -> str:
 
 
 def tier_position_count(actual: int | None, design: int | None) -> str:
-    """持仓数: warning on > 20% deviation from the design size; no exit band."""
+    """持仓数：相对设计持仓数偏离 > 20% 触发 warning，无 exit 档。"""
     if actual is None or design is None or design <= 0:
         return STATUS_WARNING
     deviation = abs(actual - design) / design
@@ -180,55 +142,52 @@ def tier_position_count(actual: int | None, design: int | None) -> str:
 
 
 def tier_turnover(value: float | None) -> str:
-    """换手率: warning > 1.5 (seam 5: 50% over the design ceiling 1.0)."""
+    """换手率：> 1.5（超出设计上限 1.0 的 50%）触发 warning。"""
     if value is None:
         return STATUS_WARNING
     return STATUS_WARNING if value > 1.5 else STATUS_HEALTHY
 
 
 def tier_trade_cost(value: float | None) -> str:
-    """单笔成本: warning > 0.5%; no exit band."""
+    """单笔成本：> 0.5% 触发 warning，无 exit 档。"""
     if value is None:
         return STATUS_WARNING
     return STATUS_WARNING if value > 0.005 else STATUS_HEALTHY
 
 
 def tier_job_success_rate_7d(value: float | None) -> str:
-    """Job 成功率 rolling 7 天: HIGH below 80%."""
+    """近 7 天任务成功率：< 80% 触发 HIGH。"""
     if value is None:
         return STATUS_MEDIUM
     return STATUS_HIGH if value < 0.8 else STATUS_OK
 
 
 def tier_pipeline_duration_min(value: float | None) -> str:
-    """Pipeline 总耗时: MEDIUM over 30 minutes."""
+    """流水线总耗时：> 30 分钟触发 MEDIUM。"""
     if value is None:
         return STATUS_MEDIUM
     return STATUS_MEDIUM if value > 30 else STATUS_OK
 
 
 def tier_data_delay_days(value: float | None) -> str:
-    """数据新鲜度: HIGH when the latest trading day is more than 1 day old."""
+    """数据延迟天数：最新交易日落后超过 1 天触发 HIGH。"""
     if value is None:
         return STATUS_MEDIUM
     return STATUS_HIGH if value > 1 else STATUS_OK
 
 
 def tier_data_count_deviation(value: float | None) -> str:
-    """数据条数偏差: HIGH beyond ±30% of the historical mean."""
+    """数据条数偏差：偏离历史均值超过 ±30% 触发 HIGH。"""
     if value is None:
         return STATUS_MEDIUM
     return STATUS_HIGH if abs(value) > 0.3 else STATUS_OK
 
 
-# ---------------------------------------------------------------------------
-# Source readers — every one returns "no computable source" (None / empty)
-# instead of raising.
-# ---------------------------------------------------------------------------
+# --- 数据源读取器（只读且异常安全，不可用时返回空值） ---
 
 
 def _float_or_none(value: Any) -> float | None:
-    """A JSON number as float; ``None`` for missing / non-numeric / NaN."""
+    """转换 JSON 数值为 float；缺失、布尔、非数值或 NaN 返回 ``None``。"""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -239,7 +198,7 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def _int_or_none(value: Any) -> int | None:
-    """An integral count as int; ``None`` for anything else."""
+    """转换为整数；非整数或无效输入返回 ``None``。"""
     val = _float_or_none(value)
     if val is None or not val.is_integer():
         return None
@@ -247,11 +206,9 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _journal_rows(end_day: str) -> list[tuple[str, str, dict]]:
-    """(day, event_type, payload) for journal rows up to *end_day*, oldest first.
+    """只读读取截止 ``end_day`` 的日志行 ``(day, event_type, payload)``（按时间正序）。
 
-    Read-only over ``Journal``'s file format — the Journal constructor mkdirs,
-    a side effect a monitor must not take. Corrupt files and lines are
-    skipped, never fatal.
+    不实例化 ``Journal`` 以避免创建目录的副作用，损坏文件或行直接跳过。
     """
     if not JOURNAL_DIR.is_dir():
         return []
@@ -262,7 +219,7 @@ def _journal_rows(end_day: str) -> list[tuple[str, str, dict]]:
             continue
         try:
             frame = pd.read_parquet(path, columns=["event_type", "payload"])
-        except Exception:  # noqa: BLE001 - one bad day file must not kill health
+        except Exception:  # noqa: BLE001 - 单日损坏文件不得中断巡检
             continue
         for etype, payload_text in frame.itertuples(index=False):
             if not isinstance(payload_text, str):
@@ -277,7 +234,7 @@ def _journal_rows(end_day: str) -> list[tuple[str, str, dict]]:
 
 
 def _day_end_book(rows: list[tuple[str, str, dict]]) -> dict[str, dict]:
-    """Per-day DAY_END snapshot keys (``nav`` / ``benchmark_nav`` / counts), last wins."""
+    """提取每日 ``DAY_END`` 快照字段（同日多条取最后一条）。"""
     book: dict[str, dict] = {}
     for day, etype, payload in rows:
         if etype != _EVENT_DAY_END:
@@ -290,13 +247,7 @@ def _day_end_book(rows: list[tuple[str, str, dict]]) -> dict[str, dict]:
 
 
 def _nav_metrics(book: Mapping[str, Mapping[str, Any]], end_day: str) -> dict[str, Any]:
-    """The nav-derived metrics from the day-end book snapshots.
-
-    cum_return is inception-to-date over the series; sharpe_6m is the trailing
-    6 calendar months of daily returns annualised (√252); mdd is the deepest
-    peak-to-trough (positive magnitude); nav_daily_return is *end_day*'s return
-    (None when the series has no observation that day).
-    """
+    """基于日终净值快照计算累计收益、滚动 6 个月夏普、最大回撤（正值）与当日收益率。"""
     navs: dict[str, float] = {}
     benchmarks: dict[str, float] = {}
     for day in sorted(book):
@@ -321,7 +272,7 @@ def _nav_metrics(book: Mapping[str, Mapping[str, Any]], end_day: str) -> dict[st
     values = [navs[d] for d in days]
     out["cum_return"] = values[-1] / values[0] - 1.0
 
-    # Daily returns: (day, return) over consecutive observations.
+    # 相邻观测日收益率序列
     rets: list[tuple[str, float]] = []
     for prev, cur in zip(days, days[1:]):
         if navs[prev] != 0:
@@ -331,7 +282,7 @@ def _nav_metrics(book: Mapping[str, Mapping[str, Any]], end_day: str) -> dict[st
     window = [r for d, r in rets if d >= cutoff]
     if len(window) >= 2:
         series = pd.Series(window)
-        std = series.std()  # ddof=1; NaN for n<2 (guarded above)
+        std = series.std()  # 样本标准差 ddof=1
         if std and std == std and std > 0:
             out["sharpe_6m"] = float(series.mean() / std * (252.0**0.5))
 
@@ -348,7 +299,7 @@ def _nav_metrics(book: Mapping[str, Mapping[str, Any]], end_day: str) -> dict[st
             rets[-1][1] if rets and rets[-1][0] == end_day else None
         )
 
-    # 累计收益 warning streak: trailing month-end cum returns below zero.
+    # 统计月末累计收益连续为负的月数
     month_end: dict[str, float] = {}
     for d in days:
         month_end[d[:7]] = navs[d]
@@ -364,7 +315,7 @@ def _nav_metrics(book: Mapping[str, Mapping[str, Any]], end_day: str) -> dict[st
 
 
 def _excess_metrics(book: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    """超额收益 over the paired nav/benchmark series: cumulative + negative streak."""
+    """基于净值与基准配对序列计算累计超额收益及连续负超额月数。"""
     pairs: list[tuple[str, float, float]] = []
     for day in sorted(book):
         slot = book[day]
@@ -379,8 +330,7 @@ def _excess_metrics(book: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         pairs[-1][2] / pairs[0][2]
     ) - 1.0
 
-    # Monthly excess returns from daily relative returns; streak = trailing
-    # months running negative (the alerting fact's "months running").
+    # 按日相对超额复合为月度超额收益，统计末尾连续负月数
     monthly: dict[str, float] = {}
     for prev, next_ in zip(pairs, pairs[1:]):
         if prev[1] == 0 or prev[2] == 0:
@@ -404,7 +354,7 @@ def _excess_metrics(book: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
 def _position_counts(
     rows: list[tuple[str, str, dict]],
 ) -> tuple[int | None, int | None]:
-    """(actual, design) from the latest DAY_END snapshot carrying either key."""
+    """从最近一条含持仓数字段的 ``DAY_END`` 快照提取 ``(实际持仓数, 设计持仓数)``。"""
     actual = design = None
     for day, etype, payload in rows:
         if etype != _EVENT_DAY_END:
@@ -417,7 +367,7 @@ def _position_counts(
 
 
 def _turnover(rows: list[tuple[str, str, dict]]) -> float | None:
-    """换手 over the latest two PORTFOLIO books via compute_turnover (D9)."""
+    """基于最近两期 ``PORTFOLIO`` 目标权重调用 ``compute_turnover`` 计算换手率。"""
     books: dict[str, dict[str, float]] = {}
     for day, etype, payload in rows:
         if etype != _EVENT_PORTFOLIO:
@@ -443,12 +393,12 @@ def _turnover(rows: list[tuple[str, str, dict]]) -> float | None:
 
     try:
         return float(compute_turnover(frame(books[days[-1]]), frame(books[days[-2]])))
-    except Exception:  # noqa: BLE001 - a malformed book is "no computable source"
+    except Exception:  # noqa: BLE001 - 畸形持仓视为无可用数据源
         return None
 
 
 def _trade_cost(rows: list[tuple[str, str, dict]], end_day: str) -> float | None:
-    """单笔成本: mean realised (commission + slippage) / notional over the day's fills."""
+    """计算 ``end_day`` 当日成交的平均单笔成本率 ``(commission + slippage) / notional``。"""
     rates: list[float] = []
     for day, etype, payload in rows:
         if day != end_day or etype != _EVENT_TRADE:
@@ -467,7 +417,7 @@ def _trade_cost(rows: list[tuple[str, str, dict]], end_day: str) -> float | None
 
 
 def _rolling_ic(rows: list[tuple[str, str, dict]]) -> float | None:
-    """Mean of the trailing IC_WINDOW daily IC observations."""
+    """计算最近 ``IC_WINDOW`` 个 ``SIGNAL`` 事件 IC 值的均值。"""
     ics: dict[str, float] = {}
     for day, etype, payload in rows:
         if etype != _EVENT_SIGNAL:
@@ -482,7 +432,7 @@ def _rolling_ic(rows: list[tuple[str, str, dict]]) -> float | None:
 
 
 def _eval_report() -> tuple[str, float | None, float | None]:
-    """(alpha_name, backtest MDD magnitude, ic_mean) from the latest eval_report.json."""
+    """从最新修改的 ``eval_report.json`` 提取 ``(alpha_name, 回测最大回撤绝对值, ic_mean)``。"""
     fallback: tuple[str, float | None, float | None] = ("", None, None)
     if not SIGNALS_DIR.is_dir():
         return fallback
@@ -512,7 +462,7 @@ def _eval_report() -> tuple[str, float | None, float | None]:
 
 
 def _job_records() -> list[dict]:
-    """Parsed ``logs/runs/jobs.jsonl`` rows (corrupt lines skipped)."""
+    """读取并解析 ``logs/runs/jobs.jsonl``（跳过损坏行）。"""
     if not JOBS_JSONL.exists():
         return []
     try:
@@ -533,19 +483,10 @@ def _job_records() -> list[dict]:
 
 
 def _run_day(stamp: Any) -> str | None:
-    """The reporting-day key for one row's instant stamp (``started_at``,
-    ``timestamp``).
+    """将带时区时间戳转换为本地报告日历日期（``YYYY-MM-DD``）。
 
-    Run records and risk-audit rows carry UTC instants (``ops/scheduler.py``
-    stamps ``datetime.now(timezone.utc).isoformat()``) while ``end_day`` is the
-    local reporting day (``health_check``'s ``date.today()``). Slicing the
-    stamp's date part compared a UTC date against a local one and dropped every
-    row of the day whenever the two calendars disagree (local 00:00-08:00 at
-    UTC+8) — so the instant is parsed and keyed to the reporting calendar
-    instead.
-
-    A naive stamp is already reporting-local and keeps its date part; an
-    unparseable one falls back to the raw slice so the reader stays null-safe.
+    调度与风控日志使用 UTC 时间戳，而 ``end_day`` 为本地日期；若直接截取字符串日期，
+    在 UTC+8 凌晨 00:00–08:00 会与本地日期错位并漏算当日记录。
     """
     text = str(stamp or "")
     if not text:
@@ -557,12 +498,7 @@ def _run_day(stamp: Any) -> str | None:
 
 
 def _job_metrics(records: list[dict], end_day: str) -> dict[str, Any]:
-    """{success rate 7d, pipeline minutes, failed jobs} from the run records.
-
-    Success rate: terminal outcomes (SUCCESS/FAILED) in the trailing 7 calendar
-    days — RETRY rows are attempts and SKIPPED rows never ran, so neither is an
-    outcome. Pipeline minutes: the sum of the day's attempt durations.
-    """
+    """汇总近 7 天任务成功率（仅统计终态 SUCCESS/FAILED）、当日总耗时与失败任务列表。"""
     window_start = (date.fromisoformat(end_day) - timedelta(days=6)).isoformat()
     outcomes = successes = 0
     day_rows: list[dict] = []
@@ -599,7 +535,7 @@ def _job_metrics(records: list[dict], end_day: str) -> dict[str, Any]:
 
 
 def _risk_reject_count(end_day: str) -> int | None:
-    """The day's BLOCK count in ``logs/audit/risk_audit.jsonl`` (cond 8 fact)."""
+    """统计 ``end_day`` 当日 ``logs/audit/risk_audit.jsonl`` 中的 BLOCK 次数。"""
     if not RISK_AUDIT_JSONL.exists():
         return None
     try:
@@ -622,13 +558,13 @@ def _risk_reject_count(end_day: str) -> int | None:
 
 
 def _data_counts() -> dict[str, int]:
-    """{trade_date: row count} over the data lake's ``bars_daily`` (via DataAPI)."""
+    """通过 DataAPI 统计数据湖 ``bars_daily`` 每日记录条数。"""
     try:
         with DataAPI(data_root=DATA_ROOT) as api:
             frame = api.query(
                 "SELECT trade_date, count(*) AS n FROM bars_daily GROUP BY trade_date"
             )
-    except Exception:  # noqa: BLE001 - an unreachable lake is "no computable source"
+    except Exception:  # noqa: BLE001 - 数据湖不可达视为无可用数据源
         return {}
     out: dict[str, int] = {}
     for raw_day, n in frame.itertuples(index=False):
@@ -642,7 +578,7 @@ def _data_counts() -> dict[str, int]:
 def _freshness(
     counts: Mapping[str, int], end_day: str
 ) -> tuple[float | None, float | None]:
-    """(data delay in days, row-count deviation vs prior-day mean)."""
+    """计算 ``(数据延迟天数, 最新日条数相对历史均值偏差)``。"""
     if not counts:
         return None, None
     days = sorted(counts)
@@ -657,14 +593,12 @@ def _freshness(
     return delay, (counts[latest] - mean) / mean
 
 
-# ---------------------------------------------------------------------------
-# Collection: one day's read -> the design's metrics dict + the alerting facts
-# ---------------------------------------------------------------------------
+# --- 单日采集汇总：生成指标字典与告警事实字典 ---
 
 
 @dataclass(frozen=True)
 class _Read:
-    """Everything one collection pass reads; ``None`` = no computable source."""
+    """单次采集读取的全部原始事实；``None`` 表示无可用数据源。"""
 
     cum_return: float | None
     cum_return_neg_streak: int | None
@@ -801,46 +735,22 @@ def _collect(day: str) -> tuple[dict, dict]:
 
 
 def collect_metrics(date: str) -> dict:
-    """采集策略级 + 系统级指标 (design signature): ``{"strategy": {...}, "system": {...}}``.
-
-    Every entry carries ``{"value", "status"}``; the 12 names are
-    :data:`STRATEGY_METRICS` then :data:`SYSTEM_METRICS`, in table order.
-    """
+    """采集策略级与系统级 12 项指标，返回 ``{"strategy": {...}, "system": {...}}``。"""
     return _collect(date)[0]
 
 
 def collect_day(day: str) -> tuple[dict, dict]:
-    """``(metrics, facts)`` for one day — one collection pass over the sources.
-
-    The job bodies in :mod:`ops.scheduler` need both halves (the report tables
-    and the alerting facts), and reading the journal twice to get them would
-    double the day's I/O. ``facts`` is what
-    :func:`ops.alerting.evaluate_alerts` takes.
-    """
+    """单次遍历数据源返回 ``(metrics, facts)``，避免重复读取日志 I/O。"""
     return _collect(day)
 
 
 def active_alpha_type_id() -> str:
-    """The alpha name on record, ``""`` when no ``eval_report.json`` exists.
-
-    The scope the platform attributes a book to — the same name the alerting
-    facts carry. Read here rather than from ``collect_day`` because a caller
-    that only wants the name should not pay for a full metrics pass.
-    """
+    """返回最新评估报告中的策略标识，不存在时返回空字符串。"""
     return _eval_report()[0]
 
 
 def nav_series(end_day: str) -> tuple[pd.Series, pd.Series]:
-    """``(nav, benchmark_nav)`` from the journal's DAY_END snapshots.
-
-    Both series share a :class:`~pandas.DatetimeIndex` of the days that carry a
-    ``nav``, oldest first; the benchmark side is NaN on days its snapshot was
-    missing, so the caller pairs observations and drops what it cannot use.
-
-    No benchmark is selected here — ``benchmark_nav`` is whatever the Day-End
-    event recorded (see ``docs/design/ops/reporting.md``, 归因基准的选
-    择). Reading the series is monitoring's job; choosing one is not.
-    """
+    """从 ``DAY_END`` 快照提取 ``(nav, benchmark_nav)`` 时序（仅读取，不负责基准选择）。"""
     book = _day_end_book(_journal_rows(end_day))
     days = sorted(book)
     nav = {d: _float_or_none(book[d].get("nav")) for d in days}
@@ -857,13 +767,7 @@ def nav_series(end_day: str) -> tuple[pd.Series, pd.Series]:
 
 
 def append_metrics_snapshot(date: str, metrics: dict) -> None:
-    """时点指标序列追加写 ``logs/ops/metrics.jsonl`` (design signature).
-
-    One row per metric (12 per snapshot) with the PR-pinned schema
-    ``date / ts / scope / name / value / status``. Append-only: repeated calls
-    stack snapshots — the file is the time series. A missing cell still lands
-    its row (value null, seam-6 status) — the snapshot always lands.
-    """
+    """将 12 项指标时点快照追加写入 ``logs/ops/metrics.jsonl``（缺失值以 null 落盘）。"""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows: list[dict] = []
     for scope, names in (
@@ -902,14 +806,7 @@ def append_metrics_snapshot(date: str, metrics: dict) -> None:
 
 
 def health_check() -> str:
-    """The ``health_check`` job body (seam 3): collect → snapshot → facts → alerts.
-
-    Facts feed :func:`ops.alerting.evaluate_alerts`; each firing goes through
-    :func:`ops.alerting.send_alert`. The scheduler's direct job-failure alert
-    converges on the same dedup key (``alert_type="job_failure"`` with the job
-    name as ``alpha_type_id``), which is why the facts carry the day's failed
-    jobs too. Returns a one-line summary for the run record.
-    """
+    """巡检任务主函数：采集指标 -> 快照落盘 -> 告警求值 -> 推送落盘。"""
     day = date.today().isoformat()
     metrics, facts = _collect(day)
     append_metrics_snapshot(day, metrics)

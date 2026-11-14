@@ -1,21 +1,12 @@
-"""Constraint-satisfaction layer: raw weights -> clipped -> lot-rounded book.
+"""组合构建约束层：原始权重 -> 约束剪裁 -> 整手取整。
 
-Design authority: ``docs/design/execution/portfolio_construction.md`` (§17, §34).
-Weight allocation (equal weight / score weighting / risk parity) happens in the
-strategy; this module never optimizes — it clips and rounds.  The dataclass
-bodies live in :mod:`core.types` (gap #1 ruling A); the solver stays in the
-execution domain.
+仅做约束满足与整手取整，不执行权重优化。
+固定管线顺序：个股/行业剪裁 -> 总权重归一化 -> 换手率剪裁 ->
+约束重剪（上界与总仓位上限）-> ``pre_opt_weights`` 快照 ->
+``floor_to_lot`` -> ``min_trade_value`` 过滤。
 
-Pipeline order (pinned — restated in the PR description): constraint clip ->
-total-weight normalize -> turnover clip -> constraint re-clip (upper bounds +
-total cap) -> pre_opt snapshot -> floor_to_lot -> min_trade_value filter.
-Clip first, round last:
-lot rounding floors against the budget, so it can only reduce a clipped
-weight and never push one back through an upper bound.  ``min_weight`` is
-advisory after rounding — flooring can deliver a hair under the floor,
-because the tradeable unit is the lot, not the weight.  Round-then-clip
-would clip in weight space and leave non-lot quantities — violating the
-execution unit.
+先剪裁后取整不变量：向下取整只会缩减权重，不会突破已剪裁的上界；
+``min_weight`` 在取整后仅作参考（允许因整手向下取整而略低于下限）。
 """
 
 from __future__ import annotations
@@ -29,12 +20,7 @@ from core.types import Account, Position, TargetPortfolio, TargetPosition
 
 @dataclass
 class PortfolioConstraints:
-    """Constraint set — the sole authority on portfolio bounds (§34).
-
-    Signals carry scores, never constraints (gap #1 ruling A).  Mutable config
-    object per design.  ``min_cash`` bounds the total weight together with
-    ``max_total_weight`` — the tighter of the two caps is what binds.
-    """
+    """组合约束配置；``min_cash`` 与 ``max_total_weight`` 取更紧者作为总仓位上限。"""
 
     max_weight: float = 0.10
     min_weight: float = 0.0
@@ -47,13 +33,10 @@ class PortfolioConstraints:
 
 
 def floor_to_lot(raw_quantity: float, lot_size: int = 100) -> int:
-    """Floor *raw_quantity* to a multiple of *lot_size* — the budget-safe direction.
+    """将 ``raw_quantity`` 向下取整为 ``lot_size`` 的整数倍（预算安全方向）。
 
-    Below one lot the result is 0: an order smaller than one lot is not
-    tradeable.  NaN and non-positive quantities are refused (``not (x > 0)``,
-    NaN-safe like ``FeeModel.compute``) — a NaN would floor into a garbage lot
-    count and a negative quantity is not a long-only target.  The result is a
-    non-negative multiple of *lot_size* and never exceeds *raw_quantity*.
+    不足一手返回 0；采用 NaN 安全校验拒绝非正或非有限输入，
+    保证返回值非负且不超过 ``raw_quantity``。
     """
     if not isinstance(lot_size, int) or isinstance(lot_size, bool) or lot_size <= 0:
         raise ValueError(f"lot_size must be a positive int, got {lot_size!r}")
@@ -64,20 +47,13 @@ def floor_to_lot(raw_quantity: float, lot_size: int = 100) -> int:
         )
     lots = math.floor(raw_quantity / lot_size)
     qty = lots * lot_size
-    if qty > raw_quantity:  # float division can round a hair above the true quotient
+    if qty > raw_quantity:  # 浮点除法可能略微上舍入，向下修正一手
         qty -= lot_size
     return int(qty)
 
 
 class PortfolioOptimizer:
-    """Constraint-satisfaction solver — clips and rounds, never optimizes.
-
-    ``solve`` is the one entry point: it takes unconstrained raw weights and
-    returns a :class:`~core.types.TargetPortfolio` whose quantities are whole
-    lots.  The identity fields (``strategy_id`` / ``trade_date`` / ...) come
-    from the signal's meta and are keyword-only — the design sketch elides
-    them at ``TargetPortfolio(...)``.
-    """
+    """约束满足求解器：仅剪裁与整手取整，不作优化。"""
 
     def solve(
         self,
@@ -93,22 +69,13 @@ class PortfolioOptimizer:
         exec_date: date | None = None,
         create_time: datetime | None = None,
     ) -> TargetPortfolio:
-        """Clip *raw_weights* to *constraints*, round to lots, build the book.
+        """按约束剪裁 ``raw_weights`` 并取整生成 :class:`~core.types.TargetPortfolio`。
 
-        Order (pinned): box/industry clip -> total-weight normalize -> turnover
-        clip -> constraint re-clip (upper bounds + total cap) ->
-        ``pre_opt_weights`` snapshot -> ``floor_to_lot`` -> ``min_trade_value``
-        filter.  The returned ``positions`` hold only positive holdings —
-        absence of a ticker is the exit signal for the order diff downstream.
-        Upper bounds (``max_weight``, ``max_industry_weight``) and the total
-        cap (``max_total_weight`` / ``min_cash``) hold on every book this
-        returns; ``min_weight`` is advisory post-rounding (see module doc).
-
-        Raises ``ValueError`` for NaN/inf raw weights, missing or non-positive
-        prices, negative position quantities, an incoherent current book
-        (weight sum > 1), or invalid constraint fields.  Refusing is what
-        makes the output invariants (no negative weight, total <= 1) true of
-        every book this function can return.
+        管线顺序：个股/行业剪裁 -> 总权重归一化 -> 换手率剪裁 ->
+        重施上界与总仓位上限 -> 记录 ``pre_opt_weights`` -> ``floor_to_lot`` ->
+        ``min_trade_value`` 过滤。返回的 ``positions`` 仅含正持仓（缺席即下游清仓信号）。
+        确保输出始终满足 ``max_weight``、``max_industry_weight`` 与总仓位上限；
+        对 NaN/无穷大权重、缺失或非正价格、负持仓或当前总权重 > 1 抛出 ``ValueError``。
         """
         _validate_constraints(constraints)
         if not math.isfinite(account.total_asset) or not (account.total_asset > 0):
@@ -129,7 +96,7 @@ class PortfolioOptimizer:
             if name not in applied:
                 applied.append(name)
 
-        # Step 1 — per-ticker box clip (raw candidates only; exits stay at 0).
+        # 第 1 步：个股上下界剪裁（仅针对目标候选，清仓保持 0）
         w: dict[str, float] = {}
         for ticker, raw in raw_weights.items():
             if not math.isfinite(raw):
@@ -143,13 +110,12 @@ class PortfolioOptimizer:
                 note("max_weight")
             w[ticker] = min(max(raw, constraints.min_weight), constraints.max_weight)
 
-        # Step 1b — industry clip (proportional scale-down per industry).
+        # 第 1b 步：行业权重剪裁（按行业等比例缩减）
         if constraints.max_industry_weight is not None and industry_map:
             if self._clip_industry(w, industry_map, constraints.max_industry_weight):
                 note("max_industry_weight")
 
-        # Step 2 — total-weight normalize.  Cap honours min_cash too: the
-        # tighter of max_total_weight and the cash floor is what binds.
+        # 第 2 步：总权重归一化（受 max_total_weight 与 1 - min_cash 中更紧者约束）
         total_cap = min(constraints.max_total_weight, 1.0 - constraints.min_cash)
         total = sum(w.values())
         if total > total_cap:
@@ -159,21 +125,14 @@ class PortfolioOptimizer:
             if 1.0 - constraints.min_cash < constraints.max_total_weight:
                 note("min_cash")
 
-        # Step 3 — turnover clip (convex interpolation toward the current book).
+        # 第 3 步：换手率剪裁（向当前持仓凸线性插值）
         w_cur = self._current_weights(current_positions, account, prices)
         if constraints.max_turnover is not None:
             if self._clip_turnover(w, w_cur, constraints.max_turnover):
                 note("max_turnover")
 
-        # Step 3b — re-apply the constraint set.  The turnover clip is a
-        # convex combination of the clipped target and the current book; a
-        # drifted current book (price appreciation above max_weight, an
-        # industry cap, or the total cap) carries the result back through
-        # the bound.  Clamp again here, accepting a small turnover
-        # overshoot rather than delivering a book outside the constraint
-        # set.  min_weight is deliberately not re-raised: partial exits and
-        # in-flight builds may sit below the floor inside the turnover
-        # budget (advisory post-rounding).
+        # 第 3b 步：重施上界与总仓位约束（当前持仓漂移可能使插值结果越界，
+        # 宁可小幅超出换手率也不输出越界组合；不重提 min_weight 以允许部分减仓）
         if any(v > constraints.max_weight for v in w.values()):
             for t in w:
                 if w[t] > constraints.max_weight:
@@ -182,10 +141,7 @@ class PortfolioOptimizer:
         if constraints.max_industry_weight is not None and industry_map:
             if self._clip_industry(w, industry_map, constraints.max_industry_weight):
                 note("max_industry_weight")
-        # Same total-weight normalize as step 2 — the convex combination can
-        # carry the sum back through max_total_weight / min_cash even when
-        # every ticker stays inside max_weight.  Proportional scale-down only
-        # reduces, so the upper bounds just re-applied still hold.
+        # 再次归一化总权重；等比例缩减只降不升，已重施的个股/行业上界继续成立
         total = sum(w.values())
         if total > total_cap:
             scale = total_cap / total if total > 0 else 0.0
@@ -194,10 +150,10 @@ class PortfolioOptimizer:
             if 1.0 - constraints.min_cash < constraints.max_total_weight:
                 note("min_cash")
 
-        # Step 4 — pre-rounding snapshot.
+        # 第 4 步：保存取整前权重快照
         pre_opt = dict(w)
 
-        # Step 5-6 — lot rounding, then the min_trade_value filter.
+        # 第 5-6 步：整手取整并过滤低于 min_trade_value 的仓位
         positions: dict[str, TargetPosition] = {}
         targeted = 0
         for ticker, weight in w.items():
@@ -207,8 +163,7 @@ class PortfolioOptimizer:
             px = prices[ticker]
             raw_qty = weight * account.total_asset / px
             if not (raw_qty > 0):
-                # Zero target after float underflow — skip lot rounding.
-                # A zero-weight book entry is a legal "do not buy" signal.
+                # 浮点下溢导致目标股数为 0 时跳过取整
                 continue
             qty = floor_to_lot(raw_qty, constraints.lot_size)
             if qty < raw_qty:
@@ -258,11 +213,7 @@ class PortfolioOptimizer:
     def _clip_industry(
         w: dict[str, float], industry_map: dict[str, str], cap: float
     ) -> bool:
-        """Scale each over-weight industry's members proportionally to *cap*.
-
-        Tickers absent from *industry_map* are left alone — the map is
-        advisory metadata, not a partition requirement.
-        """
+        """按比例缩减超限行业权重至 ``cap``；未在 ``industry_map`` 登记的标的保持不变。"""
         by_industry: dict[str, list[str]] = {}
         for ticker in w:
             industry = industry_map.get(ticker)
@@ -282,16 +233,7 @@ class PortfolioOptimizer:
     def _clip_turnover(
         w: dict[str, float], w_cur: dict[str, float], max_turnover: float
     ) -> bool:
-        """Interpolate the target toward the current book until turnover fits.
-
-        ``turnover = sum(|Δw|)/2`` (design §34).  Scaled deltas are convex
-        combinations of the two books — bounds carry over only when the
-        current book still satisfies them.  A drifted book can carry the
-        result back through an upper bound or the total cap; ``solve``
-        re-applies those clips afterwards (step 3b), accepting a small
-        turnover overshoot.  Partial exits land in *w* when the budget
-        cannot exit in one step.
-        """
+        """将目标权重向当前持仓线性插值，使单边换手率 ``sum(|Δw|)/2 <= max_turnover``。"""
         tickers = set(w) | set(w_cur)
         delta = {t: w.get(t, 0.0) - w_cur.get(t, 0.0) for t in tickers}
         turnover = sum(abs(d) for d in delta.values()) / 2.0
@@ -308,7 +250,7 @@ class PortfolioOptimizer:
         account: Account,
         prices: dict[str, float],
     ) -> dict[str, float]:
-        """Value the current book at *prices* as fractions of ``total_asset``."""
+        """按当前价格计算现有持仓权重；总权重 > 1 时抛出 ``ValueError``。"""
         w_cur: dict[str, float] = {}
         for ticker, pos in current_positions.items():
             if not isinstance(pos.quantity, int) or pos.quantity < 0:

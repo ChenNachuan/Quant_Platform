@@ -1,11 +1,9 @@
-"""AmazingData source adapter — A-share / options market data.
+"""AmazingData 数据源适配器（A 股与期权行情）。
 
-Wraps the AmazingData SDK.  Key constraints handled internally (C2):
-
-* ``get_option_basic_info`` caps ~100–104 rows/call → batch 10 codes per call.
-* ``local_path`` must be ``str()`` (SDK does string concatenation internally).
-* ``close()`` calls ``ad.logout()`` to release the connection slot.
-* ``requests_per_second = 2.0`` (connection count is limited).
+SDK 约束：
+* ``get_option_basic_info`` 单次返回上限约 100–104 行，按每批 10 个代码分批查询。
+* ``local_path`` 必须为 ``str``（SDK 内部会做字符串拼接）。
+* ``close()`` 调用 ``ad.logout()`` 释放有限的连接槽位，限速 ``requests_per_second = 2.0``。
 """
 
 from __future__ import annotations
@@ -22,19 +20,19 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["AmazingdataAdapter"]
 
-_BATCH_SIZE = 10  # codes per API call (C2)
+_BATCH_SIZE = 10  # 单次 API 调用的代码批量上限
 
 
 class AmazingdataAdapter(SourceAdapter):
-    """Fetch market data via AmazingData SDK."""
+    """通过 AmazingData SDK 拉取行情数据。"""
 
-    requests_per_second = 2.0  # connection-limited (design doc)
+    requests_per_second = 2.0  # 受限于并发连接数
 
     _ASSET_TYPES = ["stock", "option"]
 
     def __init__(self, local_path: str | Path = "/data") -> None:
-        self._local_path = str(local_path)  # SDK requires str (C2)
-        self._ad = None  # lazy init
+        self._local_path = str(local_path)  # SDK 要求 str 类型
+        self._ad = None
 
     def _ensure_client(self):
         if self._ad is None:
@@ -62,7 +60,7 @@ class AmazingdataAdapter(SourceAdapter):
             df = self._fetch_stock(ad, date_str)
         elif asset_type == "option":
             df = self._fetch_option(ad, date_str)
-        else:  # pragma: no cover — guarded above
+        else:  # pragma: no cover
             raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
         if df is None:
@@ -78,10 +76,10 @@ class AmazingdataAdapter(SourceAdapter):
         )
 
     def _fetch_stock(self, ad, date_str: str) -> pd.DataFrame:
-        """Fetch stock daily data.  Minimal: one call for all codes on *date_str*."""
+        """按日拉取全市场股票日线数据。"""
         base_data = ad.get_base_data()
         code_list = base_data.get_hist_code_list(
-            local_path=self._local_path,  # str() forced in __init__
+            local_path=self._local_path,
         )
         df = base_data.get_hist_data(
             code_list=code_list,
@@ -92,7 +90,7 @@ class AmazingdataAdapter(SourceAdapter):
         return df if df is not None else pd.DataFrame()
 
     def _fetch_option(self, ad, date_str: str) -> pd.DataFrame:
-        """Fetch option basic info in batches of 10 codes (C2: ~100-row cap)."""
+        """按每批 10 个代码分批拉取期权基础信息。"""
         info_data = ad.get_info_data()
         base_data = ad.get_base_data()
         all_codes = base_data.get_option_code_list(local_path=self._local_path)
@@ -109,7 +107,7 @@ class AmazingdataAdapter(SourceAdapter):
         return pd.DataFrame()
 
     def health_check(self) -> bool:
-        """Probe one real SDK call — building the client alone is not a health signal."""
+        """执行一次真实 SDK 调用验证连通性。"""
         try:
             ad = self._ensure_client()
             base_data = ad.get_base_data()
@@ -119,7 +117,7 @@ class AmazingdataAdapter(SourceAdapter):
             return False
 
     def close(self) -> None:
-        """Release the AmazingData connection slot (C2: ad.logout())."""
+        """调用 ``ad.logout()`` 释放连接槽位。"""
         if self._ad is not None:
             try:
                 self._ad.logout()

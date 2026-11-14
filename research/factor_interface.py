@@ -1,22 +1,13 @@
-"""Factor ABC and IO contract — the definition of what a factor is.
+"""因子抽象基类与 IO 契约。
 
-Interface only.  Scheduling is T2 (``FactorDAG``), post-processing is S5
-(``PostProcessor``), storage is S5, governance is S11.  ``depends_on()`` is a
-**static declaration** of input names, not an event subscription (red lines 1–2).
+依赖前缀契约（由 ``FactorDAG`` 解析组装）：
+- 裸表名（无冒号）→ 原始数据表，经 ``data_api.load_bars()`` 加载
+- ``"factor:xxx"`` → 上游因子，从因子存储读取或上游计算
+- 其他前缀 → 显式抛出 ``ValueError``，禁止静默回退
 
-Dependency prefix contract (hard — T2 assembles the DAG from it):
-
-- bare name (no colon)  → raw data table, loaded via ``data_api.load_bars()``
-- ``"factor:xxx"``      → upstream factor, loaded from factor storage or computed
-- any other prefix      → **rejected** (explicit ``ValueError``, no silent
-  fallback to table name)
-
-``compute()`` returns **raw** values in a long table ``DataFrame[date, ticker,
-{factor_name}]`` — exactly three columns.  Winsorising, filling, standardising
-and neutralising belong to S5's ``PostProcessor``, never to ``Factor.compute()``.
-
-Metadata lives in class attributes — code IS the registry.  No JSON/YAML
-registration files (factor count stays under 100).
+``depends_on()`` 是输入依赖的静态声明（非事件订阅）。``compute()`` 必须返回严格三列长表
+``DataFrame[date, ticker, {factor_name}]`` 的原始因子值；去极值、填充、标准化与中性化由
+``PostProcessor`` 在消费侧完成。元数据直接声明为类属性（代码即注册表）。
 """
 
 from __future__ import annotations
@@ -28,10 +19,10 @@ from typing import Any, Iterable
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Categories
+# 因子分类
 # ---------------------------------------------------------------------------
 
-#: The four factor families defined in the design.
+#: 四大基础因子类别。
 FACTOR_CATEGORIES: tuple[str, ...] = (
     "time_series",
     "cross_section",
@@ -39,42 +30,35 @@ FACTOR_CATEGORIES: tuple[str, ...] = (
     "alternative",
 )
 
-#: Catch-all for factors that do not fit the four families.
+#: 未归入四大类别时的默认分类。
 DEFAULT_CATEGORY: str = "custom"
 
-#: Every legal ``category`` value (four families + default).
+#: 全部合法的 ``category`` 取值。
 VALID_CATEGORIES: frozenset[str] = frozenset(FACTOR_CATEGORIES) | {DEFAULT_CATEGORY}
 
 # ---------------------------------------------------------------------------
-# Dependency prefix contract
+# 依赖前缀契约
 # ---------------------------------------------------------------------------
 
-#: Prefix that marks an upstream-factor dependency.
+#: 标识上游因子依赖的前缀。
 FACTOR_DEP_PREFIX: str = "factor:"
 
-#: Returned by :func:`parse_dependency` for a raw data table.
+#: ``parse_dependency`` 返回类型：原始数据表。
 KIND_TABLE: str = "table"
-#: Returned by :func:`parse_dependency` for an upstream factor.
+#: ``parse_dependency`` 返回类型：上游因子。
 KIND_FACTOR: str = "factor"
 
 # ---------------------------------------------------------------------------
-# Factor naming — ``{type}_{semantic}_{params}`` snake_case
-# (factor_governance.md §62.6).  Structural check: at least two
-# underscore-separated segments, every segment contains a letter, whole name
-# is lowercase.  Rejects ``mom20``, ``Momentum20``, ``factor_001``, etc.
-# Whether a structurally valid name is semantically right is a review-time
-# judgement, not a regex.
+# 因子命名规范：{type}_{semantic}_{params} 全小写 snake_case，至少两段且每段含字母
 # ---------------------------------------------------------------------------
 
-# `\Z`, not `$`: `$` also matches immediately before a trailing newline, so
-# `"equity_mom_20d\n"` would pass and then flow into the registry key and
-# `factor:...` references as a name with a newline in it.
+# 使用 \Z 而非 $，防止末尾换行符绕过校验并污染注册表键名
 _NAME_RE: re.Pattern[str] = re.compile(
     r"^[a-z][a-z0-9]*(?:_[a-z0-9]*[a-z][a-z0-9]*)+\Z"
 )
 
 # ---------------------------------------------------------------------------
-# Metadata extraction
+# 元数据提取
 # ---------------------------------------------------------------------------
 
 _META_FIELDS: tuple[str, ...] = (
@@ -88,29 +72,15 @@ _META_FIELDS: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Dependency parsing
+# 依赖解析
 # ---------------------------------------------------------------------------
 
 
 def parse_dependency(dep: str) -> tuple[str, str]:
-    """Parse one ``depends_on()`` entry into ``(kind, name)``.
+    """将单条 ``depends_on()`` 依赖解析为 ``(kind, name)``。
 
-    ==================  ====================  =========================
-    input                kind                  name
-    ==================  ====================  =========================
-    ``"bars_daily"``     :data:`KIND_TABLE`    ``"bars_daily"``
-    ``"factor:mom_20d"`` :data:`KIND_FACTOR`   ``"mom_20d"``
-    ==================  ====================  =========================
-
-    Anything with a colon whose prefix is not ``"factor"`` is **rejected** —
-    the silent fallback of treating ``"foo:bar"`` as a table name is exactly
-    how a typo turns into a wrong-data bug three stages later.
-
-    Raises
-    ------
-    ValueError
-        Empty / whitespace-only input, an unrecognised prefix, or a
-        ``factor:`` entry with an empty name.
+    无冒号视为原始数据表 ``(KIND_TABLE, dep)``；``"factor:xxx"`` 解析为
+    ``(KIND_FACTOR, "xxx")``。空字符串、空因子名或未识别前缀均抛出 ``ValueError``。
     """
     if not isinstance(dep, str) or not dep.strip():
         raise ValueError(f"dependency must be a non-empty string, got {dep!r}")
@@ -136,42 +106,19 @@ def parse_dependency(dep: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Metadata extraction
+# 元数据提取函数
 # ---------------------------------------------------------------------------
 
 
 def factor_meta(cls: type) -> dict[str, Any]:
-    """Extract the metadata class attributes from a Factor subclass.
-
-    Returns a dict with keys :data:`_META_FIELDS`.  A missing attribute
-    becomes ``None``.
-    """
+    """提取 ``Factor`` 子类的类级元数据字典（键为 ``_META_FIELDS``，缺失则为 ``None``）。"""
     return {f: getattr(cls, f, None) for f in _META_FIELDS}
 
 
 def extract_factor_meta(
     factors: Iterable[type] | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract metadata from Factor classes.
-
-    Distinct from :func:`core.registry.list_factor_meta` to avoid a
-    same-name / different-shape collision.  This returns the six Factor
-    interface fields; the registry extractor returns the class-level
-    ``META_FIELDS`` contract and deliberately omits ``depends_on``, which is a
-    method here and so is not ``getattr``-able metadata.
-
-    Parameters
-    ----------
-    factors
-        Factor classes to read.  When *None*, walks every class in
-        :class:`core.registry.FactorRegistry` (the code-is-registry store
-        landed at S1-T3).
-
-    Returns
-    -------
-    list of dict
-        One :func:`factor_meta` dict per class.
-    """
+    """批量提取因子类元数据；``factors`` 为 ``None`` 时遍历 ``FactorRegistry`` 全部已注册类。"""
     if factors is None:
         from core.registry import FactorRegistry
 
@@ -180,83 +127,57 @@ def extract_factor_meta(
 
 
 # ---------------------------------------------------------------------------
-# Output schema validation
+# 输出 Schema 校验
 # ---------------------------------------------------------------------------
 
 _OUTPUT_KEY_COLS: tuple[str, ...] = ("date", "ticker")
 
 
 def validate_output(factor_name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Validate that *df* matches the contract ``DataFrame[date, ticker, {name}]``.
-
-    The output is a **long** table with exactly three columns in the order
-    ``date, ticker, {factor_name}``.  Returns *df* unchanged on success.
-
-    Raises
-    ------
-    ValueError
-        If the columns are not exactly ``["date", "ticker", factor_name]``.
-    """
+    """校验 ``df`` 严格匹配三列长表契约 ``[date, ticker, {factor_name}]``，不符则抛出 ``ValueError``。"""
     expected = [*_OUTPUT_KEY_COLS, factor_name]
     actual = list(df.columns)
     if actual != expected:
-        raise ValueError(
-            f"compute() must return columns {expected}, got {actual}"
-        )
+        raise ValueError(f"compute() must return columns {expected}, got {actual}")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Factor ABC
+# Factor 抽象基类
 # ---------------------------------------------------------------------------
 
 
 class Factor(ABC):
-    """Abstract base class for every factor.
+    """所有因子的抽象基类。
 
-    Metadata is declared as class attributes — code IS the registry.
-    Subclasses must set :attr:`name` and implement :meth:`depends_on` and
-    :meth:`compute`.
-
-    ``depends_on()`` is a **static declaration** of input names, not a
-    subscription.  ``compute()`` returns raw values; post-processing is S5.
+    元数据以类属性形式声明（代码即注册表）；子类必须自行定义 ``name`` 并实现
+    ``depends_on()`` 与 ``compute()``。
     """
 
-    #: Unique factor name — ``{type}_{semantic}_{params}`` snake_case.
+    #: 唯一因子名，格式为 ``{type}_{semantic}_{params}``。
     name: str
 
-    #: One-line human description (the compute docstring is the authority).
+    #: 一句话因子描述。
     description: str = ""
 
-    #: Factor family — one of :data:`FACTOR_CATEGORIES` or :data:`DEFAULT_CATEGORY`.
+    #: 因子类别，须属于 ``VALID_CATEGORIES``。
     category: str = DEFAULT_CATEGORY
 
-    #: Computation frequency (``"daily"``, ``"minute"``, …).
+    #: 计算频率（如 ``"daily"``、``"minute"``）。
     frequency: str = "daily"
 
-    #: Table-family selectors: ``equity`` / ``futures`` / ``continuous``.
-    #: This is the same vocabulary as ``load_bars(..., asset_type=)`` — **not**
-    #: ``core.types.AssetType``'s six-member enum.  Bridge through
-    #: ``core.types.EQUITY_TYPES`` when per-asset rules (fees, price limits)
-    #: are needed.
-    #:
-    #: An immutable tuple on purpose: a class-level mutable default is shared
-    #: by every subclass and instance, so one ``append`` would rewrite the
-    #: asset-family selector for all factors at once.
+    #: 适用的数据表资产类型（不可变元组，避免子类共享可变默认值）。
     asset_types: tuple[str, ...] = ("equity",)
 
-    #: Semantic version.  Bump when ``compute()`` logic changes (see PR notes).
+    #: 语义版本号，``compute()`` 逻辑变更时递增。
     version: str = "1.0"
 
-    # -- class-construction-time validation -------------------------------
+    # -- 类构造期校验 -------------------------------------------------------
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        # `cls.__dict__`, not `getattr`: the latter reads an *inherited* name,
-        # so a subclass that forgets to redeclare it silently takes the
-        # parent's identity. Since `factor:{name}` resolves dependencies, a
-        # factor that never declared its own name can masquerade under another.
+        # 读取 cls.__dict__ 而非 getattr，防止子类未声明 name 时误继承父类标识
         name = cls.__dict__.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(
@@ -277,35 +198,18 @@ class Factor(ABC):
                 f"expected one of {sorted(VALID_CATEGORIES)}"
             )
 
-    # -- abstract IO contract --------------------------------------------
+    # -- 抽象 IO 契约 -------------------------------------------------------
 
     @abstractmethod
     def depends_on(self) -> list[str]:
-        """Declare input names as a flat list of strings.
-
-        Bare name → raw data table (loaded via ``load_bars()``).
-        ``"factor:xxx"`` → upstream factor.
-
-        This is a static declaration, **not** a subscription.
-        """
+        """静态声明输入依赖列表（裸表名或 ``"factor:xxx"``），非事件订阅。"""
         ...
 
     @abstractmethod
     def compute(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """Compute raw factor values.
+        """计算原始因子值。
 
-        Parameters
-        ----------
-        data
-            Mapping from each name in :meth:`depends_on` to its DataFrame.
-            Data tables arrive from ``load_bars()``; upstream factors arrive
-            from FactorDAG.
-
-        Returns
-        -------
-        pd.DataFrame
-            Long table with exactly three columns:
-            ``[date, ticker, {factor_name}]``.  Raw values — no winsorising,
-            filling, standardising or neutralising (those are S5).
+        输入 ``data`` 为 ``depends_on()`` 各依赖名到对应 DataFrame 的映射；
+        输出必须为严格三列长表 ``[date, ticker, {factor_name}]``（原始未清洗值）。
         """
         ...

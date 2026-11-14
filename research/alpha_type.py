@@ -1,17 +1,8 @@
-"""Strategy recipe governance — alphaType registry, 7-dim tags, lifecycle, audit.
+"""策略配方治理：alphaType 注册表、7 维封闭标签、五态生命周期与只增审计日志。
 
-Admission, tag validation, five-state lifecycle, and append-only audit for
-registered strategy recipes.  An alphaType is a recipe (``signal_source`` +
-``rules`` + ``params``), not code.  See ``docs/design/research/alpha_type.md``
-and §65 of the archive.
-
-Iteration 1 scope (ac-1, ac-2, ac-4): ``TAG_DIMENSIONS``, ``REGISTRY_DIR``,
-``create_alpha_type``, ``list_alpha_types``, ``transition_alpha_type``,
-``promote_alpha_type``, ``log_audit``.
-
-Iteration 2 scope (ac-3, ac-5): ``Rule`` ABC + ``RulePipeline``,
-``run_daily_signal``, ``build_portfolio``, ``compute_turnover``,
-``send_alert`` seam.
+提供配方注册与查询（``create_alpha_type``、``list_alpha_types``）、
+状态流转与准入晋升（``transition_alpha_type``、``promote_alpha_type``、``log_audit``），
+以及规则管道与日信号编排（``Rule``、``RulePipeline``、``build_portfolio``、``run_daily_signal`` 等）。
 """
 
 from __future__ import annotations
@@ -49,15 +40,13 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# 常量定义
 # ---------------------------------------------------------------------------
 
-#: Default registry directory (D5).  Helpers accept ``registry_dir=None``
-#: so tests can point at ``tmp_path``.
+# 默认注册表目录，辅助函数允许注入 registry_dir 以便测试隔离
 REGISTRY_DIR = DATA_ROOT / "registry"
 
-#: 7-dim closed-enum tag schema (D2).  Every value must be in its dimension's
-#: set; free text is forbidden.  All 7 dims required at create / publish.
+# 7 维封闭枚举标签规范，创建与发布时必须全部填写
 TAG_DIMENSIONS: dict[str, set[str]] = {
     "asset_type": {"stock", "etf", "convertible_bond", "futures", "option"},
     "frequency": {"1d", "1W", "1M", "intraday"},
@@ -83,14 +72,13 @@ TAG_DIMENSIONS: dict[str, set[str]] = {
     },
 }
 
-# Lifecycle legal transitions (D1).
-# draft->published->production->deprecated->archived, plus x->draft for rework.
+# 生命周期合法流转边（主链顺序推进，任意非草稿态可退回 draft 重做）
 _LIFECYCLE_LEGAL: set[tuple[str, str]] = {
     ("draft", "published"),
     ("published", "production"),
     ("production", "deprecated"),
     ("deprecated", "archived"),
-    # any -> draft (rework)
+    # 退回草稿重做
     ("published", "draft"),
     ("production", "draft"),
     ("deprecated", "draft"),
@@ -99,7 +87,7 @@ _LIFECYCLE_LEGAL: set[tuple[str, str]] = {
 
 _LIFECYCLE_STATES = frozenset(TAG_DIMENSIONS["status"])
 
-# Audit entry keys (D3): the settled item's actor + reason added to the base five.
+# 审计日志必需字段集合
 _AUDIT_KEYS = {
     "action",
     "alpha_type_id",
@@ -111,12 +99,12 @@ _AUDIT_KEYS = {
     "reason",
 }
 
-# promote_alpha_type gate thresholds (D4, §64.5).
+# 晋升生产门限阈值
 _PROMOTE_IC_MIN = 0.04
 _PROMOTE_IR_MIN = 0.5
 _PROMOTE_SHARPE_MIN = 1.0
 
-# Meta-info field order (§65.2, 15 fields).
+# 注册表元信息标准字段顺序（15 字段）
 _META_FIELDS = [
     "alpha_type_id",
     "name",
@@ -137,16 +125,12 @@ _META_FIELDS = [
 
 
 # ---------------------------------------------------------------------------
-# Tag validation (D2)
+# 标签校验
 # ---------------------------------------------------------------------------
 
 
 def _validate_tags(tags: dict[str, str], *, require_all: bool = True) -> None:
-    """Validate tag dict against TAG_DIMENSIONS (D2).
-
-    Out-of-enum value or free text → ``ValueError``.
-    Missing dim at create/publish → ``ValueError`` (require_all=True).
-    """
+    """按 ``TAG_DIMENSIONS`` 校验标签字典；非法维度、非枚举值或缺少必填维度时抛出 ``ValueError``。"""
     if not isinstance(tags, dict):
         raise ValueError(f"tags must be a dict, got {type(tags).__name__}")
     for dim, value in tags.items():
@@ -165,7 +149,7 @@ def _validate_tags(tags: dict[str, str], *, require_all: bool = True) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Audit log (D3)
+# 审计日志
 # ---------------------------------------------------------------------------
 
 
@@ -174,11 +158,7 @@ def log_audit(
     *,
     registry_dir: Path | None = None,
 ) -> None:
-    """Append one JSON line to ``audit_log.jsonl`` (D3).
-
-    Append-only: corrections are new entries; nothing ever rewrites prior bytes.
-    Required keys: ``{action, alpha_type_id, from, to, metrics, ts, actor, reason}``.
-    """
+    """向 ``audit_log.jsonl`` 追加写入一条审计日志；键集合必须严格匹配 ``_AUDIT_KEYS``。"""
     missing = _AUDIT_KEYS - set(event)
     if missing:
         raise ValueError(f"audit entry missing keys: {sorted(missing)}")
@@ -198,7 +178,7 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Registry persistence (D5)
+# 注册表持久化
 # ---------------------------------------------------------------------------
 
 
@@ -235,7 +215,7 @@ def _save_publishes(registry_dir: Path, records: list[dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# create_alpha_type (D5)
+# 配方创建
 # ---------------------------------------------------------------------------
 
 
@@ -244,24 +224,18 @@ def create_alpha_type(
     *,
     registry_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Register a new alphaType recipe (D5).
-
-    Validates 7-dim tags (D2) + recipe completeness (``signal_source``,
-    ``rules``, ``params``), seeds status ``draft``, appends the 15-field
-    meta-info record.  Duplicate ``alpha_type_id`` → ``ValueError``.
-    Version string format: ``"major.minor"``.
-    """
+    """注册新 alphaType 配方（校验配方字段、7 维标签及 ``major.minor`` 版本号），初始化为 ``draft`` 并记录审计。"""
     d = registry_dir or REGISTRY_DIR
 
-    # Required recipe fields.
+    # 校验必填配方字段
     for field in ("signal_source", "rules", "params"):
         if field not in alpha:
             raise ValueError(f"missing required recipe field: {field!r}")
 
-    # Validate tags (D2: all 7 dims required at create).
+    # 校验 7 维标签完整性
     _validate_tags(alpha.get("tags", {}), require_all=True)
 
-    # Validate version format.
+    # 校验版本号格式
     version = str(alpha.get("version", "1.0"))
     parts = version.split(".")
     if len(parts) != 2 or not all(p.isdigit() for p in parts):
@@ -271,15 +245,15 @@ def create_alpha_type(
     if not alpha_id:
         raise ValueError("alpha_type_id is required")
 
-    # Check for duplicate.
+    # 校验 ID 唯一性
     records = _load_alpha_types(d)
     if any(r["alpha_type_id"] == alpha_id for r in records):
         raise ValueError(f"duplicate alpha_type_id: {alpha_id!r}")
 
-    # Build the 15-field meta-info record (§65.2, field order from _META_FIELDS).
+    # 组装 15 字段元信息记录
     now = _now_iso()
     tags = dict(alpha["tags"])
-    tags["status"] = "draft"  # auto-seed status
+    tags["status"] = "draft"  # 初始状态固定为 draft
     _defaults = {
         "alpha_type_id": alpha_id,
         "name": alpha.get("name", alpha_id),
@@ -302,7 +276,7 @@ def create_alpha_type(
     records.append(record)
     _save_alpha_types(d, records)
 
-    # Audit entry (D3): creation is a state change and must be recorded.
+    # 记录创建审计日志
     log_audit(
         {
             "action": "create",
@@ -320,7 +294,7 @@ def create_alpha_type(
 
 
 # ---------------------------------------------------------------------------
-# list_alpha_types (D2)
+# 配方查询
 # ---------------------------------------------------------------------------
 
 
@@ -329,17 +303,12 @@ def list_alpha_types(
     *,
     registry_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter registered alphaTypes by tag dimensions (D2).
-
-    Example::
-
-        list_alpha_types({"style": "momentum", "asset_type": "etf"})
-    """
+    """按标签维度等值过滤已注册配方，未传过滤条件时返回全部记录。"""
     d = registry_dir or REGISTRY_DIR
     records = _load_alpha_types(d)
     if not filters:
         return list(records)
-    # Validate filter keys against TAG_DIMENSIONS.
+    # 校验过滤条件是否符合枚举定义
     for dim, value in filters.items():
         if dim not in TAG_DIMENSIONS:
             raise ValueError(
@@ -358,7 +327,7 @@ def list_alpha_types(
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle transition (D1, D6)
+# 生命周期流转
 # ---------------------------------------------------------------------------
 
 
@@ -370,18 +339,9 @@ def transition_alpha_type(
     actor: str = "system",
     reason: str = "",
 ) -> dict[str, Any]:
-    """Lifecycle state machine (D1).
+    """执行生命周期状态流转并同步发布记录与审计日志。
 
-    Legal transitions: ``draft→published``, ``published→production``,
-    ``production→deprecated``, ``deprecated→archived`` + ``x→draft`` (rework).
-    Self-transitions and every other pair raise ``ValueError``.
-
-    Table actions ride the transition (D1):
-    - ``draft→published`` writes a publish record (``published_at``).
-    - ``production`` stamps ``adopted_at`` (via promote gate D4).
-    - ``deprecated`` stamps ``retired_at``.
-    - ``tags["status"]`` auto-follows the state.
-    - ``any→draft`` rework bumps version minor+1 (D6).
+    合法流转：``draft→published→production→deprecated→archived`` 及任意非草稿态退回 ``draft``（次版本号 +1）。
     """
     d = registry_dir or REGISTRY_DIR
     current = alpha.get("status", "draft")
@@ -396,7 +356,7 @@ def transition_alpha_type(
             f"production->deprecated, deprecated->archived, x->draft"
         )
 
-    # draft→published precondition: recipe complete + tags full (D1).
+    # draft -> published 前置校验：配方完整且标签齐全
     if current == "draft" and target == "published":
         for field in ("signal_source", "rules", "params"):
             if field not in alpha:
@@ -405,20 +365,20 @@ def transition_alpha_type(
 
     now = _now_iso()
 
-    # Version bump on rework (D6).
+    # 退回 draft 重做时递增次版本号
     if target == "draft" and current != "draft":
         ver = str(alpha.get("version", "1.0"))
         major, minor = ver.split(".")
         alpha["version"] = f"{major}.{int(minor) + 1}"
 
-    # Update status and tags.
+    # 更新状态与标签
     alpha["status"] = target
     alpha.setdefault("tags", {})["status"] = target
     alpha["updated_at"] = now
 
-    # Table actions (D1).
+    # 同步更新发布记录表
     if target == "published":
-        # Write publish record.
+        # 写入发布记录
         publishes = _load_publishes(d)
         publishes.append(
             {
@@ -441,7 +401,7 @@ def transition_alpha_type(
                 break
         _save_publishes(d, publishes)
 
-    # Persist updated alpha record.
+    # 持久化更新后的配方记录
     records = _load_alpha_types(d)
     for i, r in enumerate(records):
         if r["alpha_type_id"] == alpha["alpha_type_id"]:
@@ -449,7 +409,7 @@ def transition_alpha_type(
             break
     _save_alpha_types(d, records)
 
-    # Audit entry (D3).
+    # 写入状态变更审计日志
     log_audit(
         {
             "action": "transition",
@@ -468,7 +428,7 @@ def transition_alpha_type(
 
 
 # ---------------------------------------------------------------------------
-# promote_alpha_type (D4)
+# 评估晋升门限
 # ---------------------------------------------------------------------------
 
 
@@ -479,17 +439,10 @@ def promote_alpha_type(
     registry_dir: Path | None = None,
     actor: str = "system",
 ) -> bool:
-    """Promote to production if the eval gate passes (D4).
+    """校验评估报告是否通过生产晋升门限（仅允许 ``published`` 状态）。
 
-    Precondition: ``alpha["status"] == "published"`` (it is the
-    published→production transition; else ``ValueError``).
-
-    Gate (§64.5, strict ``>``): ``walk_forward_passed`` AND
-    ``beats_equal_weight`` AND ``metrics.ic_mean > 0.04`` AND
-    ``metrics.ic_ir > 0.5`` AND ``metrics.test_sharpe > 1.0``.
-
-    Writes a D3 audit entry on both outcomes.  On ok, sets status to
-    ``production`` + ``adopted_at``.
+    门限要求：``walk_forward_passed``、``beats_equal_weight`` 为 True，且
+    ``ic_mean > 0.04``、``ic_ir > 0.5``、``test_sharpe > 1.0``；无论通过与否均写审计日志。
     """
     d = registry_dir or REGISTRY_DIR
 
@@ -510,7 +463,7 @@ def promote_alpha_type(
     now = _now_iso()
 
     if gate_ok:
-        # Transition to production (rides D1 table actions).
+        # 晋升至 production
         transition_alpha_type(
             alpha,
             "production",
@@ -518,7 +471,7 @@ def promote_alpha_type(
             actor=actor,
             reason="promote gate passed (§64.5)",
         )
-        # Stamp adopted_at on publish record.
+        # 回填发布记录的采用时间
         publishes = _load_publishes(d)
         for p in reversed(publishes):
             if p["alpha_type_id"] == alpha["alpha_type_id"]:
@@ -527,7 +480,7 @@ def promote_alpha_type(
                 break
         _save_publishes(d, publishes)
     else:
-        # Audit rejection.
+        # 记录晋升被拒审计日志
         log_audit(
             {
                 "action": "promote_rejected",
@@ -546,7 +499,7 @@ def promote_alpha_type(
 
 
 # ---------------------------------------------------------------------------
-# send_alert seam (D10)
+# 告警接口
 # ---------------------------------------------------------------------------
 
 
@@ -556,11 +509,7 @@ def send_alert(
     alert_type: str = "generic",
     alpha_type_id: str = "",
 ) -> None:
-    """Alert seam (D10).  V1 body logs via std logging; monkeypatched in tests.
-
-    S12 swaps the body to ``ops/alerting.py`` when it lands.
-    Signature matches ``ops/alerting.md`` exactly.
-    """
+    """告警抽象接口，V1 通过标准日志输出告警信息。"""
     logger.warning(
         "[%s] %s alert_type=%s alpha_type_id=%s: %s",
         level,
@@ -572,21 +521,17 @@ def send_alert(
 
 
 # ---------------------------------------------------------------------------
-# Rule ABC + RulePipeline (D11)
+# 规则基类与串行管道
 # ---------------------------------------------------------------------------
 
 _RULE_REGISTRY: dict[str, type["Rule"]] = {}
 
-#: Valid rule categories (D11).
+# 合法规则类别
 RULE_CATEGORIES = frozenset({"signal_transform", "filter", "position", "risk_gate"})
 
 
 class Rule(ABC):
-    """Base class for all rules (D11).
-
-    Class attrs: ``rule_id``, ``category``, ``param_schema``.
-    Params are type-checked against ``param_schema`` at instantiation.
-    """
+    """规则基类，实例化时按 ``param_schema`` 校验参数类型。"""
 
     rule_id: str = ""
     category: str = ""
@@ -608,11 +553,11 @@ class Rule(ABC):
 
     @abstractmethod
     def apply(self, data: pd.DataFrame, **params: Any) -> pd.DataFrame:
-        """Transform data.  Must be implemented by subclasses."""
+        """对输入数据执行规则变换，由子类实现。"""
 
 
 class TopKFilter(Rule):
-    """Keep top-k names per date by score (D11: V1 concrete rule)."""
+    """内置筛选规则：按日保留分数最高的前 *k* 只标的。"""
 
     rule_id = "top_k_filter"
     category = "filter"
@@ -630,7 +575,7 @@ class TopKFilter(Rule):
 
 
 def create_rule(rule_id: str, **params: Any) -> Rule:
-    """Factory over the module rule registry (D11)."""
+    """根据 ``rule_id`` 从注册表实例化规则对象。"""
     if rule_id not in _RULE_REGISTRY:
         raise ValueError(
             f"unknown rule_id: {rule_id!r}; registered: {sorted(_RULE_REGISTRY)}"
@@ -638,17 +583,12 @@ def create_rule(rule_id: str, **params: Any) -> Rule:
     return _RULE_REGISTRY[rule_id](**params)
 
 
-# Register V1 rules.
+# 注册内置规则
 _RULE_REGISTRY["top_k_filter"] = TopKFilter
 
 
 class RulePipeline:
-    """Run rules serially (D11: no parallel/nested composition).
-
-    Container shape: ``list[Rule]`` — rules carry their own params at
-    instantiation (design doc's sketch; the archive sketch ``(rule_id, params)``
-    tuples is the rejected alternative).
-    """
+    """串行执行规则列表的管道。"""
 
     def __init__(self, rules: list[Rule]) -> None:
         self.rules = list(rules)
@@ -656,7 +596,7 @@ class RulePipeline:
     def run(
         self, data: pd.DataFrame, params: dict[str, Any] | None = None
     ) -> pd.DataFrame:
-        """Apply rules in sequence; each receives the prior rule's output."""
+        """依次执行管道中的规则，将前一步输出作为下一步输入。"""
         result = data
         for rule in self.rules:
             result = rule.apply(result, **(params or {}))
@@ -664,7 +604,7 @@ class RulePipeline:
 
 
 # ---------------------------------------------------------------------------
-# compute_turnover (D9)
+# 换手率计算
 # ---------------------------------------------------------------------------
 
 
@@ -672,13 +612,7 @@ def compute_turnover(
     new_weights: pd.DataFrame,
     old_weights: pd.DataFrame,
 ) -> float:
-    """Turnover = Σ|Δw| / 2 over the outer join on ticker (D9).
-
-    Joins on ``ticker`` alone (not ``[date, ticker]``) so cross-date
-    comparisons work: the turnover question is "how much did the book
-    change", which compares weights per ticker across the two frames
-    regardless of their date labels.  Missing rows treated as 0.
-    """
+    """按 ``ticker`` 外连接计算双边半换手率 ``Σ|Δw| / 2``，缺失行权重按 0 处理。"""
     merged = new_weights.merge(
         old_weights,
         on=["ticker"],
@@ -692,7 +626,7 @@ def compute_turnover(
 
 
 # ---------------------------------------------------------------------------
-# build_portfolio (D8)
+# 组合权重构建
 # ---------------------------------------------------------------------------
 
 
@@ -701,22 +635,9 @@ def build_portfolio(
     alpha: dict[str, Any],
     prev_weights: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Signal → target weights with constraint checks (D8).
+    """将信号转为目标权重并执行总仓位缩放及集中度、换手率告警检查。
 
-    Solve = ``signal_to_weights(signal, method, k)``.  method from
-    ``alpha["params"].get("weight_method", "top_k")``; k from the recipe's
-    TopKFilter rule entry ``params.k``, else ``DEFAULT_K``.  Scale by
-    ``params.total_position`` default 1.0.
-
-    Concentration check (alert-only): per-date max weight >
-    ``params.max_single_weight`` default 0.25 → ``send_alert("MEDIUM")``,
-    no correction.
-
-    Turnover check (alert-only, when *prev_weights* given): turnover >
-    ``params.max_turnover`` default 1.5 → ``send_alert("MEDIUM")``, no trim.
-
-    Solve failure → equal-weight fallback (1/N per date, scaled by
-    total_position); never an empty book.  Empty signal → ``ValueError``.
+    求解失败或输出为空时回退按日 ``1/N`` 等权；输入信号为空时抛出 ``ValueError``。
     """
     if signal.empty:
         raise ValueError("empty signal frame: cannot build portfolio")
@@ -727,27 +648,26 @@ def build_portfolio(
     if method not in WEIGHT_METHODS:
         method = "top_k"
 
-    # Find k from TopKFilter rule entry, else default.
+    # 从 TopKFilter 规则读取 k，未配置则使用默认值
     k = DEFAULT_K
     for rule_entry in alpha.get("rules", []):
         if isinstance(rule_entry, dict) and rule_entry.get("rule_id") == "top_k_filter":
             k = rule_entry.get("params", {}).get("k", DEFAULT_K)
             break
 
-    # Solve (D8: analytical, rules are transforms, weights are solver output).
+    # 求解权重，异常或空结果时回退等权
     try:
         weights = signal_to_weights(signal, method=method, k=k)
     except Exception:
         weights = _equal_weight_fallback(signal)
-    # Never an empty book: solver may succeed but yield no rows (e.g. all
-    # scores NaN or non-positive under proportional).
+    # 防止全 NaN 或非正分导致空仓
     if weights.empty:
         weights = _equal_weight_fallback(signal)
 
-    # Scale by total_position.
+    # 按总仓位比例缩放
     weights["target_weight"] = weights["target_weight"] * total_position
 
-    # Concentration check (alert-only, no correction).
+    # 单票集中度检查（仅告警，不裁剪）
     max_single = params.get("max_single_weight", 0.25)
     if not weights.empty:
         per_date_max = weights.groupby("date")["target_weight"].max()
@@ -759,7 +679,7 @@ def build_portfolio(
                 alpha_type_id=alpha.get("alpha_type_id", ""),
             )
 
-    # Turnover check (alert-only, no trim).
+    # 换手率检查（仅告警，不裁剪）
     if prev_weights is not None and not prev_weights.empty:
         max_turnover = params.get("max_turnover", 1.5)
         turnover = compute_turnover(weights, prev_weights)
@@ -775,7 +695,7 @@ def build_portfolio(
 
 
 def _equal_weight_fallback(signal: pd.DataFrame) -> pd.DataFrame:
-    """1/N equal weight per date over the signal's tickers (D8 fallback)."""
+    """按日对信号内全部标的赋 ``1/N`` 等权。"""
     counts = signal.groupby("date")["ticker"].transform("count")
     out = signal[["date", "ticker"]].copy()
     out["target_weight"] = 1.0 / counts
@@ -783,7 +703,7 @@ def _equal_weight_fallback(signal: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# run_daily_signal (D7)
+# 日信号生产
 # ---------------------------------------------------------------------------
 
 
@@ -794,30 +714,22 @@ def run_daily_signal(
     *,
     signal_fn: Any,
 ) -> dict[str, Any]:
-    """Daily signal production (D7).  Failure → hold, never liquidate.
+    """日信号生产编排（失败重试 1 次）。
 
-    ``signal_fn(alpha, date) -> [date, ticker, score]`` is a required keyword
-    (signal computation is the alpha_signal.md boundary; S12 injects the
-    producer).
-
-    At most 2 attempts (retry 1).  Success →
-    ``{"status": "SUCCESS", "portfolio": weights}``.  Both attempts raise →
-    ``send_alert("HIGH", ...)`` and
-    ``{"status": "HOLD", "portfolio": prev_portfolio}`` — previous book
-    passes through untouched; an empty/liquidating book is never fabricated.
-    No persistence inside (S12 owns the pipeline).
+    成功返回 ``{"status": "SUCCESS", "portfolio": weights}``；两次均失败则发 ``HIGH`` 告警并
+    原样返回 ``{"status": "HOLD", "portfolio": prev_portfolio}``。
     """
     alpha_id = alpha.get("alpha_type_id", "unknown")
 
-    for attempt in range(2):  # retry 1 = 2 attempts total
+    for attempt in range(2):  # 最多尝试 2 次（失败重试 1 次）
         try:
             signal = signal_fn(alpha, date)
             weights = build_portfolio(signal, alpha, prev_portfolio)
             return {"status": "SUCCESS", "portfolio": weights}
         except Exception as e:
             if attempt == 0:
-                continue  # retry once
-            # Both attempts failed: HOLD, never liquidate.
+                continue  # 首次失败重试
+            # 两次均失败则保持原持仓并告警
             send_alert(
                 "HIGH",
                 f"signal failed {alpha_id}: {e}",
@@ -826,5 +738,5 @@ def run_daily_signal(
             )
             return {"status": "HOLD", "portfolio": prev_portfolio}
 
-    # Unreachable, but keeps type checkers happy.
+    # 兜底返回以满足静态类型检查
     return {"status": "HOLD", "portfolio": prev_portfolio}

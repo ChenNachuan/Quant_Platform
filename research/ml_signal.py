@@ -1,35 +1,10 @@
-"""ML/DL signal governance — adapter, smoothing, feature versioning, ensemble.
+"""ML/DL 信号治理层：信号尺度适配、平滑、特征矩阵与版本指纹、落盘、集成与过拟合检验。
 
-Converts raw ML model outputs (scores or probabilities) onto the unified
-cross-sectional z-score scale that :class:`AlphaSignal` consumes, and provides
-per-ticker exponential smoothing for daily-frequency strategies.  Converges
-with the multi-factor path at ``AlphaSignal.from_ml_factor``.
-
-Iteration 1 scope (ac-3, ac-4): :class:`MLSignalAdapter` (``from_scores`` /
-``from_probabilities``) and :func:`smooth_signal`.
-Iteration 2 scope (ac-2): :func:`build_feature_matrix`, :func:`transform_bars`,
-:func:`features_hash`, :func:`model_id`, :func:`write_model`,
-:func:`write_experiment`.
-Iteration 3 scope (ac-1, ac-5): :func:`ensemble_models`,
-:func:`sanity_check_ml_model`.
-
-Design pins (PR restates):
-
-* ``from_probabilities`` clips to ``[1e-6, 1-1e-6]`` before logit — a
-  probability of exactly 0 or 1 maps to ±∞, and clipping bounds the logit
-  to ±≈13.8 without losing monotonicity.
-* Zero cross-sectional std → all-zero scores that date (not NaN/inf).
-* ``smooth_signal`` uses per-ticker EWM with ``halflife=5`` default; daily
-  strategies call it, monthly rebalance does not (call-site policy).
-* ``features_hash`` = ``sha256(canonical_specs_json + "|" + "|".join(sorted(dep_hashes)))``
-  over feature specs sorted by ``(source, name|field, transform)``.
-* ``model_id`` = ``{name}+v{major}.{minor}({train_date})+{train_end}+{features_hash}``.
-* ``transform_bars`` implements ``pct_change_N`` + ``zscore_cs`` only.
-* ``write_model`` refuses a ``REJECT`` verdict — nothing is written.
-
-Not this module: factor combination (``factor_combiner``), weight constraint
-solving (``PortfolioConstraints``), MLFactor train/predict scheduling
-(``factor_runtime``), or alphaType registration (``alpha_type``).
+核心契约：
+- ``MLSignalAdapter`` 将原始分数或概率统一转换为截面 z-score（``[date, ticker, score]``），
+  概率先截断至 ``[1e-6, 1-1e-6]`` 再做 logit 变换；零标准差截面输出全 0。
+- ``smooth_signal`` 按标的时序做指数加权移动平均（默认 ``halflife=5``）。
+- ``features_hash`` 与 ``model_id`` 锚定特征集合与模型版本；``write_model`` 拒绝写入 ``REJECT`` 模型。
 """
 
 from __future__ import annotations
@@ -61,20 +36,19 @@ __all__ = [
     "write_model",
 ]
 
-#: Probability clip bounds for ``from_probabilities``.  1e-6 keeps the logit
-#: finite (|logit| < 14) while preserving rank order.
+#: ``from_probabilities`` 概率截断边界，确保 logit 有限且保序。
 PROB_CLIP_LOW: float = 1e-6
 PROB_CLIP_HIGH: float = 1.0 - 1e-6
 
-#: Default halflife for :func:`smooth_signal` — 5 trading days (one week).
+#: ``smooth_signal`` 默认半衰期（5 个交易日）。
 DEFAULT_HALFLIFE: int = 5
 
-#: Column contract every signal frame honours.
+#: 信号输出标准列契约。
 REQUIRED_COLS: tuple[str, ...] = ("date", "ticker", "score")
 
 
 def _validate_frame(frame: pd.DataFrame, *, score_col: str = "score") -> None:
-    """Check ``[date, ticker, <score_col>]`` contract; raise on violation."""
+    """校验输入包含 ``[date, ticker, <score_col>]`` 且无重复 ``(date, ticker)`` 行。"""
     required = ("date", "ticker", score_col)
     missing = [c for c in required if c not in frame.columns]
     if missing:
@@ -84,61 +58,20 @@ def _validate_frame(frame: pd.DataFrame, *, score_col: str = "score") -> None:
 
 
 class MLSignalAdapter:
-    """Adapt ML model outputs to the unified ``[date, ticker, score]`` scale.
-
-    Two input paths, both producing a per-date cross-sectional z-score:
-
-    * :meth:`from_scores` — for models that emit raw scores / expected returns.
-    * :meth:`from_probabilities` — for classifiers that emit probabilities;
-      applies clip → logit → z-score.
-
-    The output is ready for ``AlphaSignal.from_ml_factor``.  Expected-return
-    outputs take the scores path (the design rejects quantile grouping and
-    binary thresholding — both lose information the signal layer needs).
-    """
+    """将 ML 模型原始输出适配为统一的截面 z-score 信号 ``[date, ticker, score]``。"""
 
     @staticmethod
     def from_scores(scores: pd.DataFrame) -> pd.DataFrame:
-        """Map raw scores to cross-sectional z-scores.
-
-        Parameters
-        ----------
-        scores : DataFrame
-            Must carry ``[date, ticker, score]``.  ``score`` is a raw model
-            output (expected return, margin, etc.).
-
-        Returns
-        -------
-        DataFrame
-            Same shape, ``score`` column replaced by per-date cross-sectional
-            z-scores.  A date with zero std → all-zero scores.
-        """
+        """将原始分数 ``[date, ticker, score]`` 转为按日截面 z-score，零标准差日期输出全 0。"""
         _validate_frame(scores)
         frame = scores[list(REQUIRED_COLS)].copy()
         return _cross_zscore(frame)
 
     @staticmethod
     def from_probabilities(probs: pd.DataFrame) -> pd.DataFrame:
-        """Map classifier probabilities to cross-sectional z-scores.
-
-        Pipeline: clip to ``[1e-6, 1-1e-6]`` → ``logit(p) = log(p/(1-p))``
-        → per-date cross-sectional z-score.
-
-        Parameters
-        ----------
-        probs : DataFrame
-            Must carry ``[date, ticker, prob]``.  ``prob`` is a classifier
-            probability in ``(0, 1)``.
-
-        Returns
-        -------
-        DataFrame
-            ``[date, ticker, score]`` — per-date cross-sectional z-scores of
-            the logit-transformed probabilities.
-        """
+        """将分类概率 ``[date, ticker, prob]`` 经截断至 ``[1e-6, 1-1e-6]``、logit 变换后转为按日截面 z-score。"""
         _validate_frame(probs, score_col="prob")
         frame = probs[["date", "ticker", "prob"]].copy()
-        # Clip to keep logit finite; rank order is preserved.
         p = frame["prob"].astype("float64").clip(PROB_CLIP_LOW, PROB_CLIP_HIGH)
         frame["score"] = np.log(p / (1.0 - p))
         frame = frame[["date", "ticker", "score"]]
@@ -149,33 +82,13 @@ def smooth_signal(
     frame: pd.DataFrame,
     halflife: int = DEFAULT_HALFLIFE,
 ) -> pd.DataFrame:
-    """Per-ticker exponential weighted moving average on the score column.
-
-    Applies ``pandas.ewm(halflife=...)`` independently to each ticker's score
-    time series, preserving date order.  Output has the same shape as input.
-
-    Daily-frequency strategies call this; monthly rebalance does not
-    (call-site policy, not a flag).
-
-    Parameters
-    ----------
-    frame : DataFrame
-        Must carry ``[date, ticker, score]``.
-    halflife : int
-        EWM halflife in periods (trading days).  Default 5 (one week).
-
-    Returns
-    -------
-    DataFrame
-        Same shape as *frame*, ``score`` column replaced by the smoothed
-        values.  Date order is preserved.
-    """
+    """按标的时间顺序对 ``score`` 列做指数加权移动平均（EWM），保持原行序与形状不变。"""
     _validate_frame(frame)
     if halflife <= 0:
         raise ValueError(f"halflife must be positive, got {halflife!r}")
 
     out = frame.copy()
-    # Compute EWM in chronological order per ticker, then restore original row order.
+    # 按标的时间顺序计算 EWM 后还原原始行索引顺序
     orig_index = out.index
     sorted_df = out.sort_values(["ticker", "date"])
     smoothed = sorted_df.groupby("ticker")["score"].transform(
@@ -186,11 +99,10 @@ def smooth_signal(
 
 
 # ---------------------------------------------------------------------------
-# transform_bars (D3)
+# transform_bars
 # ---------------------------------------------------------------------------
 
-#: The two transforms V1 implements.  ``pct_change_N`` is N-period return;
-#: ``zscore_cs`` is per-date cross-sectional z-score.
+#: 支持的原始行情特征变换类型。
 TRANSFORMS: tuple[str, ...] = ("pct_change_N", "zscore_cs")
 
 
@@ -199,28 +111,7 @@ def transform_bars(
     field: str,
     transform: str,
 ) -> pd.Series:
-    """Apply a named transform to a raw bars column.
-
-    Two transforms in V1 (settled default):
-
-    * ``pct_change_N`` — N-period percentage change (e.g. ``pct_change_5``).
-    * ``zscore_cs`` — per-date cross-sectional z-score.
-
-    Parameters
-    ----------
-    bars : DataFrame
-        Must carry ``[date, ticker, <field>]``.
-    field : str
-        Column name to transform (e.g. ``"close"``, ``"volume"``).
-    transform : str
-        Transform name.  ``pct_change_N`` where N is a positive integer,
-        or ``zscore_cs``.
-
-    Returns
-    -------
-    Series
-        Transformed values, same index as *bars*.
-    """
+    """对行情数据 ``bars`` 的指定字段 ``field`` 执行 ``pct_change_N``（N 期涨跌幅）或 ``zscore_cs``（按日截面 z-score）变换。"""
     if field not in bars.columns:
         raise ValueError(f"bars is missing column {field!r}")
     if transform == "zscore_cs":
@@ -243,7 +134,7 @@ def transform_bars(
 
 
 # ---------------------------------------------------------------------------
-# build_feature_matrix (D3)
+# build_feature_matrix
 # ---------------------------------------------------------------------------
 
 
@@ -255,34 +146,15 @@ def build_feature_matrix(
     factor_base_dir: str = str(DATA_ROOT / "factors"),
     bars: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build the feature matrix from a list of feature specs.
+    """按特征规格列表 ``specs`` 构建外连接特征宽表 ``[date, ticker, feat_0, feat_1, ...]``。
 
-    Each spec is ``{source: "factor"|"raw", name|field: str, transform: str}``:
-
-    * ``source="factor"`` — read the factor table via
-      :func:`research.factor_storage.load_factor`, then apply ``transform``.
-    * ``source="raw"`` — apply :func:`transform_bars` to *bars*.
-
-    Returns ``[date, ticker, feat_0, feat_1, ...]`` — one column per spec,
-    outer-joined on ``(date, ticker)``.
-
-    Parameters
-    ----------
-    specs : list of dict
-        Feature specifications.  Each must carry ``source``, ``transform``,
-        and ``name`` (factor) or ``field`` (raw).
-    start, end : date-like
-        Date range (inclusive).
-    factor_base_dir : str
-        Base directory for factor tables.
-    bars : DataFrame, optional
-        Raw bars data for ``source="raw"`` features.  Required if any spec
-        has ``source="raw"``.
+    每条规格为 ``{source: "factor"|"raw", name|field: str, transform: str}``：
+    ``factor`` 从因子存储读取并变换；``raw`` 从 ``bars`` 变换并按 ``[start, end]`` 过滤。
     """
     if not specs:
         raise ValueError("specs must be a non-empty list")
 
-    from research.factor_storage import load_factor  # local import to avoid cycle
+    from research.factor_storage import load_factor  # 延迟导入以避免循环依赖
 
     frames: list[pd.DataFrame] = []
     for i, spec in enumerate(specs):
@@ -314,8 +186,7 @@ def build_feature_matrix(
                 raw[col_name] = transform_bars(bars, field, transform)
             else:
                 raw[col_name] = raw[field]
-            # Filter to the requested date window (factor branch gets this
-            # from load_factor; raw must apply it explicitly).
+            # factor 分支已由 load_factor 过滤区间，raw 分支需显式裁剪
             raw_dates = pd.to_datetime(raw["date"])
             raw = raw[
                 (raw_dates >= pd.to_datetime(start))
@@ -325,12 +196,9 @@ def build_feature_matrix(
         else:
             raise ValueError(f"spec[{i}] has unknown source: {source!r}")
 
-    # Normalise date to pd.Timestamp before joining — load_factor returns
-    # datetime.date (date32) while bars may carry str or Timestamp.  Mixed
-    # types silently double rows or raise on merge.
+    # 统一日期为 pd.Timestamp，避免 load_factor 的 date32 与 bars 日期类型混用导致合并异常
     frames = [f.assign(date=pd.to_datetime(f["date"])) for f in frames]
 
-    # Outer-join on (date, ticker).
     merged = frames[0]
     for f in frames[1:]:
         merged = merged.merge(f, on=["date", "ticker"], how="outer")
@@ -338,12 +206,12 @@ def build_feature_matrix(
 
 
 # ---------------------------------------------------------------------------
-# features_hash (D3)
+# features_hash
 # ---------------------------------------------------------------------------
 
 
 def _canonical_spec_key(spec: dict) -> tuple:
-    """Sort key for feature specs: ``(source, name|field, transform)``."""
+    """特征规格排序键：``(source, name|field, transform)``。"""
     return (
         spec.get("source", ""),
         spec.get("name", spec.get("field", "")),
@@ -352,27 +220,7 @@ def _canonical_spec_key(spec: dict) -> tuple:
 
 
 def features_hash(specs: list[dict], dep_hashes: list[str]) -> str:
-    """Compute the feature-set fingerprint.
-
-    ``sha256(canonical_specs_json + "|" + "|".join(sorted(set(dep_hashes))))``
-    where ``canonical_specs_json`` is the sorted-keys, compact-separator JSON
-    of *specs* sorted by ``(source, name|field, transform)``.
-
-    *source=raw* features contribute only via the specs JSON (field + transform);
-    raw data revisions do not invalidate the hash in V1 (known limitation).
-
-    Parameters
-    ----------
-    specs : list of dict
-        Feature specifications.
-    dep_hashes : list of str
-        ``depends_hash`` values of the source=factor dependencies.
-
-    Returns
-    -------
-    str
-        64-character hex sha256 digest.
-    """
+    """计算特征集 64 位 SHA-256 指纹：对排序后的规范规格 JSON 与去重排序的依赖指纹哈希。"""
     sorted_specs = sorted(specs, key=_canonical_spec_key)
     canonical_json = json.dumps(sorted_specs, sort_keys=True, separators=(",", ":"))
     sorted_deps = sorted(set(dep_hashes))
@@ -381,7 +229,7 @@ def features_hash(specs: list[dict], dep_hashes: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# model_id (D4)
+# model_id
 # ---------------------------------------------------------------------------
 
 
@@ -393,27 +241,17 @@ def model_id(
     train_end: str,
     feat_hash: str,
 ) -> str:
-    """Build the model identifier.
-
-    Format: ``{name}+v{major}.{minor}({train_date})+{train_end}+{features_hash}``
-
-    * ``train_date`` — training start date (ISO ``YYYY-MM-DD``).
-    * ``train_end`` — training end date (ISO ``YYYY-MM-DD``).
-    * ``feat_hash`` — output of :func:`features_hash`.
-
-    Any ``features_hash`` change yields a different ``model_id`` — the ac-2
-    assertion.
-    """
+    """按 ``{name}+v{major}.{minor}({train_date})+{train_end}+{feat_hash}`` 格式构建模型唯一标识。"""
     return f"{name}+v{major}.{minor}({train_date})+{train_end}+{feat_hash}"
 
 
 # ---------------------------------------------------------------------------
-# write_model (D5)
+# write_model
 # ---------------------------------------------------------------------------
 
 
 def _jsonable(value):
-    """Normalise numpy/pandas scalars so ``json.dumps`` does not crash."""
+    """将 NumPy/Pandas 标量及非有限浮点数转为可 JSON 序列化的原生类型。"""
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -438,22 +276,7 @@ def write_model(
     verdict: str = "PASS",
     base_dir: str = str(DATA_ROOT / "models"),
 ) -> Path:
-    """Write a model deployment directory.
-
-    Layout: ``{base_dir}/{name}/v{major}_{minor}/`` containing:
-
-    * ``model.pkl`` — the trained model (joblib).
-    * ``config.json`` — hyperparameters.
-    * ``metadata.json`` — ``model_id`` / ``train_end`` / ``features_hash`` /
-      ``metrics`` + reproducibility five: ``random_seed``, dependency
-      versions, feature list, date range, hyperparams.
-
-    Refuses a ``REJECT`` verdict — nothing is written (red line).
-    ``PASS``/``SUSPECT`` may be written; ``SUSPECT`` is not promoted.
-    The normalised verdict is persisted in ``metadata.json``.
-
-    Returns the deployment directory path.
-    """
+    """将模型（``model.pkl``）、超参（``config.json``）与元数据（``metadata.json``）写入 ``{base_dir}/{name}/v{major}_{minor}/``；拒绝 ``REJECT`` 结论的模型。"""
     verdict = str(verdict).strip().upper()
     if verdict not in VERDICTS:
         raise ValueError(f"verdict must be one of {VERDICTS}, got {verdict!r}")
@@ -481,7 +304,7 @@ def write_model(
 
 
 # ---------------------------------------------------------------------------
-# write_experiment (D6)
+# write_experiment
 # ---------------------------------------------------------------------------
 
 
@@ -492,15 +315,7 @@ def write_experiment(
     *,
     base_dir: str = str(DATA_ROOT / "experiments"),
 ) -> Path:
-    """Write an experiment record.
-
-    Layout: ``{base_dir}/{exp_id}/`` containing:
-
-    * ``metrics.json`` — metrics + ``created_at`` ISO timestamp.
-    * ``config.json`` — run config / hyperparams.
-
-    No MLflow / W&B — plain directories only.
-    """
+    """将实验指标（``metrics.json``）与配置（``config.json``）写入 ``{base_dir}/{exp_id}/``。"""
     out_dir = Path(base_dir) / exp_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -517,7 +332,7 @@ def write_experiment(
 
 
 # ---------------------------------------------------------------------------
-# ensemble_models (D7, ac-5)
+# ensemble_models
 # ---------------------------------------------------------------------------
 
 
@@ -527,33 +342,7 @@ def ensemble_models(
     *,
     weights: list[float] | None = None,
 ) -> pd.DataFrame:
-    """Combine multiple model outputs into one signal frame.
-
-    Each element of *models* is a callable ``f(X) -> DataFrame [date, ticker,
-    score]``.  Frames are outer-joined on ``[date, ticker]``; the combined
-    score is the weighted mean ``Σwᵢsᵢ / Σwᵢ`` over the models that produced
-    that cell (skipna — a model that has no row for a key is excluded from
-    that key's denominator).
-
-    ``weights=None`` → ``wᵢ=1`` for all (equal-weight default).  Explicit
-    weights are taken as given — no normalisation policy beyond the mean.
-    Gap #14 (validation ICIR normalisation) is **not decided here**;
-    ``weights`` is an interface only.
-
-    Parameters
-    ----------
-    models : list of callable
-        Each ``f(X) -> DataFrame [date, ticker, score]``.
-    X : optional
-        Passed through to each model callable.
-    weights : list of float, optional
-        Per-model weights.  Must have the same length as *models*.
-
-    Returns
-    -------
-    DataFrame
-        ``[date, ticker, score]`` — the weighted mean across models.
-    """
+    """按 ``(date, ticker)`` 外连接多个模型输出并计算加权均值（自动忽略缺失单元格，默认等权）。"""
     if not models:
         raise ValueError("models must be a non-empty list")
     if weights is not None and len(weights) != len(models):
@@ -566,7 +355,6 @@ def ensemble_models(
         if not np.isfinite(wi) or wi <= 0:
             raise ValueError(f"weight[{i}] must be finite and positive, got {wi!r}")
 
-    # Collect per-model frames.
     frames: list[pd.DataFrame] = []
     for model in models:
         result = model(X)
@@ -575,10 +363,8 @@ def ensemble_models(
         _validate_frame(result)
         frames.append(result[["date", "ticker", "score"]].copy())
 
-    # Normalise date to pd.Timestamp for consistent joining.
     frames = [f.assign(date=pd.to_datetime(f["date"])) for f in frames]
 
-    # Outer-join all frames on (date, ticker), keeping scores in separate columns.
     merged = frames[0].rename(columns={"score": "score_0"})
     for i, f in enumerate(frames[1:], start=1):
         merged = merged.merge(
@@ -587,7 +373,6 @@ def ensemble_models(
             how="outer",
         )
 
-    # Weighted mean with skipna: only models that produced a cell contribute.
     score_cols = [f"score_{i}" for i in range(len(models))]
     vals = merged[score_cols].to_numpy(dtype="float64")
     w_arr = np.array(w, dtype="float64")
@@ -604,10 +389,10 @@ def ensemble_models(
 
 
 # ---------------------------------------------------------------------------
-# sanity_check_ml_model (D8, ac-1)
+# sanity_check_ml_model
 # ---------------------------------------------------------------------------
 
-#: The three verdicts the sanity check returns.
+#: 过拟合门禁返回的三种结论。
 VERDICTS: tuple[str, ...] = ("PASS", "SUSPECT", "REJECT")
 
 
@@ -616,38 +401,12 @@ def sanity_check_ml_model(
     train_ic: float,
     baseline_sharpe: float,
 ) -> str:
-    """Overfitting three-check gate: PASS | SUSPECT | REJECT.
+    """ML 模型过拟合三项门禁（``REJECT`` 优先于 ``SUSPECT``）：
 
-    Three checks, REJECT dominating SUSPECT:
-
-    1. ``sharpe <= 1.1 * baseline_sharpe`` → **REJECT** (夏普未超等权 10%).
-       Boundary: exactly 1.1× is REJECT (未超 = reached-but-not-exceeded).
-    2. ``sharpe > 2.0`` → **SUSPECT** (查前视).
-       Boundary: strictly above 2.0.
-    3. ``ic < 0.5 * train_ic`` → **SUSPECT** (查泄漏).
-
-    If multiple checks trigger, REJECT wins over SUSPECT.  Otherwise PASS.
-
-    Parameters
-    ----------
-    test_metrics : dict
-        Must carry ``sharpe`` and ``ic``.
-    train_ic : float
-        Training-set IC.
-    baseline_sharpe : float
-        Equal-weight ensemble's Sharpe (D7).
-
-    Returns
-    -------
-    str
-        ``"PASS"``, ``"SUSPECT"``, or ``"REJECT"``.
-
-    Raises
-    ------
-    ValueError
-        If any of ``sharpe``, ``ic``, ``train_ic``, ``baseline_sharpe`` is
-        missing, ``None``, or not a finite number.  NaN must not silently
-        pass the gate.
+    1. ``sharpe <= 1.1 * baseline_sharpe`` → ``REJECT``（夏普未超等权基线 10%）
+    2. ``sharpe > 2.0`` → ``SUSPECT``（排查前视偏差）
+    3. ``ic < 0.5 * train_ic`` → ``SUSPECT``（排查数据泄漏）
+    任意核心指标缺失或非有限值时抛出 ``ValueError``。
     """
     sharpe = test_metrics.get("sharpe")
     ic = test_metrics.get("ic")
@@ -664,11 +423,9 @@ def sanity_check_ml_model(
         if not np.isfinite(value):
             raise ValueError(f"{label} must be a finite number, got {value!r}")
 
-    # REJECT: sharpe not over baseline by 10%.
     if sharpe <= 1.1 * baseline_sharpe:
         return "REJECT"
 
-    # SUSPECT checks (REJECT already excluded above).
     if sharpe > 2.0 or ic < 0.5 * train_ic:
         return "SUSPECT"
 

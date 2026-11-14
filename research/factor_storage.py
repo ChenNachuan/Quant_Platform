@@ -1,44 +1,16 @@
-"""Physical persistence for factor values — per-factor-one-table on disk.
+"""因子物理存储层：按因子与版本号分目录、按年份分文件持久化原始因子值。
 
-Layout (factor_storage.md §61)::
+磁盘布局::
 
     data_platform/factors/{factor_name}/v{version}/{year}.parquet
     data_platform/factors/{factor_name}/v{version}/metadata.json
 
-Stores ``Factor.compute()`` **raw** output — ``NaN`` is suspension / missing
-and is kept, never filled.  Winsorising, filling and neutralising belong to
-S5's ``PostProcessor`` and happen at consumption time, not here.
-
-This module is write / read only.  No post-processing (S5 ``PostProcessor``),
-no scheduling (``FactorDAG``), no market bars (data domain), no governance
-(S11).  Semantic version directories coexist: ``save_factor_full`` overwrites
-the *current* version directory and leaves sibling versions alone.
-
-Column contract — three columns, and the **types come from**
-:func:`data.storage_schema.factor_schema`, which is the landed authority on
-table structure.  This module does not keep a private copy of the column
-list; ``data/`` is read-only here, and importing it from ``research/`` is the
-allowed direction.
-
-==========  ==================  ==========================================
-column      type                notes
-==========  ==================  ==========================================
-date        Parquet ``DATE``    ``date32``; joins ``load_bars`` on ``date``
-ticker      VARCHAR             exchange-suffixed (``000001.SZ``)
-{factor}    DOUBLE              raw value, NaN kept
-==========  ==================  ==========================================
-
-Human ruling 2026-10-18 (option A): the issue's VARCHAR ``YYYYMMDD`` row is
-superseded by ``data/storage_schema.py``, which types every date column
-``pa.Date`` and registers this exact path as ``PARTITION_PATHS["factor"]`` —
-one file path, one type.  Consequences worth stating: ``2024/01/05`` is legal
-input and means 2024-01-05, ``NaT`` is refused by the column type rather than
-persisted as the string ``"NaT"``, and the year partition is derived with
-``dt.year`` because ``str[:4]`` is exactly where a bad value used to hide.
-
-In memory the date column is ``datetime.date`` — the same object
-``pd.read_parquet`` returns for ``date32``, so a factor frame and a bars frame
-join without conversion.
+契约约定：
+- 仅读写 ``Factor.compute()`` 的原始输出（保留停牌/缺失 ``NaN``），不做后处理。
+- 严格三列结构由 ``data.storage_schema.factor_schema`` 定义：``date``（Parquet
+  ``DATE``/``date32``，内存为 ``datetime.date``，可直接与 ``load_bars`` 连接）、
+  ``ticker``（带交易所后缀字符串）、``{factor}``（``DOUBLE``）。
+- 语义版本目录独立共存，全量写入仅覆盖当前版本目录。
 """
 
 from __future__ import annotations
@@ -63,19 +35,14 @@ __all__ = [
     "write_metadata",
 ]
 
-#: Default root of the factor tree.
+#: 默认因子存储根目录。
 DEFAULT_BASE_DIR: str = str(DATA_ROOT / "factors")
 
-#: Parquet codec — factor_storage.md pins zstd level 3.  Passed through to
-#: :func:`data.storage_ops.write_parquet_atomic`, which owns the tmp+rename.
+#: Parquet 压缩编解码参数（通过 write_parquet_atomic 原子写入）。
 COMPRESSION: str = "zstd"
 COMPRESSION_LEVEL: int = 3
 
-#: Identity fields of metadata.json, in write order (factor_storage.md §61).
-#: This is not the full key set: the optional evaluation blocks (``eval`` /
-#: ``attempts`` / ``attempt_log``) are written after them and carried across
-#: rewrites by :func:`write_metadata`'s ``previous`` loop.  They cannot appear
-#: here — a bare save never writes them, so they are not always-present fields.
+#: metadata.json 核心标识字段（按写入顺序；eval/attempts/attempt_log 等评估块在重写时保留）。
 METADATA_FIELDS: tuple[str, ...] = (
     "factor_name",
     "version",
@@ -97,12 +64,12 @@ _KEY_COLS: tuple[str, ...] = ("date", "ticker")
 
 
 # ---------------------------------------------------------------------------
-# Path and scalar helpers
+# 路径与标量辅助函数
 # ---------------------------------------------------------------------------
 
 
 def _safe_component(value: str, what: str) -> str:
-    """Reject path separators / traversal in a factor name or version."""
+    """校验因子名或版本号，拒绝空值与路径分隔符/穿越字符。"""
     s = str(value)
     if not s or s in {".", ".."} or any(sep in s for sep in ("/", "\\")):
         raise ValueError(f"invalid {what} {value!r}")
@@ -110,7 +77,7 @@ def _safe_component(value: str, what: str) -> str:
 
 
 def _version_dir(base_dir: str, name: str, version: str) -> Path:
-    """``{base_dir}/{name}/v{version}`` — one directory per factor version."""
+    """返回因子版本目录路径 ``{base_dir}/{name}/v{version}``。"""
     return (
         Path(base_dir)
         / _safe_component(name, "factor name")
@@ -119,12 +86,7 @@ def _version_dir(base_dir: str, name: str, version: str) -> Path:
 
 
 def _to_date(value: Any) -> date:
-    """Normalise one date scalar to ``datetime.date``.
-
-    Accepts the same forms the schema's parser does (``date`` / ``datetime`` /
-    parseable string, including ``2024/01/05`` and ``YYYYMMDD``) and refuses
-    the rest.  Used for the ``[start, end]`` read window.
-    """
+    """将输入日期标量规范化为 ``datetime.date``，缺失或无法解析时抛出 ``ValueError``。"""
     ts = pd.to_datetime(
         pd.Series([value], dtype=object), format="mixed", errors="raise"
     ).iloc[0]
@@ -134,27 +96,13 @@ def _to_date(value: Any) -> date:
 
 
 def _depends_hash(depends_on: Iterable[str]) -> str:
-    """12-hex fingerprint of the ``depends_on()`` **declaration**.
-
-    Not the same object as :func:`research.factor_runtime.compute_depends_hash`
-    — that one fingerprints the input ``data`` dict and is what keys the
-    runtime cache.  :func:`write_metadata`'s fixed signature carries no
-    ``data``, so the declaration is all it can pin; a changed dependency set
-    still changes this hash (and, per the versioning rule, also bumps
-    ``version``).
-    """
+    """计算 ``depends_on()`` 声明列表的 12 位 MD5 指纹（用于 metadata 标识，不同于运行时数据内容指纹）。"""
     raw = "|".join(sorted(str(d) for d in depends_on))
     return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def _write_year(chunk: pd.DataFrame, path: Path, factor_name: str) -> None:
-    """Persist one year file through the atomic writer.
-
-    :func:`data.storage_ops.write_parquet_atomic` owns the whole crash-safety
-    story: validate against :func:`factor_schema`, then ``FileLock`` → write
-    ``{path}.tmp`` → ``fsync`` → ``os.replace``.  A crash or disk-full leaves
-    neither a half-written target nor a stray ``.tmp``.
-    """
+    """通过 ``data.storage_ops.write_parquet_atomic`` 原子写入单年 Parquet 文件。"""
     write_parquet_atomic(
         chunk,
         path,
@@ -171,22 +119,11 @@ def _write_year(chunk: pd.DataFrame, path: Path, factor_name: str) -> None:
 
 
 def write_metadata(out_dir, factor, result) -> None:
-    """Write ``metadata.json`` describing a factor version directory.
+    """写入描述因子版本目录的 ``metadata.json``。
 
-    Identity fields come from *factor* (``name / version / description /
-    category / frequency / asset_types / depends_on``).  ``depends_hash`` is
-    the declaration fingerprint of ``depends_on()`` — see :func:`_depends_hash`
-    for why it is not the runtime cache key's data fingerprint.
-
-    ``date_range`` / ``row_count`` / ``file_count`` describe the parquet files
-    **currently in *out_dir***, so after an append the counts are the
-    directory's rather than the batch's.  *result* (the frame just recorded)
-    supplies them only when the directory holds no parquet yet.  ``date_range``
-    is ISO ``YYYY-MM-DD`` — the natural serialisation of a ``DATE`` column.
-
-    ``created_at`` is preserved across rewrites; ``updated_at`` is now.  The
-    evaluation block (``eval`` / ``attempts`` / ``attempt_log``) is preserved
-    too — see below.
+    ``date_range`` / ``row_count`` / ``file_count`` 优先统计目录内现存 Parquet 文件，
+    尚无文件时回退至 ``result``；跨次重写自动保留 ``created_at`` 与 ``eval`` /
+    ``attempts`` / ``attempt_log`` 等评估块。
     """
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -199,7 +136,6 @@ def write_metadata(out_dir, factor, result) -> None:
         except (json.JSONDecodeError, OSError):
             previous = {}
 
-    # Coverage from what is on disk; fall back to the recorded frame.
     files = sorted(out_path.glob("*.parquet"))
     if files:
         dates = pd.concat(
@@ -234,9 +170,7 @@ def write_metadata(out_dir, factor, result) -> None:
         "file_count": len(files),
         "compression": COMPRESSION,
     }
-    # The evaluation record (S11 factor_evaluation) survives data rewrites the
-    # same way created_at does — a daily append must not wipe the eval block
-    # that registration wrote.
+    # 保留既有的评估记录块，避免日常追加写入覆盖注册评估信息
     for extra in ("eval", "attempts", "attempt_log"):
         if extra in previous:
             meta[extra] = previous[extra]
@@ -246,26 +180,12 @@ def write_metadata(out_dir, factor, result) -> None:
 
 
 # ---------------------------------------------------------------------------
-# save
+# 保存写入
 # ---------------------------------------------------------------------------
 
 
 def _normalise(result: pd.DataFrame, factor_name: str) -> pd.DataFrame:
-    """Fold *result* onto the on-disk contract and reject what it will not take.
-
-    The column set is read off :func:`factor_schema` so it cannot drift from
-    the ``data/`` authority.  Dates are parsed to ``datetime64`` here — that
-    is what makes the year split a ``dt.year`` rather than a ``str[:4]`` —
-    duplicate ``(date, ticker)`` rows are collapsed to the first (the
-    semantics ``save_factor_full`` was reviewed on), and then
-    :func:`factor_schema` is run as the gate: ``NaT`` is refused by
-    ``nullable=False``, unparseable strings raise, and the ``(ticker, date)``
-    primary key is enforced.
-
-    The returned frame keeps ``datetime64`` dates for partitioning;
-    :func:`data.storage_ops.write_parquet_atomic` re-validates and narrows to
-    ``DATE`` on the way to disk.  The caller's ``result`` is never mutated.
-    """
+    """校验并规范化输出表：检查列名、解析日期为 ``datetime64``、按 ``(date, ticker)`` 去重排序并校验 schema（不修改原 DataFrame）。"""
     schema = factor_schema(factor_name)
     expected = list(schema.columns)
     if set(result.columns) != set(expected):
@@ -283,25 +203,15 @@ def _normalise(result: pd.DataFrame, factor_name: str) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-    schema.validate(out)  # gate only — the frame below keeps datetime64
+    schema.validate(out)  # 仅做准入校验，返回帧保留 datetime64 以供按年拆分
     return out
 
 
 def save_factor_append(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None:
-    """Append *result* to the factor's current version directory.
+    """增量追加写入因子当前版本目录。
 
-    Incremental daily production: rows are split by the year of their parsed
-    ``date`` (``dt.year``), each year file is concatenated with what is already
-    on disk and then ``drop_duplicates(["date", "ticker"])`` keeps the **first**
-    row — values already stored win over the incoming batch.  Corrections go
-    through :func:`save_factor_full`, never through a mixed append
-    (factor_storage.md write-mode trigger table).
-
-    *result* is validated before any directory is created, so a rejected write
-    leaves no empty version directory behind — :func:`load_factor` reports
-    "not found" rather than a silent empty frame.  Each year file is written
-    through :func:`data.storage_ops.write_parquet_atomic`, so a failed write
-    never truncates what was already stored.
+    先校验 ``result`` 再建目录；按年份拆分并与盘上既有文件合并，按 ``(date, ticker)``
+    去重并保留已存旧值（数据修正须走 ``save_factor_full``），最后更新 ``metadata.json``。
     """
     data = _normalise(result, factor.name)
     out_dir = _version_dir(base_dir, factor.name, factor.version)
@@ -328,20 +238,10 @@ def save_factor_append(factor, result, base_dir=str(DATA_ROOT / "factors")) -> N
 
 
 def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None:
-    """Write *result* as the complete contents of the current version directory.
+    """全量覆盖写入当前版本目录（不影响其他版本目录）。
 
-    Unlike :func:`save_factor_append` there is no concatenation: the directory
-    becomes exactly *result* — a narrowed recompute does not leave earlier
-    years behind.  Sibling version directories are untouched; a new version is
-    a new directory.  Duplicate ``(date, ticker)`` keys in *result* are
-    collapsed to the first row before writing, so a buggy ``compute()`` cannot
-    persist ambiguous keys.
-
-    *result* is validated before any directory is created, so a rejected write
-    leaves no empty version directory behind.  Stale year files are removed
-    **after** every replacement has been written: a crash, disk-full or kill
-    mid-loop therefore leaves the previous years intact rather than a subset
-    that :func:`load_factor` would report as complete history.
+    先校验 ``result`` 再建目录，全部新年份文件原子写入完成后再删除过期年份文件，
+    防止中途异常导致目录残留不完整历史。
     """
     data = _normalise(result, factor.name)
     out_dir = _version_dir(base_dir, factor.name, factor.version)
@@ -357,7 +257,7 @@ def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> Non
             written.add(path)
         data = data.drop(columns=["_year"])
 
-    # Only now — every replacement exists — is a year file allowed to go.
+    # 所有新文件落盘后再清理旧年份文件，确保异常中断不破坏完整历史
     for stale in sorted(out_dir.glob("*.parquet")):
         if stale not in written:
             stale.unlink()
@@ -366,21 +266,17 @@ def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> Non
 
 
 # ---------------------------------------------------------------------------
-# load
+# 读取加载
 # ---------------------------------------------------------------------------
 
 
 def load_factor(
     name, start, end, version="1.0", base_dir=str(DATA_ROOT / "factors")
 ) -> pd.DataFrame:
-    """Read one factor's raw values over ``[start, end]`` (inclusive).
+    """按 ``[start, end]``（含端点）读取单因子原始值。
 
-    Only the year files that can overlap the window are read; rows are then
-    clipped on the parsed dates.  ``date`` comes back as ``datetime.date`` —
-    the ``date32`` convention, matching :func:`data.data_api.load_bars` so the
-    two join without conversion.  Returns an empty frame with the contract
-    columns when the window holds no data.  A missing version directory is an
-    error — a typo'd factor name should not look like "no data in range".
+    仅读取覆盖该区间的年份文件，返回的 ``date`` 列为 ``datetime.date``（可直接与
+    ``load_bars`` 连接）；版本目录不存在时抛出 ``FileNotFoundError``。
     """
     out_dir = _version_dir(base_dir, name, version)
     if not out_dir.is_dir():
@@ -413,13 +309,7 @@ def load_factor_matrix(
     version="1.0",
     base_dir=str(DATA_ROOT / "factors"),
 ) -> pd.DataFrame:
-    """Build the logical wide table ``(date, ticker, f1, f2, ...)``.
-
-    One :func:`load_factor` per name, outer-joined on ``(date, ticker)`` —
-    the cross-factor frame a combiner or evaluator wants, matching the
-    company's GetViewer shape.  Missing values for a factor that has no row on
-    a key stay ``NaN``; nothing is filled here.
-    """
+    """读取多因子并按 ``(date, ticker)`` 外连接为宽表 ``(date, ticker, f1, f2, ...)``，缺失值保持 ``NaN``。"""
     if not names:
         raise ValueError("names must be a non-empty list of factor names")
 

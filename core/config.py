@@ -1,8 +1,7 @@
-"""Platform configuration — three-layer load + merge + type-check only.
+"""平台配置模块：三层加载、合并与校验。
 
-No config centre, no hot reload, no runtime rewrite (design/core/config.md).
-Pure loading and merging; ``load_secrets`` output never enters
-``config_snapshot`` and is never printed (red line 8).
+无配置中心、热加载与运行时改写（见 ``design/core/config.md``）；
+``load_secrets`` 返回值严禁写入 ``config_snapshot`` 或打印输出。
 """
 
 import hashlib
@@ -16,25 +15,18 @@ DATA_ROOT = Path(
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python 3.10
+except ModuleNotFoundError:  # Python 3.10 兼容
     import tomli as tomllib
 
 
 def load_config(path: str = "config/config.toml") -> dict:
-    """Layer 1 — global TOML config.
-
-    Raises ``FileNotFoundError`` if *path* does not exist (no silent fallback).
-    """
+    """Layer 1：加载全局 TOML 配置；文件不存在时直接抛出 ``FileNotFoundError``。"""
     with open(path, "rb") as f:
         return tomllib.load(f)
 
 
 def load_strategy_config(alpha_type_id: str, global_cfg: dict | None = None) -> dict:
-    """Layer 2 — strategy-level TOML config merged over global.
-
-    Merge semantics: strategy overrides global on same-named keys,
-    i.e. ``{**global, **strategy}``.
-    """
+    """Layer 2：加载策略级 TOML 并覆盖合并到全局配置（同名键以策略配置为准）。"""
     path = f"config/strategies/{alpha_type_id}.toml"
     with open(path, "rb") as f:
         strategy = tomllib.load(f)
@@ -42,11 +34,7 @@ def load_strategy_config(alpha_type_id: str, global_cfg: dict | None = None) -> 
 
 
 def load_secrets(path: str = "config/.env") -> dict:
-    """Layer 3 — sensitive ``.env`` key-value pairs.
-
-    The returned dict is **never** included in ``config_snapshot`` and
-    **never** printed (red line 8).
-    """
+    """Layer 3：加载 ``.env`` 敏感键值对；返回值严禁进入 ``config_snapshot`` 或被打印。"""
     secrets: dict[str, str] = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -58,11 +46,7 @@ def load_secrets(path: str = "config/.env") -> dict:
 
 
 def config_snapshot(path: str) -> str:
-    """Return ``f"{path}@{file_hash}"`` for run records.
-
-    Hashes the file at *path* with SHA-256.  This function never reads
-    ``.env`` and never includes secret values in its output (red line 8).
-    """
+    """计算配置文件的 SHA-256 摘要并生成 ``f"{path}@{file_hash}"`` 运行记录标识，绝不读取 ``.env``。"""
     with open(path, "rb") as f:
         file_hash = hashlib.sha256(f.read()).hexdigest()
     return f"{path}@{file_hash}"

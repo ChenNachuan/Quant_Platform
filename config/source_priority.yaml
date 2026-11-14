@@ -1,33 +1,23 @@
-# Source arbitration table (QUANT-40, S10-T1; expanded for 51 asset/ tables).
-# Spec: docs/design/data/ingestion.md + docs/design/data/storage_schema.md.
+# 多数据源仲裁配置表（覆盖 51 张规范资产表，设计见 docs/design/data/ingestion.md 与 storage_schema.md）。
 #
-# One entry per canonical asset table: priority[0] is the primary source (the
-# only one that writes the asset layer); the rest are backups that cross-check
-# and backfill gaps, never mix-write.  field_override names the source a field
-# is always taken from, regardless of row priority, and must appear in that
-# table's priority list.  Switching a primary is a reviewed commit here.
+# priority[0] 为唯一写入资产层的主数据源，其余仅用于交叉校验与缺口回补（严禁混写）；
+# field_override 指定单字段强制数据源（须在对应表的 priority 列表中）；切换主源须经提交评审。
 #
-# Active source adapters (data/adapters/__init__.py):
-#   tushare | qdc | amazingdata | straightflush
-# (akshare remains registered only for legacy tests/fallback, retired from
-#  default priority lists.)
+# 当前活跃适配器（data/adapters/__init__.py）：tushare | qdc | amazingdata | straightflush
+# （akshare 仅保留用于历史测试与兜底，已退出默认优先级列表）
 
-# ---------------------------------------------------------------------------
-# 1. Calendar (1)
-# ---------------------------------------------------------------------------
+# --- 1. 交易日历 (1) ---
 cn_calendar:
   priority: [tushare, qdc, straightflush, amazingdata]
 
-# ---------------------------------------------------------------------------
-# 2. A-share Stock Core & Status (6)
-# ---------------------------------------------------------------------------
+# --- 2. A 股基础信息与行情状态 (6) ---
 cn_stock_basic:
   priority: [tushare, amazingdata, straightflush]
 
 cn_stock_bars_daily:
   priority: [tushare, qdc, amazingdata, straightflush]
   field_override:
-    adjfactor: tushare      # adjfactor baseline & split precision from tushare
+    adjfactor: tushare      # 复权因子基准与拆股精度以 tushare 为准
 
 cn_stock_bars_minute:
   priority: [qdc, tushare, amazingdata]
@@ -35,7 +25,7 @@ cn_stock_bars_minute:
 cn_stock_fundamental:
   priority: [tushare, qdc, straightflush]
   field_override:
-    pe_ttm: tushare         # tushare's PE_TTM definition is the reference
+    pe_ttm: tushare         # PE_TTM 口径以 tushare 为准
 
 cn_stock_daily_status:
   priority: [tushare, qdc, amazingdata]
@@ -43,9 +33,7 @@ cn_stock_daily_status:
 cn_stock_corporate_actions:
   priority: [tushare, qdc, amazingdata]
 
-# ---------------------------------------------------------------------------
-# 3. Stock Index / Industry / Concept (4)
-# ---------------------------------------------------------------------------
+# --- 3. 股票指数 / 行业 / 概念 (4) ---
 cn_stock_index_basic:
   priority: [tushare, qdc, straightflush, amazingdata]
 
@@ -58,9 +46,7 @@ cn_stock_industry:
 cn_stock_index_weights:
   priority: [tushare, qdc, amazingdata]
 
-# ---------------------------------------------------------------------------
-# 4. Stock Fundamental PIT (7)
-# ---------------------------------------------------------------------------
+# --- 4. 个股基本面 PIT 财务数据 (7) ---
 cn_stock_fundamental_income:
   priority: [tushare, qdc, amazingdata, straightflush]
 
@@ -80,11 +66,9 @@ cn_stock_fundamental_earnings:
   priority: [tushare, qdc, amazingdata]
 
 cn_stock_fundamental_consensus:
-  priority: [qdc, tushare]   # QDC cn_estimates delivers PIT daily consensus
+  priority: [qdc, tushare]   # QDC cn_estimates 提供 PIT 日频一致预期
 
-# ---------------------------------------------------------------------------
-# 5. Stock Special Flows / Sentiment / Chips (9)
-# ---------------------------------------------------------------------------
+# --- 5. 资金流 / 情绪 / 筹码特征 (9) ---
 cn_stock_auction:
   priority: [tushare, qdc, straightflush]
 
@@ -112,9 +96,7 @@ cn_stock_limit_pool:
 cn_stock_chips_perf:
   priority: [tushare, qdc]
 
-# ---------------------------------------------------------------------------
-# 6. Stock Holders & Capital Events — #29 Split Tables (8)
-# ---------------------------------------------------------------------------
+# --- 6. 股东与股本变动拆分表 (8) ---
 cn_stock_holder_num:
   priority: [tushare, qdc, amazingdata]
 
@@ -139,18 +121,14 @@ cn_stock_pledge:
 cn_stock_research_visits:
   priority: [tushare, qdc]
 
-# ---------------------------------------------------------------------------
-# 7. Stock Tick & L2 (2)
-# ---------------------------------------------------------------------------
+# --- 7. 个股 Tick 与 L2 行情 (2) ---
 cn_stock_tick:
   priority: [qdc, amazingdata]
 
 cn_stock_tick_l2:
   priority: [qdc, amazingdata]
 
-# ---------------------------------------------------------------------------
-# 8. Independent ETF Domain (5, cn_etf_pcf excluded)
-# ---------------------------------------------------------------------------
+# --- 8. 独立 ETF 域 (5，不含 cn_etf_pcf) ---
 cn_etf_basic:
   priority: [tushare, amazingdata, straightflush]
 
@@ -168,9 +146,7 @@ cn_etf_fundamental:
 cn_etf_tick:
   priority: [qdc, amazingdata]
 
-# ---------------------------------------------------------------------------
-# 9. OTC & Listed Public Mutual Funds (5)
-# ---------------------------------------------------------------------------
+# --- 9. 场外及场内公募基金 (5) ---
 cn_fund_basic:
   priority: [tushare, straightflush]
 
@@ -186,9 +162,7 @@ cn_fund_dividend:
 cn_fund_portfolio:
   priority: [tushare, qdc, straightflush]
 
-# ---------------------------------------------------------------------------
-# 10. Futures (4)
-# ---------------------------------------------------------------------------
+# --- 10. 期货 (4) ---
 cn_futures_bars_daily:
   priority: [tushare, qdc, amazingdata, straightflush]
 
@@ -201,11 +175,8 @@ cn_futures_contract_specs:
 cn_futures_continuous:
   priority: [tushare, qdc, straightflush]
 
-# ---------------------------------------------------------------------------
-# Cross-check tolerance per field class (§41.3).  price and adjfactor are
-# absolute; volume, amount, pe_pb and default are relative.  Field -> class
-# mapping lives in data/ingestion.py (TOLERANCE_CLASS).
-# ---------------------------------------------------------------------------
+# --- 交叉校验容差（按字段类别，映射定义见 data/ingestion.py 的 TOLERANCE_CLASS）---
+# price 与 adjfactor 为绝对容差；volume、amount、pe_pb 与 default 为相对容差。
 cross_check:
   tolerances:
     price: 0.01

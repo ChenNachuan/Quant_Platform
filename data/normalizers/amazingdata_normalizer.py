@@ -1,15 +1,9 @@
-"""AmazingData normalizer — format conversion only (C3).
+"""AmazingData 标准化器（仅格式转换）。
 
-Maps AmazingData SDK columns to the unified bars_daily schema.
-
-Edge mappings (S2):
-- Suspension: ``suspend`` flag from source is preserved.  The §21.3 bug
-  (``DLS_Basedata_US`` writes ``adjfactor=1`` when ``suspend==1``) is
-  explicitly avoided: the normalizer never overwrites a source-provided
-  ``adjfactor`` based on the suspend flag.
-- Missing values: NaN in OHLC preserved as-is, never fabricated.
-- CA events: ``adjfactor`` from ``NAV_ADJ_FACTOR`` is mapped verbatim.
-  When absent (kline-only fetch), defaults to 1.0.
+边界处理：
+- 停牌：保留源数据 ``suspend`` 标志；严禁因 ``suspend==True`` 而覆写源端提供的 ``adjfactor``。
+- 缺失值：原样保留 OHLC 中的 NaN，不做填充。
+- 复权因子：优先采用 ``NAV_ADJ_FACTOR`` 并原样保留；若无复权字段则默认 ``1.0``。
 """
 
 from __future__ import annotations
@@ -20,7 +14,7 @@ from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
 
-# AmazingData kline / fund_nav → unified column names
+# AmazingData kline / fund_nav -> 统一列名
 _COLUMN_MAP: dict[str, str] = {
     "code": "ticker",
     "kline_time": "trade_date",
@@ -48,22 +42,11 @@ _NUMERIC_COLS = (
 
 
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-    """Format conversion only: column name mapping, type fixes.
-
-    Parameters
-    ----------
-    asset_type : str
-        Must be ``"stock"`` or ``"option"``.
-    raw_df : pd.DataFrame
-        Raw AmazingData frame (kline output, optionally merged with
-        ``NAV_ADJ_FACTOR`` / suspend flag).
-    """
+    """将 AmazingData 原始 DataFrame（``stock`` 或 ``option``）转换为统一 ``bars_daily`` 格式。"""
     if asset_type not in ("stock", "option"):
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
-    # Fix 4 + optional finding #53: coalesce adjfactor + NAV_ADJ_FACTOR before
-    # renaming to avoid duplicate columns. NAV_ADJ_FACTOR is the authoritative
-    # adjustment source (PR body §21.3), so it wins when both carry values.
+    # 重命名前合并两列复权因子，避免列名冲突；以 NAV_ADJ_FACTOR 为准
     df = raw_df.copy()
     if "adjfactor" in df.columns and "NAV_ADJ_FACTOR" in df.columns:
         df["adjfactor"] = df["NAV_ADJ_FACTOR"].fillna(df["adjfactor"])
@@ -73,30 +56,23 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=_COLUMN_MAP).copy()
 
-    # Type conversion: dates and numerics
     if "trade_date" in df.columns:
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
     for col in _NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Edge: suspension — source provides explicit flag; default False if absent.
     if "suspend" not in df.columns:
         df["suspend"] = False
     else:
         df["suspend"] = df["suspend"].fillna(False).astype(bool)
 
-    # Edge: CA events — NAV_ADJ_FACTOR merged by adapter; default 1.0 if absent.
-    # §21.3 bug guard: NEVER overwrite source adjfactor based on suspend value.
-    # If the source says adjfactor=0.85 on a suspended day, we keep 0.85.
+    # 保持源端 adjfactor 原值，不因停牌标志覆写为 1.0
     if "adjfactor" not in df.columns:
         df["adjfactor"] = 1.0
 
-    # Edge: limit flags not available from kline.
     df["is_limit_up"] = False
     df["is_limit_down"] = False
-
-    # DQC adds real quality_flag later; start clean.
     df["quality_flag"] = 0
 
     return df.reindex(columns=UNIFIED_COLUMNS)

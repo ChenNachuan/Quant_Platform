@@ -1,21 +1,8 @@
-"""Cross-sectional backtest main chain (for-loop time model).
+"""截面回测主链（按调仓日遍历时间模型）。
 
-Design authority: ``docs/design/research/cross_sectional_backtest.md`` (§26).
-Seams settled in QUANT-28 ``kb_snapshot`` (1)(4)(5) — implement exactly.
-
-``BaseCrossStrategy.on_rebalance`` produces target weights ONLY — no
-matching/accounting (those live in ``broker.submit_orders``, red line 4).
-Orders come from T3's :func:`execution.order_generation.generate_orders`
-(import, never re-derive).  Data access is :mod:`execution.market_data`
-(gap #10) — import the contract, never re-derive.
-
-Suspended (gap #1/#2 ruling A): ``cs_portfolio_sim``, ``simulate_single_trade``
-and ``rebalance()`` stay out of this module — execution semantics belong to
-the execution domain (``broker.submit_orders`` is the only fill/accounting
-path).  The PR description records the suspension and its reason.
-
-``rebalance_freq`` V1 gates ``"daily"``; ``"weekly"`` / ``"monthly"`` use a
-documented default (first trading day of each ISO week / calendar month).
+策略通过 ``BaseCrossStrategy.on_rebalance`` 仅输出目标权重，经由
+``execution.order_generation.generate_orders`` 生成订单并交由 ``broker.submit_orders``
+完成风控、撮合与记账，确保回测与实盘共用同一执行路径。
 """
 
 from __future__ import annotations
@@ -26,17 +13,14 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-# Data-entry contract (AC-5): import T3's market_data, never re-derive.
-# noqa: F401 — these are the contract surface this module commits to; the
-# actual calls happen inside generate_orders.  Importing them here is the
-# same-source assertion: this module never defines its own price lookup.
+# 统一复用 execution.market_data 行情接口，避免在此处重复实现
 from execution.market_data import (  # noqa: F401
     get_daily_volume,
     get_latest_price,
     get_prices,
 )
 
-# Order path (kb_snapshot 5): T3's generate_orders, never re-derive.
+# 统一复用 execution.order_generation 生成订单
 from execution.order_generation import generate_orders
 
 logger = logging.getLogger(__name__)
@@ -46,20 +30,12 @@ __all__ = [
     "CrossSectionalBacktest",
 ]
 
-# V1 rebalance frequency set.  weekly / monthly day-selection rules stay
-# open (knowledge_audit 6); the defaults below are documented, not gated.
+# 支持的调仓频率（周频/月频默认取各自首个交易日）
 REBALANCE_FREQS = ("daily", "weekly", "monthly")
 
 
 class BaseCrossStrategy(ABC):
-    """Cross-sectional strategy interface.
-
-    :meth:`on_rebalance` is called once per rebalance day and returns target
-    weights ``{ticker: weight}`` — **only** weights.  No order generation,
-    no matching, no fee or ledger logic here; the backtest engine routes the
-    weights through ``generate_orders`` -> ``broker.submit_orders`` (red
-    line 4: backtest and live share that one path).
-    """
+    """截面策略抽象基类，仅负责在调仓日输出目标权重 ``{ticker: weight}``。"""
 
     @abstractmethod
     def on_rebalance(
@@ -69,45 +45,22 @@ class BaseCrossStrategy(ABC):
         positions: dict,
         account,
     ) -> dict[str, float]:
-        """Return target weights for the given rebalance day.
-
-        Parameters
-        ----------
-        date:
-            Rebalance date.
-        bars:
-            ``load_bars`` long table (date / ticker / OHLCV).
-        positions:
-            Current positions — ``dict[str, Position]`` from the ledger when
-            available, else ``{}``.
-        account:
-            Duck-typed on ``.cash``, ``.holdings``, ``.nav`` (same surface
-            ``generate_orders`` expects).
-        """
+        """返回指定调仓日的目标权重字典，输入含行情长表 ``bars``、当前持仓与账户视图。"""
         ...
 
     @property
     def universe(self) -> list[str]:
-        """Tradable ticker universe.  Empty default — strategies override."""
+        """可交易标的池，默认空列表，由子类重写。"""
         return []
 
     @property
     def rebalance_freq(self) -> str:
-        """``"daily"`` | ``"weekly"`` | ``"monthly"``.  Default ``"daily"``."""
+        """调仓频率（``"daily"`` | ``"weekly"`` | ``"monthly"``），默认 ``"daily"``。"""
         return "daily"
 
 
 class CrossSectionalBacktest:
-    """Cross-sectional backtest engine: for-loop main chain over dates.
-
-    Per rebalance day the chain is::
-
-        on_rebalance  ->  generate_orders  ->  broker.submit_orders
-
-    — strategy produces weights, T3 turns them into orders, broker handles
-    risk + fill + ledger.  The same ``submit_orders`` call path is what live
-    uses (red line 4).
-    """
+    """截面回测引擎，串联 ``on_rebalance -> generate_orders -> broker.submit_orders`` 主链。"""
 
     def __init__(self, broker):
         self._broker = broker
@@ -118,34 +71,29 @@ class CrossSectionalBacktest:
         bars: pd.DataFrame,
         dates: list[date],
     ) -> list[dict]:
-        """Run the backtest over *dates*, rebalancing per *strategy.rebalance_freq*.
-
-        Returns one record per rebalance day:
-        ``{"date", "weights", "orders", "fills"}``.
-        """
+        """按 ``strategy.rebalance_freq`` 在 *dates* 上运行回测，返回每日 ``{"date", "weights", "orders", "fills"}`` 记录。"""
         freq = strategy.rebalance_freq
         rebalance_days = _select_rebalance_dates(dates, freq)
 
         results: list[dict] = []
         for day in rebalance_days:
-            # Finding 2: mark holdings to the day's close before sizing so
-            # generate_orders sees a current NAV (not a stale ledger balance).
+            # 下单前按当日收盘价市值重估持仓，确保净值实时准确
             _mark_to_market(self._broker, bars, day)
 
             account = _BrokerAccount(self._broker)
             positions = _extract_positions(self._broker)
 
-            # Strategy: target weights ONLY (AC-4 responsibility boundary).
+            # 策略仅返回目标权重
             weights = strategy.on_rebalance(day, bars, positions, account)
 
-            # Orders from T3 (import, never re-derive) (AC-5).
+            # 委托 T3 生成订单
             target_df = _weights_frame(weights)
             orders = generate_orders(target_df, account, account.nav, bars, day)
 
-            # Finding 1: advance the fill clock to T+1 before each submission.
+            # 提交前将撮合时钟推进至下一交易日（T+1）
             _advance_fill_clock(self._broker, day, dates)
 
-            # Fill / accounting through broker — the only path (red line 4).
+            # 经由 broker 统一完成撮合与账本更新
             fills = self._broker.submit_orders(orders)
 
             results.append(
@@ -161,17 +109,12 @@ class CrossSectionalBacktest:
 
 
 # ---------------------------------------------------------------------------
-# internals
+# 内部辅助组件
 # ---------------------------------------------------------------------------
 
 
 class _BrokerAccount:
-    """Duck-typed account surface over a :class:`Broker` for strategy + orders.
-
-    Provides ``cash`` / ``holdings`` / ``nav`` from the Broker ABC — the same
-    shape ``generate_orders`` and ``on_rebalance`` expect.  No fill or ledger
-    logic lives here.
-    """
+    """Broker 的鸭子类型账户适配器，提供 ``cash``、``holdings``、``nav`` 只读属性。"""
 
     def __init__(self, broker):
         self._broker = broker
@@ -190,23 +133,12 @@ class _BrokerAccount:
 
 
 def _extract_positions(broker) -> dict[str, int]:
-    """Current holdings from the broker's public surface (red line 4).
-
-    Derived from ``broker.get_holdings()`` — the same shape for SimBroker and
-    any generic Broker, so a strategy never sees a different book live vs
-    backtest.
-    """
+    """通过 ``broker.get_holdings()`` 提取当前持仓，保持实盘与回测视图一致。"""
     return broker.get_holdings()
 
 
 def _advance_fill_clock(broker, day: date, dates: list[date]) -> None:
-    """Set broker ``fill_date`` to T+1 and ``decision_date`` to T.
-
-    ``fill_date`` is the date fills execute at (open for ``t1_open``);
-    ``decision_date`` is the close used by ``decision_close``.  T+1 is the
-    chronologically next date in *dates* after *day* (minimum d > day),
-    falling back to calendar +1 day when *day* is the last.
-    """
+    """将 broker 的 ``decision_date`` 设为 *day*、``fill_date`` 推进至 *dates* 中下一交易日（末日回退 +1 天）。"""
     fill_date: date = day + timedelta(days=1)
     candidates = [d for d in dates if d > day]
     if candidates:
@@ -218,12 +150,7 @@ def _advance_fill_clock(broker, day: date, dates: list[date]) -> None:
 
 
 def _mark_to_market(broker, bars: pd.DataFrame, day: date) -> None:
-    """Mark held positions to the day's close before sizing (Finding 2).
-
-    Updates each ledger position's ``market_value`` via ``get_latest_price``
-    at the day's close; a ticker with no bar is left at its previous mark.
-    No-op for brokers without a ledger (their ``get_nav`` is their own).
-    """
+    """按当日收盘价更新账本持仓市值；无对应行情或无账本的 broker 跳过。"""
     account = getattr(broker, "account", None)
     if account is None:
         return
@@ -240,7 +167,7 @@ def _mark_to_market(broker, bars: pd.DataFrame, day: date) -> None:
 
 
 def _weights_frame(weights: dict[str, float]) -> pd.DataFrame:
-    """Target weights dict -> DataFrame with the T3 contract columns."""
+    """将目标权重字典转为 ``[ticker, weight]`` DataFrame。"""
     if not weights:
         return pd.DataFrame(columns=["ticker", "weight"])
     return pd.DataFrame(
@@ -250,13 +177,7 @@ def _weights_frame(weights: dict[str, float]) -> pd.DataFrame:
 
 
 def _select_rebalance_dates(dates: list[date], freq: str) -> list[date]:
-    """Pick rebalance days from *dates* by *freq*.
-
-    ``"daily"`` keeps every date.  ``"weekly"`` keeps the first date in each
-    ISO week; ``"monthly"`` the first in each calendar month.  (V1 documented
-    default — the day-selection rule for weekly/monthly is an open design
-    item, knowledge_audit 6.)
-    """
+    """按频率从 *dates* 中筛选调仓日（``weekly`` 取每周首日，``monthly`` 取每月首日）。"""
     if freq not in REBALANCE_FREQS:
         raise ValueError(
             f"rebalance_freq must be one of {REBALANCE_FREQS}, got {freq!r}"

@@ -1,4 +1,4 @@
-"""Strategy-facing loaders for the canonical futures data-lake layout."""
+"""面向策略的期货数据湖加载工具。"""
 
 from collections.abc import Iterable
 
@@ -8,7 +8,7 @@ from strategies.futures.alstm.config import DATA_ROOT
 
 
 def load_minute_bars(symbol: str, years: Iterable[int] | None = None) -> pd.DataFrame:
-    """Load and concatenate partitioned one-minute futures bars for a symbol."""
+    """按年份分区加载并拼接指定品种的 1 分钟 K 线数据。"""
     symbol = symbol.upper()
     selected_years = set(years) if years is not None else None
     paths = sorted((DATA_ROOT / "1min").glob(f"year=*/{symbol}_1min.parquet"))
@@ -38,5 +38,5 @@ def load_minute_bars(symbol: str, years: Iterable[int] | None = None) -> pd.Data
 
 
 def l2_month_dir(year: int, month: int):
-    """Return the canonical directory containing one month of L2 source files."""
+    """返回指定年月的 L2 行情源文件目录。"""
     return DATA_ROOT / "tick_l2" / f"year={year}" / f"month={month:02d}"

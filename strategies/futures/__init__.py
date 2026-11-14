@@ -1,1 +1,1 @@
-"""Futures strategies."""
+"""期货策略包。"""

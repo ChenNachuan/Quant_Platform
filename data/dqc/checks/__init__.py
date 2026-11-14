@@ -1,1 +1,1 @@
-# DQC check functions
+# DQC 检查函数集合

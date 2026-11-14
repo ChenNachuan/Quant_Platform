@@ -1,4 +1,4 @@
-"""Ops domain — scheduling, monitoring, attribution, alerting.
+"""运维域：任务调度、监控指标、归因报告与告警治理。
 
-Read-only observation of every other domain; nothing depends on ``ops/``.
+仅以只读方式观测其余各域，不被任何其他域反向依赖。
 """

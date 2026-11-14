@@ -1,31 +1,16 @@
-"""DQC engine — rule execution + the seven-step ingest core (S9-T3).
+"""DQC 引擎：规则执行与七步入库流程。
 
-Field authority: ``docs/design/data/dqc_runtime.md`` (entry, report contract)
-and ``docs/design/data/dqc_severity.md`` §37.6 (step order).  *What to check*
-is ``data/dqc/rules/*.yaml`` + ``data/dqc/checks/`` (S9-T2); *what to do about
-a finding* is :mod:`data.dqc.severity` (the §37.3 disposition table).
+入口 :func:`ingest_with_dqc` 按顺序执行（规则级升级优先于全局安全阀）：
+1. :func:`run_all_checks`（HARD + SOFT 规则）
+2. 收集行级 HARD ``drop`` 行（``partition`` 粒度扩展至整组 ``(ticker, trade_date)``）
+3. 判定拒收：(a) 单规则 ``escalation_threshold``；(b) 全局 ``max_hard_drop_rate`` 安全阀
+4. 剔除问题行
+5. 计算 ``quality_flag`` 位掩码
+6. 触发软告警（超过 ``soft_alarm_rate`` 时告警，永不拒收）
+7. 校验存储 Schema 并原子写入 Parquet
 
-Entry point: :func:`ingest_with_dqc` — steps of §37.6, with the rule-level
-escalation of §37.3 checked before the global valve (stricter first):
-
-1. :func:`run_all_checks` (HARD + SOFT)
-2. collect row-level HARD ``drop`` rows (partition granularity expands to
-   whole ticker×date groups)
-3. reject the batch on escalation: (a) per-rule ``escalation_threshold``,
-   (b) global ``max_hard_drop_rate`` valve
-4. drop the problem rows
-5. compute ``quality_flag``
-6. soft alarm above ``soft_alarm_rate`` (never rejects)
-7. validate against the storage schema and write parquet
-
-Every disposition lands on the report dual tables under ``{data_root}/dqc/``
-(:mod:`data.dqc.report`), a refused batch included — the report is written
-before quarantine so the refusal is on record even though no data lands.
-
-Check evaluation matches the S9-T2 test harness semantics exactly (failure
-mask ``True = failure``; a missing column fails every row; the rule filter
-narrows failures to its scope).  Aggregate verdicts (``__aggregate__``) judge
-the whole batch and are broadcast to every row before disposition.
+无论接收或拒收，均写入 ``{data_root}/dqc/`` 下的双报告表（拒收先写报告再进隔离区）。
+评估语义约定 ``True`` 表示校验失败；缺列时全行判错；聚合结果（``__aggregate__``）广播至全批。
 """
 
 from __future__ import annotations
@@ -77,8 +62,7 @@ logger = logging.getLogger(__name__)
 
 RULES_DIR: Path = Path(__file__).resolve().parent / "rules"
 
-# asset_type -> rules file.  asset_type is the table family the DQC runtime
-# knows (dqc_runtime.md: "asset_type | bars_daily 等 5 类").
+# asset_type -> 规则文件名映射
 ASSET_RULE_FILES: dict[str, str] = {
     "bars_daily": "bars_daily.yaml",
     "bars_minute": "bars_minute.yaml",
@@ -87,9 +71,7 @@ ASSET_RULE_FILES: dict[str, str] = {
     "reference": "reference.yaml",
 }
 
-# Ruleset version stamped on every CheckResult.  The YAMLs carry no version
-# key, so the engine owns the number: patch = thresholds, minor = rules
-# added, major = semantics changed (docs/design/data/dqc_rules.md).
+# 规则集版本号（YAML 中不维护版本字段，由引擎统一标记：patch 改阈值，minor 增规则，major 改语义）
 RULE_VERSION = "1.0.0"
 
 AGGREGATE_INDEX = "__aggregate__"
@@ -105,27 +87,24 @@ DIMENSION_BY_PREFIX = {
 
 @dataclass
 class CheckResult:
-    """One rule's verdict over one batch (dqc_runtime.md report contract).
+    """单条规则对单批次的检查结果。
 
-    ``failing_rows`` is always row-aligned to the input frame — aggregate
-    verdicts are broadcast.  ``action_taken`` is the disposition applied to
-    the rows: ``drop`` / ``flag`` / ``pass`` (batch gates touch no row; the
-    batch outcome is recorded on the summary table); ``reject_batch`` is
-    written by the report writer when the batch was refused.
+    ``failing_rows`` 始终对齐输入行（聚合结论会广播到每行）；``action_taken`` 为
+    ``pass`` / ``drop`` / ``flag`` / ``reject_batch``。
     """
 
     rule_id: str
     rule_name: str
     dimension: str  # completeness | legality | consistency | timeliness
-    severity: str  # HARD | SOFT (the rule's YAML class)
+    severity: str  # HARD | SOFT
     action_taken: str  # pass | drop | flag | reject_batch
     total_rows: int
-    failing_rows: pd.Series  # bool, indexed like the input frame
+    failing_rows: pd.Series  # 布尔掩码，索引对齐输入 DataFrame
     failing_rate: float
     sample_tickers: list[str]
     sample_values: list[Any]
     rule_version: str = RULE_VERSION
-    data_date: date | None = None  # batch business date stamped by run_all_checks
+    data_date: date | None = None
 
     @property
     def failing_count(self) -> int:
@@ -134,21 +113,16 @@ class CheckResult:
 
 @dataclass
 class BatchEvaluation:
-    """Steps 2-3 and 5-6 of §37.6 over one batch — the fate before any write.
+    """批次写入前的综合评估结论（对应七步流程第 2–3、5–6 步）。
 
-    ``batch_status`` / ``reject_reason`` decide what ingest does next:
-    ``rejected`` quarantines the batch whole (nothing lands), anything else
-    drops ``rows_to_drop`` and writes.  ``quality_flag`` is computed once on
-    the full input frame (row-aligned); ingest slices it for the clean frame
-    and the summary accounting reads ``flagged_count`` (kept rows with a bit
-    set).  ``warnings`` records the alarms that fired (escalated flag-rule
-    alarm, soft alarm) — they never reject.
+    ``batch_status == "rejected"`` 时整批进隔离区不落盘；否则剔除 ``rows_to_drop``
+    并保留 ``quality_flag``。``warnings`` 仅记录升级告警与软告警，不触发拒收。
     """
 
     hard_results: list[CheckResult]
     soft_results: list[CheckResult]
-    rows_to_drop: pd.Series  # bool, indexed like the input frame
-    quality_flag: pd.Series  # int64 bitmask, indexed like the input frame
+    rows_to_drop: pd.Series  # 布尔掩码，索引对齐输入 DataFrame
+    quality_flag: pd.Series  # int64 位掩码，索引对齐输入 DataFrame
     warnings: list[str]
     batch_status: str  # accepted | accepted_with_warnings | rejected
     reject_reason: str | None
@@ -159,7 +133,7 @@ class BatchEvaluation:
         return int(self.rows_to_drop.sum())
 
 
-# ── rule loading + evaluation (S9-T2 harness semantics) ────────────────
+# ── 规则加载与执行 ───────────────────────────────────────────────────────
 
 
 def _load_rules(asset_type: str) -> list[dict]:
@@ -175,7 +149,7 @@ def _load_rules(asset_type: str) -> list[dict]:
 
 
 def _resolve_function(func_path: str):
-    """Resolve ``checks.custom_checks.foo`` -> callable under ``data.dqc``."""
+    """将 ``checks.custom_checks.foo`` 解析为 ``data.dqc`` 下的可调用对象。"""
     full = "data.dqc." + func_path
     mod_name, fn_name = full.rsplit(".", 1)
     mod = importlib.import_module(mod_name)
@@ -183,7 +157,7 @@ def _resolve_function(func_path: str):
 
 
 def _apply_condition(series: pd.Series, condition: str, value) -> pd.Series:
-    """Return the boolean failure mask of one column under one condition."""
+    """计算单列在指定条件下的失败掩码。"""
     if condition == "gt":
         return series <= value
     if condition == "ge":
@@ -217,7 +191,7 @@ def _apply_condition(series: pd.Series, condition: str, value) -> pd.Series:
 
 
 def _evaluate_column_check(df: pd.DataFrame, rule: dict) -> pd.Series:
-    """Evaluate a declarative column_check.  Returns the failure mask."""
+    """执行声明式列检查，返回失败掩码。"""
     failures = pd.Series(False, index=df.index)
     value = rule["value"]
     for col in rule["columns"]:
@@ -239,7 +213,7 @@ def _eval_params(rule: dict, overrides: dict) -> dict:
 
 
 def _evaluate_custom_check(df: pd.DataFrame, rule: dict, overrides: dict) -> pd.Series:
-    """Call the rule's custom check; *overrides* are injected at call time."""
+    """调用自定义检查函数并注入 *overrides* 参数。"""
     fn = _resolve_function(rule["function"])
     return fn(df, **_eval_params(rule, overrides))
 
@@ -247,19 +221,13 @@ def _evaluate_custom_check(df: pd.DataFrame, rule: dict, overrides: dict) -> pd.
 def _evaluate_cross_check(
     rule: dict, daily_df: pd.DataFrame, minute_df: pd.DataFrame, overrides: dict
 ) -> pd.Series:
-    """Call a cross-table check (K06-K08): ``fn(daily, minute, **params)``."""
+    """调用跨表检查函数（K06–K08）。"""
     fn = _resolve_function(rule["function"])
     return fn(daily_df, minute_df, **_eval_params(rule, overrides))
 
 
 def _normalize_mask(raw: pd.Series, df: pd.DataFrame) -> pd.Series:
-    """Return *raw* as a bool mask aligned to every row of *df*.
-
-    Three shapes arrive from checks (S9-T2 contract): row-aligned, an
-    aggregate verdict of length 1 indexed ``__aggregate__`` (broadcast — the
-    rule judges the batch), and a ``(ticker, trade_date)`` MultiIndex for
-    cross checks (mapped onto the rows of the frame under test).
-    """
+    """将行级、``__aggregate__`` 聚合或 ``(ticker, trade_date)`` 跨表结果统一对齐到 *df* 行索引。"""
     raw = raw.fillna(False).astype(bool)
     if list(raw.index) == [AGGREGATE_INDEX]:
         return pd.Series(bool(raw.iloc[0]), index=df.index, dtype=bool)
@@ -271,7 +239,7 @@ def _normalize_mask(raw: pd.Series, df: pd.DataFrame) -> pd.Series:
 
 
 def _samples(df: pd.DataFrame, mask: pd.Series, rule: dict) -> tuple[list, list]:
-    """Failing tickers (<= 5) and failing values of the rule's first column."""
+    """抽取前 5 个失败标的与首列样例值。"""
     failing = df.loc[mask]
     tickers: list[str] = []
     if "ticker" in df.columns:
@@ -315,7 +283,7 @@ def _build_result(
     )
 
 
-# ── public API ─────────────────────────────────────────────────────────
+# ── 公共 API ─────────────────────────────────────────────────────────────
 
 
 def run_all_checks(
@@ -326,18 +294,9 @@ def run_all_checks(
     overrides: dict | None = None,
     cross_df: pd.DataFrame | None = None,
 ) -> tuple[list[CheckResult], list[CheckResult]]:
-    """Run the asset's rules; return ``(hard_results, soft_results)``.
+    """执行指定 *asset_type* 的全部规则，返回 ``(hard_results, soft_results)``。
 
-    Reference data (``calendar_dates``, ``universe``, ``today``,
-    ``ca_dates``, ``daily_tickers``, ...) is injected through *overrides*
-    and merged into every custom check's params — checks never read it from
-    disk.  A check whose dependency is missing fails closed (C01/C02/K10/
-    K11) or falls back to its documented default (``today`` -> wall clock).
-
-    Cross rules (K06-K08) need two frames and run only when *cross_df* is
-    given — they belong to the weekly cross-granularity batch (§36.10),
-    not to every single-date ingest.  *data_date* is the batch's business
-    date; it is recorded on the results, not read from the frame.
+    外部参考数据通过 *overrides* 注入；跨表规则（K06–K08）仅在传入 *cross_df* 时运行。
     """
     overrides = dict(overrides or {})
     hard: list[CheckResult] = []
@@ -367,18 +326,7 @@ def run_all_checks(
 
 
 def build_schema(table: str) -> DataFrameSchema:
-    """Return the storage schema of *table* — the pipeline's pre-write gate.
-
-    The DQC YAMLs declare check rules, not dtypes; frame structure is owned
-    by ``data/storage_schema.py`` (T1 authority).  Step 7 validates the clean
-    frame against this schema before writing, and ``write_parquet_atomic``
-    enforces the same schema at the storage layer.
-
-    (``docs/design/data/dqc_rules.md`` once sketched
-    ``build_schema(yaml_path) -> pandera.DataFrameSchema``; the delivered
-    rule YAMLs carry no dtype blocks, so schema-from-rules is inexpressible
-    and that sketch is superseded by this table-scoped form.)
-    """
+    """返回 *table* 对应的存储校验 Schema（由 ``data/storage_schema.py`` 统一定义）。"""
     if table not in SCHEMA:
         raise KeyError(
             f"no storage schema for table {table!r}; known: {sorted(SCHEMA)}"
@@ -391,7 +339,7 @@ def _landing_path(table: str, data_date: date, data_root: str | os.PathLike) -> 
 
 
 def _expand_to_partitions(df: pd.DataFrame, mask: pd.Series) -> pd.Series:
-    """Expand a failure mask to whole ``(ticker, trade_date)`` groups."""
+    """将失败行掩码扩展至完整的 ``(ticker, trade_date)`` 分组。"""
     keys = [c for c in ("ticker", "trade_date") if c in df.columns]
     if len(keys) < 2 or not mask.any():
         return mask
@@ -409,20 +357,17 @@ def evaluate_batch(
     cross_df: pd.DataFrame | None = None,
     batch_config: BatchRejectConfig | None = None,
 ) -> BatchEvaluation:
-    """Run the asset's rules and judge the batch (§37.6 steps 2-3, 5-6).
+    """运行全部规则并判定批次去留（不抛异常）。
 
-    Never raises: the caller reads ``batch_status`` / ``reject_reason`` and
-    decides.  Rule-level escalation is checked before the global valve
-    (stricter first) and the first rejecting escalation wins.  Flag-rule
-    escalations (K06-K08) and the soft alarm raise warnings only — SOFT
-    findings never reject (issue red line).
+    规则级升级阈值先于全局安全阀判定；``flag`` 规则（如 K06–K08）升级时仅记录告警，
+    SOFT 发现永不拒收批次。
     """
     config = batch_config or BatchRejectConfig()
     hard_results, soft_results = run_all_checks(
         df, data_date, asset_type, overrides=overrides, cross_df=cross_df
     )
 
-    # step 2 — collect row-level HARD drops (§37.3 granularity)
+    # 第 2 步：收集行级 HARD drop 行（partition 粒度扩展至整组）
     rows_to_drop = pd.Series(False, index=df.index)
     for r in hard_results:
         cfg = severity_config_for(r.rule_id)
@@ -433,11 +378,7 @@ def evaluate_batch(
             mask = _expand_to_partitions(df, mask)
         rows_to_drop = rows_to_drop | mask
 
-    # step 3a — rule-level escalation (double insurance with the valve).
-    # drop/pass rules above threshold reject the batch; flag rules (K06-K08)
-    # raise an escalated alarm and keep their rows.
-    # For partition-granularity rules the threshold bounds the post-expansion
-    # drop rate (issue #63: raw per-row rate can be orders of magnitude lower).
+    # 第 3a 步：单规则升级判定；partition 粒度按扩展后的实际丢弃比例计算
     reject_reason: str | None = None
     warnings: list[str] = []
     for r in hard_results + soft_results:
@@ -466,17 +407,17 @@ def evaluate_batch(
         reject_reason = f"rule_escalation:{r.rule_id}"
         break
 
-    # step 3b — global batch safety valve (a rule reason is stricter)
+    # 第 3b 步：全局安全阀判定
     drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
     if reject_reason is None and drop_rate > config.max_hard_drop_rate:
         reject_reason = (
             f"global_valve:hard_drop_rate {drop_rate:.4f} > {config.max_hard_drop_rate}"
         )
 
-    # step 5 — quality_flag bitmask (SOFT findings only), computed once
+    # 第 5 步：计算 SOFT 质量位掩码
     quality_flag = compute_quality_flag(df, soft_results)
 
-    # step 6 — soft alarm: never rejects
+    # 第 6 步：软告警判定（永不拒收）
     kept = ~rows_to_drop
     kept_rows = int(kept.sum())
     flagged_count = int((quality_flag[kept] != 0).sum()) if kept_rows else 0
@@ -520,7 +461,7 @@ def _reject_batch(
     reason: str,
     data_root: str | os.PathLike,
 ) -> NoReturn:
-    """Quarantine the raw batch and raise DQCBatchReject (§37.6)."""
+    """将原始批次写入隔离区并抛出 :class:`DQCBatchReject`。"""
     drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
     triggered = [r.rule_id for r in hard_results if r.failing_count]
     detail = {
@@ -556,25 +497,10 @@ def ingest_with_dqc(
     data_root: str | os.PathLike = str(DATA_ROOT),
     target_path: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
-    """Seven-step pre-load ingest (dqc_severity.md §37.6).  Returns df_clean.
+    """执行七步 DQC 入库流程并返回清洗后的 ``df_clean``。
 
-    HARD rows that must leave are dropped (or the batch is refused into
-    quarantine); SOFT findings only mark ``quality_flag``.  The returned
-    frame is the post-drop batch with ``quality_flag`` attached (helper
-    columns such as ``prev_close`` kept); the stored parquet is its
-    projection onto the storage schema of *table* (``asset_type`` when the
-    table name matches — ``bars_daily`` etc.  Reference sub-tables pass
-    ``table=`` explicitly.)
-
-    *batch_config* is the global valve (defaults
-    ``max_hard_drop_rate=0.20`` / ``soft_alarm_rate=0.50``).  *target_path*
-    overrides the ``PARTITION_PATHS`` landing spot for tables whose layout
-    is not a plain date partition (factor / reference writers).
-
-    Every disposition also lands on the report dual tables under
-    ``{data_root}/dqc/`` (:mod:`data.dqc.report`): a refused batch is
-    recorded (``batch_status='rejected'`` / ``action_taken='reject_batch'``)
-    *before* it goes to quarantine, an accepted one after the parquet write.
+    拒收时先写双报告表再移入隔离区并抛异常；接收时先按存储 Schema 投影校验
+    并写入 Parquet（普通按日期覆盖，月度分区表执行 upsert），随后记录 DQC 报告。
     """
     config = batch_config or BatchRejectConfig()
     table = table or asset_type
@@ -614,8 +540,7 @@ def ingest_with_dqc(
     )
 
     if rejected:
-        # the refusal is a fact even though no data lands: report first,
-        # then quarantine + raise
+        # 拒收前先写入报告，确保无数据落盘时仍有审计记录
         report.append_detail(detail_rows, data_root=data_root)
         report.append_summary(summary_row, data_root=data_root)
         _reject_batch(
@@ -628,15 +553,11 @@ def ingest_with_dqc(
             data_root=data_root,
         )
 
-    # step 4 — drop problem rows
+    # 第 4–5 步：剔除问题行并挂载质量位掩码
     df_clean = df.loc[~rows_to_drop].copy()
-
-    # step 5 — quality_flag bitmask (SOFT findings only)
     df_clean["quality_flag"] = evaluation.quality_flag[~rows_to_drop]
 
-    # step 6 (soft alarm) was judged in evaluate_batch — it never rejects
-
-    # step 7 — schema gate + atomic write
+    # 第 7 步：Schema 校验并原子落盘
     schema = build_schema(table)
     projected = df_clean[[c for c in schema.columns if c in df_clean.columns]]
     validated = schema.validate(normalize_missing_floats(projected, table))

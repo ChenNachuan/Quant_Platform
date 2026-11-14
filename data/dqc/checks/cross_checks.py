@@ -1,18 +1,11 @@
-"""DQC cross-table checks K06–K08: daily vs minute consistency.
+"""DQC 跨表检查 K06–K08（日线与分钟线一致性）。
 
-Each function takes ``(daily_df, minute_df, **params)`` and returns
-``pd.Series[bool]`` indexed by ``(ticker, trade_date)`` where **True = failure**.
+函数签名统一为 ``(daily_df, minute_df, **params) -> pd.Series[bool]``，
+索引为 ``(ticker, trade_date)``，``True`` 表示校验失败。
 
-These are the only rules that require two frames in one call.  Ingest-time vs
-weekly-batch scheduling is S9-T3's concern (KB pin K5).
-
-All three use ``how="left"`` on the daily frame so a ticker-day with no minute
-bars is flagged as a failure rather than silently dropped — except when the
-daily row is suspended (``suspend == True``), in which case zero minute bars
-is the expected state and the row is exempted.
-
-The minute timestamp column is ``datetime`` (schema name); ``timestamp`` is
-accepted as a legacy fallback.
+均以日线表为左表做 ``left`` 连接：无分钟线对应时判为失败，但停牌日
+（``suspend == True``）无分钟线属正常状态，予以豁免。分钟时间戳优先取
+``datetime`` 列，兼容旧列名 ``timestamp``。
 """
 
 from __future__ import annotations
@@ -28,7 +21,7 @@ def _dt_col(df: pd.DataFrame) -> str | None:
 
 
 def _suspended_mask(daily_df: pd.DataFrame) -> pd.Series:
-    """Boolean mask of suspended daily rows (all-False when no suspend column)."""
+    """返回日线停牌掩码（无 ``suspend`` 列时全为 False）。"""
     if "suspend" in daily_df.columns:
         return daily_df["suspend"].fillna(False).astype(bool)
     return pd.Series(False, index=daily_df.index)
@@ -40,7 +33,7 @@ def check_daily_vs_minute_close(
     tolerance: float = 0.01,
     **_,
 ) -> pd.Series:
-    """K06: daily close must equal last minute close within *tolerance*."""
+    """K06：日线收盘价与当日最后一根分钟线收盘价偏差须 <= *tolerance*。"""
     ts = _dt_col(minute_df) or "datetime"
     last_min = (
         minute_df.sort_values(ts)
@@ -54,7 +47,7 @@ def check_daily_vs_minute_close(
     diff = (merged["close"] - merged["minute_last_close"]).abs()
     missing = merged["minute_last_close"].isna()
     failed = missing | (diff > tolerance)
-    # Exempt suspended daily rows (no minute bars is expected).
+    # 豁免停牌日（无分钟线属正常）
     sus = _suspended_mask(daily_df)
     sus.index = daily_df.set_index(["ticker", "trade_date"]).index
     return (failed & ~sus.reindex(failed.index, fill_value=False)).rename("failed")
@@ -66,7 +59,7 @@ def check_daily_vs_minute_volume(
     max_rel_diff: float = 0.001,
     **_,
 ) -> pd.Series:
-    """K07: daily volume must equal sum of minute volumes (rel diff <= *max_rel_diff*)."""
+    """K07：日线成交量与当日分钟线成交量之和相对偏差须 <= *max_rel_diff*。"""
     min_sum = (
         minute_df.groupby(["ticker", "trade_date"])["volume"]
         .sum()
@@ -89,7 +82,7 @@ def check_daily_vs_minute_hl(
     minute_df: pd.DataFrame,
     **_,
 ) -> pd.Series:
-    """K08: daily high >= max(minute high) and daily low <= min(minute low)."""
+    """K08：日线最高价 >= 分钟线最大高价，且日线最低价 <= 分钟线最小低价。"""
     agg = minute_df.groupby(["ticker", "trade_date"]).agg(
         minute_high=("high", "max"),
         minute_low=("low", "min"),

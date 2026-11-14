@@ -1,29 +1,12 @@
-"""Daily report + Alpha-Beta attribution (``docs/design/ops/reporting.md``).
+"""日报与 Alpha-Beta 归因报告生成模块。
 
-Two report families land in :data:`REPORTS_DIR`:
+在 :data:`REPORTS_DIR` 下生成两类报告：
+- ``daily_{date}.md``：策略/系统 12 项指标表、当日告警列表与净值曲线图链接。
+- ``attribution_{alpha_type_id}_{quarter}.md``：Alpha-Beta 回归、三线解读与因子贡献拆解。
 
-* ``daily_{date}.md`` — the metrics table (strategy then system, monitoring's
-  12-metric snapshot), the day's alert list, and a link to the nav curve png.
-* ``attribution_{alpha_type_id}_{quarter}.md`` — the Alpha-Beta fit, the
-  design's three-line read of it, and the per-factor contribution breakdown.
-
-:func:`alpha_beta_attribution` is the design's single-factor regression
-(``r_p = α + β·r_b + ε``, §18.6) fitted with :func:`scipy.stats.linregress`.
-``alpha_annual`` is ``alpha_monthly × 12`` — the design's 月频×12 note is a
-simple multiplication, not compounding, so the return series is read as
-monthly.  The five returned fields are full-precision floats; the design
-snippet rounds them, but that is report formatting and lives in the renderers
-here rather than in the numeric result.
-
-The factor-contribution breakdown **reuses**
-:func:`research.factor_combiner.factor_contribution` (§63.6).  Reporting never
-re-implements it — that is the whole point of the seam.
-
-Nothing here collects metrics or evaluates alerts: those are
-:mod:`ops.monitoring` and :mod:`ops.alerting`.  This module renders their
-output and stops there.  ``scipy`` and ``matplotlib`` arrive with the declared
-``alphalens-reloaded`` dependency (which requires both) and are imported where
-they are used.
+``alpha_beta_attribution`` 基于月度收益率拟合 ``r_p = α + β·r_b + ε``，
+年化按 ``alpha_monthly × 12`` 计算，返回全精度浮点数（舍入仅在渲染层处理）。
+因子贡献拆解直接复用 :func:`research.factor_combiner.factor_contribution`。
 """
 
 from __future__ import annotations
@@ -46,13 +29,13 @@ __all__ = [
     "write_daily_report",
 ]
 
-#: Landing spot for both report families (``data/`` is runtime data).
+#: 日报与归因报告输出目录
 REPORTS_DIR = Path("logs/ops/reports")
 
-#: ``alpha_annual = alpha_monthly * ANNUALIZATION`` (design: 月频×12).
+#: 年化系数（月频 × 12）
 ANNUALIZATION = 12
 
-#: The design's display precision, used by the report tables only.
+#: 报告表格展示小数位数
 _ALPHA_DP = 4
 _BETA_DP = 3
 _T_ALPHA_DP = 2
@@ -60,14 +43,11 @@ _T_ALPHA_DP = 2
 _NO_VALUE = "—"
 
 
-# ---------------------------------------------------------------------------
-# Alpha-Beta single-factor regression
-# ---------------------------------------------------------------------------
+# --- Alpha-Beta 单因子回归 ---
 
 
 def _as_returns(values: Any, name: str) -> pd.Series:
-    """One float series, positional. The design regresses ``.values`` on
-    ``.values``, so the two inputs are paired by position, not by index."""
+    """转换为浮点序列；两输入序列按位置而非按索引对齐。"""
     try:
         series = pd.Series(values, dtype=float)
     except (TypeError, ValueError) as exc:
@@ -79,27 +59,10 @@ def alpha_beta_attribution(
     portfolio_returns: Any,
     benchmark_returns: Any,
 ) -> dict[str, float | None]:
-    """Fit ``r_p = α + β·r_b + ε`` and return the design's five fields.
+    """拟合单因子回归 ``r_p = α + β·r_b + ε`` 并返回 5 项全精度归因指标。
 
-    Parameters
-    ----------
-    portfolio_returns, benchmark_returns
-        Return series of equal length, read monthly (see the module docstring
-        for the ×12 convention).  Rows where either side is NaN are dropped.
-
-    Returns
-    -------
-    dict
-        ``alpha_monthly`` (the regression intercept), ``alpha_annual``
-        (``alpha_monthly × 12``), ``beta``, ``r_squared`` and ``t_alpha``
-        (``intercept / intercept_stderr``, ``None`` when the standard error is
-        zero or not finite).  Full precision — the report renderers round.
-
-    Raises
-    ------
-    ValueError
-        Unequal lengths, fewer than two usable observations, or a benchmark
-        with no variance (the regression is undefined against a flat line).
+    输入需为等长月度收益率序列（任一侧含 NaN 的行自动剔除）。
+    长度不等、有效样本不足 2 个或基准方差为 0 时抛出 ``ValueError``。
     """
     r_p = _as_returns(portfolio_returns, "portfolio_returns")
     r_b = _as_returns(benchmark_returns, "benchmark_returns")
@@ -131,13 +94,11 @@ def alpha_beta_attribution(
     }
 
 
-# ---------------------------------------------------------------------------
-# The design's three-line read of a fit (reporting.md §归因报告解读三线)
-# ---------------------------------------------------------------------------
+# --- 归因报告三线解读 ---
 
 
 def _finite(value: Any) -> float | None:
-    """A real number, or ``None`` for None / bool / non-numeric / non-finite."""
+    """返回有限浮点数；``None``、布尔或非有限值返回 ``None``。"""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -148,16 +109,7 @@ def _finite(value: Any) -> float | None:
 
 
 def interpret_attribution(attribution: Mapping[str, Any]) -> list[str]:
-    """The applicable interpretation lines for one Alpha-Beta fit.
-
-    The design's three lines are conditional, so this returns the ones whose
-    condition holds — a fit can raise the alpha line and the R² line at once,
-    and the two R² branches are mutually exclusive.  A field that is ``None``
-    (no computable source) triggers nothing.
-
-    ``alpha_annual > 8%`` is the too-good-to-be-true check and outranks the
-    优秀散户 band; R² splits at 0.7 / 0.5.
-    """
+    """生成适用的 Alpha-Beta 解读条目（Alpha 与 R² 条件独立判定，缺失字段跳过）。"""
     if not isinstance(attribution, Mapping):
         raise TypeError(
             f"attribution must be a mapping, got {type(attribution).__name__}"
@@ -179,26 +131,22 @@ def interpret_attribution(attribution: Mapping[str, Any]) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Factor contribution — the reuse seam (§63.6)
-# ---------------------------------------------------------------------------
+# --- 因子贡献表渲染 ---
 
 
 def _contribution_table(shares: pd.Series) -> list[str]:
-    """``| factor | share |`` rows, biggest absolute share first."""
+    """按因子贡献绝对值降序渲染 Markdown 表格行。"""
     ordered = shares.reindex(shares.abs().sort_values(ascending=False).index)
     return [
         f"| {name} | {float(share):.{_ALPHA_DP}f} |" for name, share in ordered.items()
     ]
 
 
-# ---------------------------------------------------------------------------
-# Renderers
-# ---------------------------------------------------------------------------
+# --- 报告渲染与落盘 ---
 
 
 def _day(date: Any) -> str:
-    """``YYYY-MM-DD`` for the report filename."""
+    """格式化报告日期为 ``YYYY-MM-DD``。"""
     if isinstance(date, str):
         return date
     if hasattr(date, "isoformat"):
@@ -238,7 +186,7 @@ def _alert_line(alert: Any) -> str:
 
 
 def _nav_x_axis(nav: pd.Series) -> Any:
-    """Dates when the index carries them; position otherwise."""
+    """优先使用时间索引作为横轴，否则退化为位置序号。"""
     if isinstance(nav.index, pd.DatetimeIndex):
         return nav.index
     if len(nav.index) and isinstance(nav.index[0], str):
@@ -247,7 +195,7 @@ def _nav_x_axis(nav: pd.Series) -> Any:
 
 
 def _render_nav_png(nav: pd.Series, path: Path) -> None:
-    """Write the nav curve png next to the report that links it."""
+    """在报告同目录生成净值曲线 PNG 图片。"""
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -268,16 +216,9 @@ def write_daily_report(
     alerts: Sequence[Any],
     nav: pd.Series | None = None,
 ) -> str:
-    """Write ``logs/ops/reports/daily_{date}.md`` and return its path.
+    """生成 ``logs/ops/reports/daily_{date}.md`` 并返回文件路径。
 
-    The report carries the design's four parts: the 策略指标 table, the 系统指标
-    table, the 告警 list, and the nav curve link.  Both tables read monitoring's
-    ``{"value", "status"}`` entries; nothing is recomputed here.
-
-    ``nav`` is the optional series behind the curve.  When it is given the png
-    is rendered beside the report so the link resolves; when it is not, the
-    section still carries the link to ``nav_{date}.png`` — the caller that owns
-    the series supplies it.
+    直接渲染已采集的指标表与告警列表；传入非空 ``nav`` 时同步绘制 ``nav_{date}.png``。
     """
     if not isinstance(metrics, Mapping):
         raise TypeError(f"metrics must be a mapping, got {type(metrics).__name__}")
@@ -326,12 +267,9 @@ def write_attribution_report(
     factor_returns: pd.DataFrame,
     factor_exposures: pd.DataFrame,
 ) -> str:
-    """Write ``attribution_{alpha_type_id}_{quarter}.md`` and return its path.
+    """生成 ``attribution_{alpha_type_id}_{quarter}.md`` 并返回文件路径。
 
-    Three sections: the Alpha-Beta fit (five fields), the per-factor
-    contribution breakdown, and the design's three-line read.  The breakdown is
-    :func:`research.factor_combiner.factor_contribution` called verbatim —
-    reporting does not own that arithmetic.
+    包含 Alpha-Beta 回归表、复用 ``factor_contribution`` 的因子贡献拆解表与解读结论。
     """
     attribution = alpha_beta_attribution(portfolio_returns, benchmark_returns)
     shares = factor_contribution(weights, factor_returns, factor_exposures)

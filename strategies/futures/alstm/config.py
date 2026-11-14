@@ -1,4 +1,4 @@
-"""Single source of truth for the futures ALSTM strategy defaults."""
+"""期货 ALSTM 策略默认参数与路径配置。"""
 
 from pathlib import Path
 from typing import Final

@@ -1,19 +1,12 @@
-"""Tonghuashun (Fuyao / StraightFlush) normalizer — format conversion only (C3).
+"""同花顺（扶摇 / StraightFlush）标准化器（仅格式转换）。
 
-Maps Fuyao REST API columns (``PriceBarItem`` / ``PriceSnapshotItem``) to the
-unified ``bars_daily`` schema per ``docs/data_source/StrightFlush/``:
-
-* ``thscode`` -> ``ticker`` (already ``NNNNNN.SH/SZ/BJ``; bare codes qualified
-  via :data:`core.asset_rules.PREFIX_EXCHANGE`).
-* ``date_ms`` (Unix ms in ``Asia/Shanghai``) -> ``trade_date`` (``datetime.date``).
-* ``open_price`` / ``high_price`` / ``low_price`` / ``close_price`` -> OHLC.
-* ``volume`` -> ``volume`` (already shares 股; NaN-preserving ``Int64``).
-* **Important unit/name distinction**: Fuyao ``PriceBarItem.turnover`` is
-  traded value (成交额 in CNY 元), NOT turnover rate (换手率)! Mapped to
-  ``amount``, whereas ``turnover_ratio_pct`` (from snapshot endpoints when
-  present) maps to ``turnover``.
-* CA events: raw adapter explicitly passes ``adjust="none"``; ``adjfactor``
-  defaults to ``1.0`` when absent and is never overwritten based on ``suspend``.
+映射规则：
+* ``thscode`` -> ``ticker``（裸代码按前缀补全交易所后缀）。
+* ``date_ms``（``Asia/Shanghai`` 毫秒时间戳）-> ``trade_date``（``datetime.date``）。
+* ``volume`` 原生单位即为股，转为可空 ``Int64``。
+* 字段辨析：扶摇 ``PriceBarItem.turnover`` 实际为成交额（元），应映射为 ``amount``；
+  快照字段 ``turnover_ratio_pct`` 才是换手率，映射为 ``turnover``。
+* 复权因子：适配器已显式设置 ``adjust="none"``，缺失时默认 ``1.0``，不因停牌覆写。
 """
 
 from __future__ import annotations
@@ -34,7 +27,7 @@ _COLUMN_MAP: dict[str, str] = {
     "low_price": "low",
     "close_price": "close",
     "volume": "volume",
-    "turnover": "amount",  # Fuyao 'turnover' is 成交额 in yuan, NOT turnover rate
+    "turnover": "amount",  # 扶摇 turnover 字段实为成交额（元），非换手率
     "turnover_ratio_pct": "turnover",
     "adjfactor": "adjfactor",
     "suspend": "suspend",
@@ -64,7 +57,7 @@ def _qualify_ticker(code: str) -> str:
 
 
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-    """Format conversion only: Fuyao columns/date_ms -> unified bars_daily."""
+    """将扶摇原始列名与 ``date_ms`` 转换为统一 ``bars_daily`` 格式。"""
     if asset_type not in _SUPPORTED_ASSET_TYPES:
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
@@ -82,8 +75,7 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     elif "date" in df.columns and "trade_date" not in df.columns:
         df = df.rename(columns={"date": "trade_date"})
 
-    # Prevent collision if a test/custom frame already contains 'amount' alongside
-    # Fuyao 'turnover'.
+    # 若输入同时含 amount 与扶摇 turnover，合并后移除 turnover 以免重命名冲突
     if "amount" in df.columns and "turnover" in df.columns:
         df["amount"] = df["amount"].fillna(df["turnover"])
         df = df.drop(columns=["turnover"])

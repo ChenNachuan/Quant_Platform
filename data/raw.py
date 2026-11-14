@@ -1,13 +1,7 @@
-"""Raw layer — original columns/values/types, zstd parquet landing (S3).
+"""原始层存储 — 保留源站原始列、值与类型的 zstd Parquet 落盘。
 
-``raw/{source}/{asset_type}/{date}.parquet`` — one file per day per source.
-Raw is written **before** DQC so the evidence chain is complete even for
-rejected batches.
-
-Cannot reuse ``storage_ops.write_parquet_atomic`` (it validates
-``SCHEMA[table]`` and raises ``KeyError`` on an unknown table).  Reuses
-``FileLock`` + ``PARQUET_WRITE_CONFIG`` (already zstd) + tmp→fsync→os.replace;
-skips schema validation.  Does NOT add a raw table to ``storage_schema.py``.
+路径规范：``raw/{source}/{asset_type}/{date}.parquet``。原始层必须在 DQC 前写入，确保被拦截批次同样保留证据链。
+不走 ``storage_ops.write_parquet_atomic``（跳过资产层 schema 校验），仅复用 ``FileLock`` 与 ``PARQUET_WRITE_CONFIG`` 原子写入。
 """
 
 from __future__ import annotations
@@ -35,7 +29,7 @@ def raw_path(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """Return the raw landing path for *source* / *asset_type* / *trade_date*."""
+    """返回 ``source / asset_type / trade_date`` 对应的原始层文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
     return Path(data_root) / RAW_ROOT / source / asset_type / f"{date_str}.parquet"
 
@@ -47,11 +41,7 @@ def save_raw(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """Write *df* to the raw landing path atomically (zstd, no schema validation).
-
-    Reuses ``FileLock`` + ``PARQUET_WRITE_CONFIG`` + tmp→fsync→os.replace.
-    Raw is source-original columns/values/types — no schema check (S3).
-    """
+    """以 zstd 压缩原子写入原始 DataFrame（不做 schema 校验，仅复用文件锁与临时文件替换）。"""
     target = raw_path(source, asset_type, trade_date, data_root)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
@@ -59,7 +49,7 @@ def save_raw(
     with FileLock(target):
         try:
             df.to_parquet(tmp, **PARQUET_WRITE_CONFIG)
-            # fsync for durability (QUANT-15 #5)
+            # 文件内容刷盘确保持久性
             fd = os.open(tmp, os.O_RDONLY)
             try:
                 os.fsync(fd)
@@ -73,7 +63,7 @@ def save_raw(
                 pass
             raise
 
-        # fsync parent dir for rename durability
+        # 父目录刷盘确保重命名持久化
         try:
             dir_fd = os.open(target.parent, os.O_RDONLY)
             try:
@@ -92,10 +82,7 @@ def load_raw(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> pd.DataFrame | None:
-    """Read the raw file for *source* / *asset_type* / *trade_date*.
-
-    Returns ``None`` if the file does not exist.
-    """
+    """读取指定原始层文件，不存在时返回 ``None``。"""
     path = raw_path(source, asset_type, trade_date, data_root)
     if not path.exists():
         return None
@@ -109,16 +96,7 @@ def cleanup_raw(
     today: date | None = None,
     config_path: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
-    """Delete expired raw ``.parquet`` files (S4: 365d from lifecycle.yaml).
-
-    Thin wrapper over ``storage_ops.cleanup_expired`` — no days literal in
-    Python.  ``.watermarks.json`` survives because ``parse_date_from_filename``
-    returns ``None`` for it (ac-2 asserts this explicitly).
-
-    Scope: passes ``subdir=raw`` so ``cleanup_expired`` only walks and deletes
-    within this subtree while keeping policy-relative paths rooted at
-    *data_root* (finding 1: scoping the deletion, not the returned list).
-    """
+    """清理过期原始层 ``.parquet`` 文件（依据 ``lifecycle.yaml`` 策略，仅清理 ``raw`` 子树并保留 ``.watermarks.json``）。"""
     raw_root = Path(data_root) / RAW_ROOT
     if not raw_root.exists():
         return []

@@ -1,21 +1,9 @@
-"""Target weights vs holdings -> the order list (design §66.2).
+"""目标权重与当前持仓对比生成订单列表。
 
-``target_weights -> compute_order_diff -> generate_orders``.  This module
-does not match, charge fees or run risk checks — those are the three steps
-inside ``broker.submit_orders()`` (S7-T4).  Order dicts are the shape
-``execution.risk_control`` already consumes:
-``{"ticker", "side" in {"BUY", "SELL"}, "shares", "limit_price"}``.
-
-Data access is :mod:`execution.market_data` (gap #10) and lot rounding is
-:func:`execution.portfolio_construction.floor_to_lot` — importing those here
-is the contract; re-deriving prices, volumes or lots in this module is a
-finding.  No ``research/`` import (gap #1 ruling A): the buy sort takes an
-optional ``scores`` mapping instead of walking back to the signal.
-
-Settled in the QUANT-27 gap #10 contract (pinned in issue metadata
-``kb_snapshot``): ``target_shares = floor_to_lot(w * nav / price)`` at the
-asof close, a ticker with no valid price is skipped, a zero diff produces no
-order, sells run before buys, and ``check_split_needed`` only warns.
+链路为 ``target_weights -> compute_order_diff -> generate_orders``。
+本模块不执行撮合、计费或盘前风控（均在 ``broker.submit_orders()`` 中完成），
+也不导入 ``research/`` 或 broker。行情读取复用 :mod:`execution.market_data`，
+整手取整复用 :func:`execution.portfolio_construction.floor_to_lot`。
 """
 
 from __future__ import annotations
@@ -46,22 +34,13 @@ def compute_order_diff(
     *,
     lot_size: int = 100,
 ) -> list[dict]:
-    """Target weights minus holdings -> BUY/SELL order dicts.
+    """根据目标权重与当前持仓的差额生成 BUY/SELL 订单列表。
 
-    ``target_shares = floor_to_lot(w * nav / price, lot_size)`` at the asof
-    close (raw, unadjusted — gap #10 rule 4).  A ticker with no valid price
-    is skipped entirely (suspended day: the order would be REJECTed at the
-    broker); ``diff == 0`` produces no order.  A held ticker absent from
-    *target_weights* is an exit (target weight 0).
-
-    *account* is duck-typed on ``.holdings`` (``Mapping[str, int]`` — shares
-    held per ticker).  ``SimAccount`` lands in S7-T4; this module never
-    imports broker (gap #1 ruling A).
-
-    Raises ``ValueError`` for NaN/inf/negative weights, a non-positive or
-    non-finite ``nav``, negative or fractional holdings, or a *target_weights*
-    frame without its ``ticker``/``weight`` columns.  Refusing is what makes
-    every order this returns a tradeable integer lot at a real price.
+    按 ``asof`` 当日原始收盘价计算 ``target_shares = floor_to_lot(w * nav / price, lot_size)``。
+    无有效价格（如停牌）的标的直接跳过；股数差为 0 不生成订单；
+    已有持仓但未出现在 ``target_weights`` 中的标的视为清仓（目标权重 0）。
+    ``account`` 通过 ``.holdings``（``Mapping[str, int]``）鸭子类型读取。
+    非法权重、非正或非有限 ``nav``、负/小数持仓及缺列均抛出 ``ValueError``。
     """
     _validate_lot_size(lot_size)
     nav = _validate_nav(nav)
@@ -100,18 +79,11 @@ def generate_orders(
     lot_size: int = 100,
     scores: Mapping[str, float] | None = None,
 ) -> list[dict]:
-    """Full chain: diff -> liquidity warnings (log only) -> sells before buys.
+    """完整订单生成：计算差额 -> 流动性告警（仅记录日志） -> 先卖后买排序。
 
-    Sells come first sorted by notional descending — free cash before
-    spending it (design §66.2) — then buys sorted by *scores* descending
-    when given, else by target weight descending.  Ties break on ticker
-    ascending so the list is deterministic.  Tickers present in the frame
-    with a zero weight are exits, not buys.
-
-    ``check_split_needed`` tags are **logged and ignored** otherwise: the
-    rule is warn-only (V1 does not split), so a tag never drops, blocks or
-    reorders an order.  *scores* is a plain mapping (NaN refused) — this
-    module never imports ``research/`` (gap #1 ruling A).
+    卖单按名义金额降序排列（先回笼资金），买单若提供 ``scores`` 则按得分降序，
+    否则按目标权重降序；同分按代码字典序保证结果确定性。
+    ``check_split_needed`` 仅记录告警，绝不拦截、丢弃或重排订单。
     """
     weights = _weight_map(target_weights)
     _validate_scores(scores)
@@ -153,14 +125,10 @@ def check_split_needed(
     *,
     max_volume_share: float = 0.01,
 ) -> list[str]:
-    """Warn tags for an order above *max_volume_share* of the day's volume.
+    """检查订单股数是否超过当日成交量的 ``max_volume_share``（仅告警，不拆单）。
 
-    Warn-only (design §66.2, V1 does not split): returns
-    ``["liquidity:<ticker>"]`` when ``shares`` exceeds 1% of that day's
-    shares, ``[]`` otherwise.  **Never raises, never drops or mutates
-    *order*** — a malformed order or a broken bars frame can only silence
-    the warning, never block a trade.  A missing or unusable volume yields
-    no tag (cannot judge).
+    超限时返回 ``["liquidity:<ticker>"]``，否则返回 ``[]``。
+    契约：绝不抛出异常、不丢弃且不修改 ``order``；缺量或异常输入仅静默返回 ``[]``。
     """
     try:
         ticker = order.get("ticker")
@@ -178,14 +146,12 @@ def check_split_needed(
             return []
         if shares > max_volume_share * volume:
             return [f"liquidity:{ticker}"]
-    except Exception:  # noqa: BLE001 — warn-only contract: never raise into the order path
+    except Exception:  # noqa: BLE001 — 仅告警契约：绝不向订单路径抛异常
         return []
     return []
 
 
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
+# --- 内部辅助函数 ---
 
 
 def _diff_tickers(
@@ -193,20 +159,14 @@ def _diff_tickers(
     target: dict[str, float],
     holdings: Mapping[str, int],
 ) -> list[str]:
-    """Frame order first (its sort feeds the buy ordering), then exits."""
+    """优先保持目标权重表行序，再追加需清仓的现有持仓。"""
     seen = set(target)
     extras = sorted(t for t in holdings if t not in seen)
     return list(target_weights["ticker"]) + extras
 
 
 def _weight_map(target_weights: pd.DataFrame) -> dict[str, float]:
-    """Validate *target_weights* and return ``{ticker: weight}`` in row order.
-
-    Schema: ``[ticker, weight]`` columns (extra columns tolerated).  A
-    duplicate ticker row is refused — two rows for one ticker have no single
-    target.  Weights must be finite and >= 0: NaN would size a garbage
-    order and a negative weight is not a long-only target (zero is an exit).
-    """
+    """校验 ``target_weights``（需含 ``ticker``/``weight``、无重复且权重有限非负）并返回映射。"""
     if not isinstance(target_weights, pd.DataFrame):
         raise TypeError(
             f"target_weights must be a pandas DataFrame, got "
@@ -236,7 +196,7 @@ def _weight_map(target_weights: pd.DataFrame) -> dict[str, float]:
 
 
 def _holdings_map(account) -> Mapping[str, int]:
-    """``account.holdings`` — duck-typed; values must be non-negative integers."""
+    """校验 ``account.holdings`` 为非负整数股数映射。"""
     holdings = getattr(account, "holdings", None)
     if not isinstance(holdings, Mapping):
         raise TypeError(

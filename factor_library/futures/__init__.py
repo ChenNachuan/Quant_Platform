@@ -3,9 +3,7 @@
 期货 L2 Tick 因子库
 
 从 indicator_py 迁移的高频因子，适配 Factor 基类接口，支持 DataLake 格式的 L2 五档数据。
-
-因子输出列注册表: FACTOR_REGISTRY
-批量计算: compute_all_l2_factors(df, params)
+因子输出列注册表: FACTOR_REGISTRY；批量计算: compute_all_l2_factors(df, params)。
 """
 
 import pandas as pd
@@ -13,7 +11,7 @@ import pandas as pd
 try:
     from factor_library.futures.base import L2TickFactor
 
-    # 导入所有因子模块（触发 @register_factor 装饰器自动注册）
+    # 导入各因子模块，触发 @register_factor 自动注册
     from factor_library.futures.quote_spread import (  # noqa: F401
         AvgQuote,
         BidAskSpread,
@@ -55,11 +53,10 @@ try:
         get_minute_factor_dict,
     )
 except ImportError:
-    # factor_library.base / factor_library.registry archived (M2);
-    # self-contained submodules like tl_intraday remain importable.
+    # factor_library.base / factor_library.registry 已归档（M2）；tl_intraday 等独立子模块仍可导入
     L2TickFactor = None
 
-# 因子输出列注册表 (与 indicator_py/all_factors.py 的 FACTOR_REGISTRY 对应)
+# 因子输出列注册表（对应 indicator_py/all_factors.py 中的 FACTOR_REGISTRY）
 FACTOR_REGISTRY: dict[str, list[str]] = {
     "bid_ask_spread": ["abspread"],
     "mid_price": ["mid_px", "mid_ema"],
@@ -136,16 +133,15 @@ def compute_all_l2_factors(
     timeframe: str = "tick",
     params: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    批量计算所有 L2 因子。
+    """批量计算所有 L2 因子。
 
     Args:
         data: L2 tick 数据 DataFrame（MultiIndex[timestamp, code]）
         timeframe: 时间框架
-        params: 可选参数字典，按因子名称 key，如 {"momentum": {"lag": 20}}
+        params: 可选参数字典，按因子名索引，如 {"momentum": {"lag": 20}}
 
     Returns:
-        所有因子列的 DataFrame
+        包含所有因子列的 DataFrame
     """
     from factor_library.registry import FactorRegistry
 
@@ -159,7 +155,7 @@ def compute_all_l2_factors(
 
         factor_params = params.get(factor_name, {})
         if not factor_params:
-            # 使用第一个参数组合作为默认值
+            # 未指定参数时取首个默认参数组合
             inst = factor_cls(timeframe=timeframe, para=factor_params)
             para_space = inst.generate_para_space()
             factor_params = para_space[0] if para_space else {}

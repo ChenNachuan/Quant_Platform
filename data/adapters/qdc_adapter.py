@@ -1,24 +1,14 @@
-"""QDCData source adapter — multi-asset market data via ``qdc-cli`` or HTTP REST.
+"""QDCData 数据源适配器（支持 ``qdc-cli`` 本地 Parquet 与在线 HTTP REST）。
 
-By default ``QdcAdapter`` operates in **CLI mode** (``mode="cli"``), using the
-local ``qdc-cli`` downloader and Parquet archives under
-``<download_root>/QDCData/<sku>/<subtable>/*.parquet`` without consuming
-online API daily row quotas.  Online HTTP REST (``https://data.qdc-data.com``)
-remains available when ``mode="http"`` or when ``api_key=`` is passed directly
-without ``local_dir=``.
+默认 ``mode="cli"``，读取 ``<download_root>/QDCData/<sku>/<subtable>/*.parquet``，
+不消耗在线 API 每日行数配额；传入 ``mode="http"`` 或仅提供 ``api_key=`` 时使用在线接口。
 
-Key protocol rules from ``docs/data_source/QDCData/``:
-
-* CLI mode discovers ``download_root`` lazily via ``qdc-cli config --json --quiet``
-  (or uses ``local_dir=`` / ``QDC_DATA_DIR``), optionally runs
-  ``qdc-cli get <sku> --years <YYYY> --json --quiet`` when the target year's
-  Parquet shards are not yet on disk, and probes ``qdc-cli whoami`` in
-  :meth:`health_check`.
-* Local Parquet reads filter ``ts`` (Unix ms) using ``Asia/Shanghai`` day
-  bounds — never ``TRY_CAST(ts AS DATE)`` which silently yields NULL in DuckDB.
-* HTTP mode authenticates via ``X-API-Key`` (``QDC_API_KEY``) and optional
-  ``X-Device`` (``QDC_DEVICE``), resolved lazily from env or ``config/.env``,
-  and queries ``GET /v1/query`` with ``format=parquet`` and cursor pagination.
+协议要点：
+* CLI 模式通过 ``qdc-cli config`` 解析目录（或使用 ``local_dir=`` / ``QDC_DATA_DIR``），
+  按需同步年度 Parquet 分片。
+* 本地 Parquet 按 ``Asia/Shanghai`` 日界毫秒过滤 ``ts``（避免 ``TRY_CAST(ts AS DATE)`` 返回 NULL）。
+* HTTP 模式从环境变量或 ``config/.env`` 读取 ``QDC_API_KEY`` / ``QDC_DEVICE``，请求
+  ``GET /v1/query``（``format=parquet`` + 游标分页）。
 """
 
 from __future__ import annotations
@@ -50,7 +40,7 @@ _DEFAULT_BASE_URL = "https://data.qdc-data.com"
 _DEFAULT_CLI_BIN = "qdc-cli"
 _DAY_MS = 86_400_000
 
-# Platform asset_type -> (QDC sku, default subtable or None)
+# 平台 asset_type -> (QDC sku, 默认子表名或 None)
 _ASSET_TO_SKU: dict[str, tuple[str, str | None]] = {
     "stock": ("cn_daily_full", None),
     "etf": ("cn_etf_1d", None),
@@ -81,7 +71,7 @@ def _beijing_day_ms_bounds(trade_date: date) -> tuple[int, int]:
 
 
 def _normalize_qdc_root(root: Path) -> Path:
-    """Resolve either ``<download_root>`` (containing ``QDCData/``) or ``QDCData/`` itself."""
+    """兼容传入 ``<download_root>`` 或 ``QDCData/`` 本身。"""
     if root.name == "QDCData":
         return root
     candidate = root / "QDCData"
@@ -91,7 +81,7 @@ def _normalize_qdc_root(root: Path) -> Path:
 
 
 class QdcAdapter(SourceAdapter):
-    """Fetch source-raw market data from QDCData via ``qdc-cli`` or HTTP API."""
+    """通过 ``qdc-cli`` 或 HTTP API 拉取 QDCData 原始行情。"""
 
     requests_per_second = 5.0
 
@@ -141,9 +131,7 @@ class QdcAdapter(SourceAdapter):
         self._synced_keys: set[tuple[str, int]] = set()
         self._cli_updated = False
 
-    # ------------------------------------------------------------------
-    # Public SourceAdapter API
-    # ------------------------------------------------------------------
+    # ── 公共接口 ──────────────────────────────────────────────────────────
     def list_asset_types(self) -> list[str]:
         return list(self._ASSET_TYPES)
 
@@ -172,7 +160,7 @@ class QdcAdapter(SourceAdapter):
         )
 
     def health_check(self) -> bool:
-        """Probe ``qdc-cli`` (config + whoami) / local directory, or HTTP ``/v1/datasets``."""
+        """CLI 模式检查本地目录或 ``qdc-cli whoami``，HTTP 模式检查 ``/v1/datasets``。"""
         if self._mode == "cli":
             return self._health_check_cli()
         return self._health_check_http()
@@ -184,9 +172,7 @@ class QdcAdapter(SourceAdapter):
             finally:
                 self._session = None
 
-    # ------------------------------------------------------------------
-    # CLI + Local Parquet mode
-    # ------------------------------------------------------------------
+    # ── CLI 与本地 Parquet 模式 ───────────────────────────────────────────
     def _resolve_cli_binary(self) -> str:
         bin_path = Path(self._cli_bin)
         if bin_path.is_file():
@@ -287,7 +273,7 @@ class QdcAdapter(SourceAdapter):
     def _maybe_sync_cli(
         self, data_root: Path, sku: str, subtable: str, trade_date: date
     ) -> None:
-        # Explicit local_dir / QDC_DATA_DIR acts as a direct local archive path
+        # 显式指定 local_dir / QDC_DATA_DIR 时视作纯本地归档目录，不触发 CLI 下载
         if self._local_dir is not None:
             return
 
@@ -373,9 +359,7 @@ class QdcAdapter(SourceAdapter):
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # Online HTTP REST mode (optional: mode="http" or explicit api_key=)
-    # ------------------------------------------------------------------
+    # ── 在线 HTTP REST 模式 ───────────────────────────────────────────────
     def _ensure_session(self) -> requests.Session:
         if self._session is None:
             self._session = requests.Session()
@@ -464,7 +448,7 @@ class QdcAdapter(SourceAdapter):
             )
         if status in (400, 404, 422):
             raise ValueError(f"QDC API rejected request ({status}): {resp.text}")
-        # 429 and 5xx trigger SourceAdapter retry via HTTPError
+        # 429 与 5xx 抛出 HTTPError 交由 SourceAdapter 重试
         resp.raise_for_status()
 
     @staticmethod

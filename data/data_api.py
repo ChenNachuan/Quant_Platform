@@ -1,13 +1,6 @@
-"""Data access layer — SQL-only DataAPI + load_bars + alphalens adapters.
+"""数据读取层 — 基于 DuckDB 的只读 SQL 查询接口（DataAPI）、``load_bars`` 及 alphalens 适配器。
 
-The read side of the data domain.  Table structure authority is
-:data:`data.storage_schema.SCHEMA` (T1); writes are owned by
-:mod:`data.storage_ops` (T2).  This module reads through DuckDB
-``read_parquet`` views and adapts output to consumer conventions.
-
-``asset_type`` in :func:`load_bars` is a **table-family** selector
-(equity / futures / continuous), not :class:`core.types.AssetType`.
-See :data:`TABLE_MAP`.
+底层读取 Parquet 视图并按消费方约定整形；``asset_type`` 在 :func:`load_bars` 中表示表族（equity / futures / continuous），而非 :class:`core.types.AssetType`。
 """
 
 from __future__ import annotations
@@ -26,15 +19,9 @@ from data.storage_schema import TABLE_ALIASES
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# asset_type here means table family, not core.types.AssetType.
-# "equity"     →  bars_daily / bars_minute      ← AssetType ∈ {stock, etf, fund}
-# "futures"    →  bars_daily_futures            ← AssetType.futures
-# "continuous" →  continuous                    ← table shape, not an asset type
-# ---------------------------------------------------------------------------
-# bars_daily holds stock + ETF + LOF rows together.  Selecting a table by the
-# 6-member AssetType enum is the wrong dimension — pick the table by family;
-# use core.types.EQUITY_TYPES when per-asset rules are needed downstream.
+# --- 表族映射 ---
+# asset_type 在此表示存储表族而非 core.types.AssetType：
+# "equity" -> bars_daily / bars_minute；"futures" -> bars_daily_futures；"continuous" -> continuous
 TABLE_MAP: dict[tuple[str, str], str] = {
     ("equity", "daily"): "bars_daily",
     ("stock", "daily"): "bars_daily",
@@ -54,7 +41,7 @@ TABLE_MAP: dict[tuple[str, str], str] = {
     ("cn_continuous", "daily"): "cn_futures_continuous",
 }
 
-# freq → base freq for table lookup (5min/60min aggregate from minute bars)
+# 目标频率 -> 底层表基础频率（5min/60min 由 minute 聚合）
 _FREQ_BASE: dict[str, str] = {
     "daily": "daily",
     "minute": "minute",
@@ -62,14 +49,13 @@ _FREQ_BASE: dict[str, str] = {
     "60min": "minute",
 }
 
-# Aggregation interval strings for DuckDB time_bucket
+# DuckDB time_bucket 聚合间隔
 _AGG_INTERVAL: dict[str, str] = {
     "5min": "5 minutes",
     "60min": "60 minutes",
 }
 
-# Standard output columns in contract order.  adjfactor is appended when the
-# source table carries it (bars_daily, continuous).
+# 标准输出列顺序；源表含 adjfactor 时追加在末尾
 _STD_COLS: list[str] = [
     "date",
     "ticker",
@@ -81,10 +67,10 @@ _STD_COLS: list[str] = [
     "amount",
 ]
 
-# Price columns that receive the adjustment ratio.
+# 参与复权缩放的价格列
 _PRICE_COLS: list[str] = ["open", "high", "low", "close"]
 
-# alphalens defaults (§27 periods=(1,5,10,20); quantiles is a Dev default)
+# alphalens 默认参数
 ALPHALENS_PERIODS: tuple[int, ...] = (1, 5, 10, 20)
 ALPHALENS_QUANTILES: int = 5
 
@@ -94,7 +80,7 @@ _DEFAULT_END = "2024-12-31"
 
 
 def _base_freq(freq: str) -> str:
-    """Map *freq* to its base table frequency (5min/60min → minute)."""
+    """将 *freq* 映射到底层基础表频率（5min/60min -> minute）。"""
     try:
         return _FREQ_BASE[freq]
     except KeyError:
@@ -104,7 +90,7 @@ def _base_freq(freq: str) -> str:
 
 
 def _resolve_table(asset_type: str, freq: str) -> str:
-    """Return the storage table for (*asset_type*, *freq*)."""
+    """解析 (*asset_type*, *freq*) 对应的存储表名。"""
     base = _base_freq(freq)
     key = (asset_type, base)
     if key in TABLE_MAP:
@@ -121,17 +107,11 @@ def _resolve_table(asset_type: str, freq: str) -> str:
     ) from None
 
 
-# ---------------------------------------------------------------------------
-# DataAPI — persistent DuckDB (catalog.duckdb), SQL-only
-# ---------------------------------------------------------------------------
+# --- DataAPI（持久化 DuckDB 目录，仅支持 SQL） ---
 class DataAPI:
-    """SQL-only query layer over Parquet files via DuckDB ``read_parquet``.
+    """基于 DuckDB ``read_parquet`` 视图的纯 SQL 查询层（持久化 ``catalog.duckdb``）。
 
-    Persistent catalog connection (catalog.duckdb).  One instance per process;
-    DuckDB connections are not process-safe.  Threads within one process may
-    share an instance — DuckDB is thread-safe and uses all available CPUs.
-    Connection *lifecycle* is not free-threaded though: ``reconnect`` replaces
-    ``_conn``, so it and ``close`` serialize on ``_conn_lock``.
+    每进程建议单实例（DuckDB 连接跨进程不安全）；进程内多线程共享，``reconnect`` 与 ``close`` 通过 ``_conn_lock`` 串行化。
     """
 
     def __init__(
@@ -156,8 +136,7 @@ class DataAPI:
             self._catalog_path = self._root / "catalog.duckdb"
 
         self._catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        # RLock, not Lock: the retry path in `_run` holds the lock and then
-        # calls `reconnect()`, which takes it again.
+        # 使用 RLock：_run 重试分支持锁后调用 reconnect() 需重入
         self._conn_lock = threading.RLock()
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect(
             database=str(self._catalog_path),
@@ -168,34 +147,25 @@ class DataAPI:
 
     @property
     def catalog_path(self) -> Path:
-        """Return the Path to the underlying catalog.duckdb file."""
+        """返回底层 ``catalog.duckdb`` 文件路径。"""
         return self._catalog_path
 
     def _apply_timeout(self) -> None:
-        """Apply statement timeout if supported by the DuckDB build."""
+        """若当前 DuckDB 版本支持，设置语句超时时间。"""
         ms = int(self._statement_timeout * 1000)
         try:
             self._conn.execute(f"SET statement_timeout = '{ms}ms'")
         except duckdb.CatalogException:
-            # DuckDB 1.5.0 does not support statement_timeout; the [COST]
-            # logging still reports slow queries.
+            # 部分 DuckDB 版本不支持 statement_timeout，仍保留 [COST] 耗时日志
             logger.debug("statement_timeout not supported in this DuckDB build")
 
-    # -- view registration ---------------------------------------------------
+    # --- 视图注册 ---
     def register_views(self) -> None:
-        """Create or replace a view per table directory under ``data_root``.
-
-        Each immediate sub-directory that contains ``*.parquet`` becomes a
-        view of the same name.  ``union_by_name=true`` aligns columns across
-        schema evolution; ``hive_partitioning=false`` because the layout is
-        flat filenames, not Hive partitions.
-        """
+        """为 ``data_root`` 下每个含 ``*.parquet`` 的直接子目录创建或替换视图（启用 ``union_by_name``，关闭 Hive 分区）。"""
         if not self._root.exists():
             logger.debug("data_root %s does not exist; no views registered", self._root)
             return
-        # Under the same lock as every other connection user: running a
-        # statement invalidates an unconsumed cursor, so a concurrent
-        # `register_views` could interleave with an in-flight fetch.
+        # 与查询共用连接锁，避免并发执行语句打断未消费游标
         with self._conn_lock:
             self._register_views_locked()
 
@@ -204,20 +174,11 @@ class DataAPI:
             if not entry.is_dir():
                 continue
             glob = entry / "*.parquet"
-            # DuckDB binds `read_parquet` at CREATE VIEW time and raises
-            # `IO Error: No files found` on a zero match. One legitimately
-            # empty table directory — e.g. `asset/fundamental/` created before
-            # its first write lands — would otherwise abort registration, and
-            # since `__enter__` calls this, every `load_bars()` on that root
-            # would fail even though the other tables hold data.
+            # 跳过尚无 parquet 文件的空表目录，避免 CREATE VIEW 报错阻塞其余表查询
             if not any(entry.glob("*.parquet")):
                 logger.debug("no parquet files under %s; no view registered", entry)
                 continue
-            # Every other value in this module goes through _sql_literal /
-            # _validate_identifier. A quote in `data_root` or a directory named
-            # `bars-daily` / `my data` would otherwise be a syntax error, and
-            # because `__enter__` calls this, one odd directory under the root
-            # breaks every `load_bars()` on it.
+            # 校验目录名标识符并转义路径字面量，防止异常目录名导致 SQL 语法错误
             view_name = _validate_identifier(entry.name)
             self._conn.execute(
                 f"CREATE OR REPLACE VIEW {view_name} AS "
@@ -232,21 +193,9 @@ class DataAPI:
                 )
         self._views_registered = True
 
-    # -- query ---------------------------------------------------------------
+    # --- 查询执行 ---
     def _run(self, sql: str, fetch, profile: bool = False):
-        """Execute *sql* under the connection lock, retrying once on reconnect.
-
-        One path for both entry points. The lock is held across the execute so
-        another thread's `reconnect()` cannot close the connection mid-query,
-        and it is re-entrant because the retry below calls `reconnect()`.
-
-        *fetch* materializes the cursor **inside** the lock. Running any other
-        statement on the connection — including the profiling pragma in the
-        cleanup below — invalidates an unconsumed cursor, so the result has to
-        be pulled out before that happens.
-
-        Returns ``(result, elapsed_seconds)``.
-        """
+        """加锁执行 *sql* 并通过 *fetch* 在锁内物化游标，连接断开时重连并重试一次；返回 ``(result, elapsed_seconds)``。"""
         with self._conn_lock:
             try:
                 if profile:
@@ -255,7 +204,7 @@ class DataAPI:
                 result = fetch(self._conn.execute(sql))
                 return result, time.perf_counter() - t0
             except duckdb.ConnectionException:
-                # Jupyter long-session reconnect: one retry after reconnect.
+                # 长会话断连时重连并重试一次
                 logger.warning("DuckDB connection lost; reconnecting once")
                 self.reconnect()
                 if profile:
@@ -268,12 +217,11 @@ class DataAPI:
                     try:
                         self._conn.execute("PRAGMA disable_profiling")
                     except Exception:
-                        # The connection may be the dead one we just replaced;
-                        # never let cleanup mask the original error.
+                        # 清理剖析状态时忽略失败，避免覆盖原始异常
                         logger.debug("disable_profiling failed", exc_info=True)
 
     def query(self, sql: str, profile: bool = False) -> pd.DataFrame:
-        """Execute *sql* and return a DataFrame.  Logs a ``[COST]`` line."""
+        """执行 *sql* 返回 DataFrame，并记录 ``[COST]`` 耗时日志。"""
         result, elapsed = self._run(sql, lambda c: c.fetchdf(), profile)
         level = logging.INFO
         if elapsed > 30:
@@ -290,22 +238,16 @@ class DataAPI:
         return result
 
     def query_arrow(self, sql: str) -> pa.Table:
-        """Execute *sql* and return a PyArrow table. Same retry as `query`."""
+        """执行 *sql* 返回 PyArrow Table（复用 ``query`` 重连策略）。"""
         result, elapsed = self._run(sql, lambda c: c.to_arrow_table())
         logger.info(
             "[COST] time=%.3fs rows=%d sql=%s", elapsed, result.num_rows, sql[:200]
         )
         return result
 
-    # -- lifecycle -----------------------------------------------------------
+    # --- 生命周期管理 ---
     def reconnect(self) -> None:
-        """Recreate the in-memory connection and re-register views.
-
-        For Jupyter kernels where the old connection has gone stale.
-        Serialized: threads share one instance (see the class docstring), and
-        closing the connection under a thread that is mid-`execute` produces
-        sporadic failures that no one can reproduce on demand.
-        """
+        """重建 DuckDB 连接并重新注册视图（通过连接锁串行化）。"""
         with self._conn_lock:
             try:
                 self._conn.close()
@@ -331,16 +273,14 @@ class DataAPI:
         self.close()
 
 
-# ---------------------------------------------------------------------------
-# load_bars — table mapping + SQL assembly + adjustment + aggregation
-# ---------------------------------------------------------------------------
+# --- load_bars（表映射、SQL 组装、复权与聚合） ---
 def _sql_literal(value: str) -> str:
-    """Escape a Python string for embedding in SQL."""
+    """转义 Python 字符串为 SQL 单引号字面量。"""
     return "'" + value.replace("'", "''") + "'"
 
 
 def _validate_identifier(name: str) -> str:
-    """Reject non-identifier column names before they reach SQL text."""
+    """校验列名/表名为合法标识符，防止 SQL 注入。"""
     if not name.isidentifier():
         raise ValueError(
             f"invalid column name {name!r}: must be a valid Python identifier "
@@ -350,13 +290,7 @@ def _validate_identifier(name: str) -> str:
 
 
 def _symbol_list(symbol: str | list[str] | None) -> list[str]:
-    """Normalize a ticker filter. ``None`` means "no filter"; [] raises.
-
-    An **empty** list is not the same as ``None``: it means "nothing was
-    selected", and silently widening it to "everything" turns an empty
-    watchlist into a full-universe pull — a silent wrong result (and, on
-    minute data, an OOM).
-    """
+    """规范化标的过滤条件：``None`` 表示全量，空列表 ``[]`` 直接抛错以防静默放大为全市场拉取（分钟线易 OOM）。"""
     if symbol is None:
         return []
     symbols = [symbol] if isinstance(symbol, str) else list(symbol)
@@ -366,7 +300,7 @@ def _symbol_list(symbol: str | list[str] | None) -> list[str]:
 
 
 def _symbol_filter(symbol: str | list[str] | None) -> str:
-    """SQL predicate for a ticker filter; empty string when unfiltered."""
+    """生成标的过滤 SQL 条件片段；全量时返回空串。"""
     symbols = _symbol_list(symbol)
     if not symbols:
         return ""
@@ -381,7 +315,7 @@ def _build_daily_sql(
     symbol: str | list[str] | None,
     fields: list[str] | None,
 ) -> str:
-    """Build the SELECT for a non-aggregated table (daily or raw minute)."""
+    """构建非聚合表（日线或原始分钟线）的 SELECT 语句。"""
     has_adj = table in (
         "bars_daily",
         "continuous",
@@ -394,7 +328,7 @@ def _build_daily_sql(
         if table in ("continuous", "cn_futures_continuous")
         else "ticker"
     )
-    # bars_minute uses datetime as the bar timestamp; all other tables use trade_date
+    # 分钟表以 datetime 为时间列，其余表使用 trade_date
     date_col = (
         "datetime"
         if table in ("bars_minute", "cn_stock_bars_minute", "cn_etf_bars_minute")
@@ -408,9 +342,7 @@ def _build_daily_sql(
             if has_adj:
                 select_parts.append("adjfactor")
             elif fields is not None:
-                # Explicitly requested and the table has none. Silently
-                # dropping it collapses `fields=["adjfactor"]` to a bare
-                # `SELECT date, ticker` — "no such column" disguised as success.
+                # 显式请求了无 adjfactor 表的该字段时直接报错，防止静默退化为空列
                 raise ValueError(
                     f"field 'adjfactor' is not available in table {table!r}"
                 )
@@ -419,12 +351,9 @@ def _build_daily_sql(
     if fields is None and has_adj:
         select_parts.append("adjfactor")
 
-    # Filter by trade_date for date-range (all tables have trade_date);
-    # output date_col may be datetime for bars_minute.
+    # 统一按 trade_date 过滤日期区间，输出时间列按表类型映射
     where = f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
-    # One rule for both table shapes. The continuous branch used to
-    # reimplement this inline and widened an empty list to "no filter", the
-    # very bug `_symbol_filter` exists to prevent.
+    # 统一复用 _symbol_list，确保连续合约分支同样拒绝空列表
     symbols = _symbol_list(symbol)
     if symbols:
         joined = ", ".join(_sql_literal(s) for s in symbols)
@@ -442,12 +371,7 @@ def _build_aggregated_sql(
     fields: list[str] | None,
     freq: str,
 ) -> str:
-    """Build the SELECT for 5min/60min time_bucket aggregation over bars_minute.
-
-    Aggregation boundary decision: group by ``time_bucket(...)`` and
-    ``trade_date`` to prevent cross-day bars.  Lunch break (11:30–13:00)
-    produces no bars, so empty buckets are absent from the output.
-    """
+    """基于分钟表构建 5min/60min ``time_bucket`` 聚合 SQL（按 ``trade_date`` 分组防跨日，午休空桶不填充）。"""
     interval = _AGG_INTERVAL[freq]
     value_cols = (
         fields
@@ -493,14 +417,10 @@ def _apply_adjustment(
     table: str,
     adjust: str,
 ) -> pd.DataFrame:
-    """Apply forward/backward price adjustment.
+    """执行前复权 / 后复权缩放。
 
-    Denominator uses full-history base (§43) — ``arg_max``/``arg_min`` over the
-    entire table, not the query window, so a truncated window gets the correct
-    scale.  Forward: ``qfq = raw × adj / adj_latest``.  Backward:
-    ``hfq = raw × adj / adj_first``.
-
-    Only price columns are scaled; volume and amount stay raw.
+    分母使用全表历史极值（``arg_max``/``arg_min``）而非查询窗口极值，保证窗口截断时比例准确；
+    仅缩放价格列，成交量与成交额保持原始值。
     """
     date_col = "trade_date"
     ticker_col = (
@@ -545,20 +465,16 @@ def load_bars(
     *,
     data_root: str | Path = _DEFAULT_DATA_ROOT,
 ) -> pd.DataFrame:
-    """Load bars from the storage layer.
-
-    Returns columns ``date, ticker, open, high, low, close, volume, amount``
-    plus ``adjfactor`` when the source table carries it, sorted by
-    ``(date, ticker)``.
+    """从存储层加载行情 Bar，按 ``(date, ticker)`` 升序返回标准列及可选 ``adjfactor``。
 
     Parameters
     ----------
-    symbol : ticker or list of tickers; ``None`` loads all.
-    start, end : date range (inclusive), ISO strings.
-    freq : ``daily`` | ``minute`` | ``5min`` | ``60min``.
-    fields : subset of value columns; ``None`` returns all standard ones.
-    adjust : ``none`` | ``forward`` | ``backward``.
-    asset_type : **table family** — ``equity`` / ``futures`` / ``continuous``.
+    symbol : 单个标的代码、列表或 ``None``（全量）。
+    start, end : 起止日期（含边界，ISO 格式）。
+    freq : ``daily`` | ``minute`` | ``5min`` | ``60min``。
+    fields : 指定输出数值列；``None`` 返回全部标准列。
+    adjust : ``none`` | ``forward`` | ``backward``。
+    asset_type : 表族名称（``equity`` / ``futures`` / ``continuous`` 等）。
     """
     table = _resolve_table(asset_type, freq)
     has_adj = table in (
@@ -570,11 +486,7 @@ def load_bars(
     )
     is_agg = freq in _AGG_INTERVAL
 
-    # Validate the literal here, before any query. Leaving it to
-    # `_apply_adjustment` means an empty window (holiday-only range, an
-    # unpopulated view, a filtered-out symbol list) returns an empty frame for
-    # `adjust="qfq"` instead of raising — "no data" instead of "bad argument",
-    # the silent-failure shape `_symbol_list` already refuses.
+    # 查询前校验 adjust 取值，避免空区间时将非法参数掩盖为无数据
     if adjust not in ("none", "forward", "backward"):
         raise ValueError(
             f"unknown adjust {adjust!r}; expected 'none', 'forward', or 'backward'"
@@ -585,8 +497,7 @@ def load_bars(
             f"adjust={adjust!r} requires adjfactor but table {table!r} has none"
         )
 
-    # When adjusting, adjfactor must be in the SELECT even if fields omits it.
-    # It is dropped from the result below if the caller did not request it.
+    # 复权计算依赖 adjfactor：若未显式请求则临时补选，计算后剔除
     effective_fields = fields
     drop_adj_after = False
     if (
@@ -613,7 +524,7 @@ def load_bars(
     if drop_adj_after and "adjfactor" in df.columns:
         df = df.drop(columns=["adjfactor"])
 
-    # Ensure contract column order and sort
+    # 按契约列序重排并排序
     if not df.empty:
         ordered = [c for c in _STD_COLS if c in df.columns]
         if "adjfactor" in df.columns:
@@ -637,12 +548,7 @@ def load_bars_chunked(
     *,
     data_root: str | Path = _DEFAULT_DATA_ROOT,
 ) -> Iterator[pd.DataFrame]:
-    """Yield :func:`load_bars` results in calendar-month chunks.
-
-    Calendar-month (not trading-month): simpler and needs no calendar query;
-    empty months yield nothing.  For minute data over >3 months this avoids
-    OOM (≈20 GB/year for one year of minute bars).
-    """
+    """按自然月分块流式调用 :func:`load_bars`（跳过空块），避免长跨度分钟线查询 OOM。"""
     if chunk_by != "month":
         raise ValueError(
             f"unsupported chunk_by {chunk_by!r}; only 'month' is implemented"
@@ -663,11 +569,7 @@ def load_bars_chunked(
 
 
 def _date_chunks(start: str, end: str) -> list[tuple[str, str]]:
-    """Split [start, end] into calendar-month chunks.
-
-    Chunking mode is the caller's concern (:func:`load_bars_chunked` validates
-    ``chunk_by``); only month chunks exist.
-    """
+    """将 ``[start, end]`` 切分为自然月区间列表。"""
     from datetime import date, timedelta
 
     s = date.fromisoformat(start)
@@ -675,7 +577,7 @@ def _date_chunks(start: str, end: str) -> list[tuple[str, str]]:
     chunks: list[tuple[str, str]] = []
     current = s
     while current <= e:
-        # End of current calendar month
+        # 计算当前自然月月末
         if current.month == 12:
             month_end = date(current.year, 12, 31)
         else:
@@ -686,9 +588,7 @@ def _date_chunks(start: str, end: str) -> list[tuple[str, str]]:
     return chunks
 
 
-# ---------------------------------------------------------------------------
-# alphalens adapters — adjustment + timestamp, nothing else
-# ---------------------------------------------------------------------------
+# --- alphalens 适配器 ---
 def to_alphalens_prices(
     start: str = _DEFAULT_START,
     end: str = _DEFAULT_END,
@@ -696,11 +596,7 @@ def to_alphalens_prices(
     *,
     data_root: str | Path = _DEFAULT_DATA_ROOT,
 ) -> pd.DataFrame:
-    """Return date × ticker close-price DataFrame for alphalens.
-
-    Forward-adjusted (``adjust="forward"``) daily closes, pivoted to
-    shape ``(dates, tickers)``.
-    """
+    """返回适用于 alphalens 的前复权日线收盘价透视表（``date × ticker``）。"""
     df = load_bars(
         symbols,
         start,
@@ -716,11 +612,7 @@ def to_alphalens_prices(
 
 
 def to_alphalens_factor(factor_df: pd.DataFrame) -> pd.Series:
-    """Convert a factor DataFrame to an alphalens MultiIndex Series.
-
-    Input: DataFrame with columns ``date``, ``ticker``, and one factor column.
-    Output: Series with MultiIndex ``(date, ticker)``.
-    """
+    """将含 ``date``、``ticker`` 与单一因子列的 DataFrame 转为 MultiIndex ``(date, ticker)`` Series。"""
     value_cols = [c for c in factor_df.columns if c not in ("date", "ticker")]
     if len(value_cols) != 1:
         raise ValueError(

@@ -1,13 +1,7 @@
-"""Shared helpers for the temporary bootstrap fetchers (QUANT-35).
+"""临时引导拉取脚本共享工具（QUANT-35）。
 
-Not an S9 SourceAdapter — no DQC, no quarantine, no cross_check.  The shape is
-always: pull from tushare -> align to ``data/storage_schema.py`` -> call
-``write_parquet_atomic``.  ``quality_flag`` is constant 0 (CLEAN).
-
-Data root is ``data_platform/``, the root ``PARTITION_PATHS`` are relative to
-(``data/storage_schema.py`` "Directory / partition conventions") and the root
-``storage_ops.cleanup_expired`` / ``check_capacity`` default to.  Override with
-``--data-root`` for tests; do not hardcode anything else.
+直接从数据源拉取并按 ``data/storage_schema.py`` 对齐后原子写入 parquet（无 DQC/隔离），
+``quality_flag`` 恒为 0；数据根目录默认使用 ``core.config.DATA_ROOT``，测试可通过 ``--data-root`` 覆盖。
 """
 
 from __future__ import annotations
@@ -18,9 +12,7 @@ import sys
 from pathlib import Path
 from core.config import DATA_ROOT
 
-# Bootstrap fetchers run as `python scripts/bootstrap/fetch_*.py`, which puts
-# this directory on sys.path but not the repo root the `data` package lives in.
-# Adding it here means every fetcher works when invoked directly.
+# 直接以脚本方式运行时将仓库根目录加入 sys.path，确保可导入 data 包
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -34,17 +26,10 @@ from data.storage_ops import (  # noqa: E402
 )
 from data.storage_schema import PARTITION_PATHS, SCHEMA  # noqa: E402
 
-#: Root every ``PARTITION_PATHS`` template is relative to.  Authority:
-#: ``data/storage_schema.py`` (partition conventions) and ``data/storage_ops.py``
-#: (``cleanup_expired(root=...)`` / ``check_capacity(data_root=...)``).
-# DATA_ROOT imported from core.config above
-
-#: Where ``TUSHARE_TOKEN`` may live.  Read, never printed, never committed.
+#: TUSHARE_TOKEN 读取路径（仅读取，严禁打印或提交）
 _TOKEN_FILES = (Path("config/.env"), Path("config/secrets"))
 
-#: Columns filled with a constant when the source cannot supply them.  A
-#: missing column outside this map must be nullable in the schema (filled with
-#: nulls) or the frame is refused — fabricating a price is worse than failing.
+#: 数据源缺失时以常量填充的可选列；非此映射内的缺失非空列将拒绝写入
 _OPTIONAL_DEFAULTS: dict[str, object] = {
     "quality_flag": 0,
     "suspend": False,
@@ -53,19 +38,13 @@ _OPTIONAL_DEFAULTS: dict[str, object] = {
     "turnover": float("nan"),
 }
 
-#: tushare ``ts_code`` shape: ``{6 digits}.{SH|SZ|BJ}`` — identical to the
-#: repo ticker (see core.asset_rules._equity_re).
+#: tushare ts_code 格式：{6位数字}.{SH|SZ|BJ}，与仓库 ticker 一致
 _TS_CODE_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ)\Z")
 
 
-# ---------------------------------------------------------------------------
-# tushare init
-# ---------------------------------------------------------------------------
+# tushare 初始化
 def init_tushare():
-    """Return a tushare pro client authenticated from ``.env`` / ``config/secrets``.
-
-    The token is read into memory and handed to the SDK; it is never logged.
-    """
+    """从环境变量或 .env / config/secrets 读取 token 并返回 tushare pro 客户端。"""
     token = _read_token()
     if not token:
         raise RuntimeError(
@@ -95,32 +74,17 @@ def _read_token() -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# ticker format (AC-A3)
-# ---------------------------------------------------------------------------
+# ticker 格式转换
 def ticker_convert(ts_code: str) -> str:
-    """tushare ``ts_code`` -> repo ``ticker``.
-
-    The two formats are **the same string**: ``{6 digits}.{SH|SZ|BJ}``.  This
-    is therefore the identity map, kept as a function so a future divergence
-    has exactly one place to change.  See README "ticker 格式".
-    """
+    """校验并将 tushare ts_code 转换为仓库 ticker（当前二者格式相同，作恒等校验）。"""
     if not isinstance(ts_code, str) or _TS_CODE_RE.match(ts_code) is None:
         raise ValueError(f"not a tushare ts_code: {ts_code!r}")
     return ts_code
 
 
-# ---------------------------------------------------------------------------
-# schema alignment
-# ---------------------------------------------------------------------------
+# Schema 对齐
 def align_schema(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
-    """Drop unknown columns, fill missing ones, coerce dtypes to *table_name*.
-
-    Column set and order come from ``SCHEMA[table_name]`` — this function never
-    invents column names.  Missing columns are filled from
-    ``_OPTIONAL_DEFAULTS`` when known, with nulls when the schema column is
-    nullable, and refused otherwise.
-    """
+    """按 SCHEMA[table_name] 裁剪、补缺并强转列类型，缺失必填非空列时拒绝写入。"""
     schema = SCHEMA[table_name]
     out = pd.DataFrame(index=df.index)
 
@@ -143,8 +107,7 @@ def align_schema(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
 
 
 def _coerce_column(series: pd.Series, col, name: str, table_name: str) -> pd.Series:
-    # pandera wraps the declared type in a DataType object; `str()` is the
-    # stable spelling ("int64", "float64", "bool", "str", "date").
+    # pandera DataType 转字符串表示（如 int64/float64/bool/str/date）
     kind = str(col.dtype)
     if kind == "bool":
         return series.astype("boolean").fillna(False).astype(bool)
@@ -154,9 +117,7 @@ def _coerce_column(series: pd.Series, col, name: str, table_name: str) -> pd.Ser
         return pd.to_numeric(series, errors="coerce").astype("float64")
     if kind == "str":
         return series.astype("string").astype(object)
-    # date / datetime columns: the schema's own parser does the strict work at
-    # validation time, so all we do here is make them parseable.  Keep ISO
-    # strings as strings and leave datetimes alone.
+    # 日期/时间列交由 schema 校验阶段严格解析，此处保持原值
     return series
 
 
@@ -173,19 +134,11 @@ def _to_int64(series: pd.Series, name: str, table_name: str) -> pd.Series:
     )
 
 
-# ---------------------------------------------------------------------------
-# AmazingData staging -> schema frames
-# ---------------------------------------------------------------------------
-# ``amazing_pull.py`` drops the source's own frames under
-# ``data_platform/raw/amazingdata/``.  These helpers are the whole of the
-# source -> schema mapping, so the unit conversions live in exactly one place
-# per source.  Measured units (``task/probe_amazing_quant35.log``): AmazingData
-# ``volume`` is 股 and ``amount`` is 元, i.e. already the storage unit — unlike
-# tushare (手 / 千元) there is no scaling here.  ``FLOAT_SHARE`` is 万份.
+# AmazingData 暂存数据 -> Schema 格式转换（volume 为股、amount 为元，FLOAT_SHARE 为万份）
 
 
 def frame_from_amazing_calendar(cal: pd.DataFrame) -> pd.DataFrame:
-    """Staging ``calendar.parquet`` -> the one-column calendar table."""
+    """将暂存 calendar.parquet 转为单列交易日历表。"""
     if "cal_date" not in cal.columns:
         raise ValueError(
             f"amazing calendar staging missing cal_date: {list(cal.columns)}"
@@ -198,21 +151,11 @@ def frame_from_amazing_kline(
     nav: pd.DataFrame,
     share: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Staging kline + fund_nav + fund_share -> bars_daily column names.
+    """合并暂存 kline、fund_nav 与 fund_share 为 bars_daily 标准列格式。
 
-    ``adjfactor`` comes from ``get_fund_nav``'s ``NAV_ADJ_FACTOR`` — the only
-    adjustment source this vendor exposes.  It is written **as measured**, not
-    renormalized: ``data_api._apply_adjustment`` divides by ``adj_latest`` /
-    ``adj_first``, so both ``qfq`` and ``hfq`` are invariant to its scale.
-
-    ``turnover`` follows AC-A2: ``amount / float_market_cap``, with the cap
-    being ``FLOAT_SHARE`` (万份 -> 份) priced at that day's close.  When the
-    share table has no row for a day the turnover is NaN, never 0.
-
-    ``get_dividend`` / ``get_right_issue`` return 0 rows for the golden ETFs
-    over 1990-2025, and kline carries no limit prices, so ``suspend`` and both
-    limit flags are written ``False`` — a **source limitation, not a market
-    fact**.  Do not reason about price limits from these columns.
+    - ``adjfactor`` 取自 ``NAV_ADJ_FACTOR`` 原始累计复权因子（不归一化）
+    - ``turnover = amount / (FLOAT_SHARE * 1e4 * close)``，缺少份额记录时置为 NaN
+    - 数据源无停牌及涨跌停价信息，``suspend`` 与涨跌停标志统一置为 False
     """
     for name, frame in (("kline", kline), ("fund_nav", nav), ("fund_share", share)):
         if frame is None or frame.empty:
@@ -254,7 +197,7 @@ def frame_from_amazing_kline(
 def _amazing_series(
     frame: pd.DataFrame, code_col: str, date_col: str, value_col: str
 ) -> pd.Series:
-    """Key a staging column by ``(ticker, trade_date)`` for lookup."""
+    """按 (ticker, trade_date) 建立暂存指标索引，存在重复键则报错。"""
     if not {code_col, date_col, value_col}.issubset(frame.columns):
         raise ValueError(
             f"amazing staging missing {[code_col, date_col, value_col]}: "
@@ -283,7 +226,7 @@ def _lookup(bars: pd.DataFrame, keyed: pd.Series, label: str) -> pd.Series:
 
 
 def _ymd_int_to_date(series: pd.Series) -> pd.Series:
-    """``20250228`` int / str -> ``datetime.date``."""
+    """将 YYYYMMDD 整型/字符串转为 datetime.date。"""
     text = pd.to_numeric(series, errors="coerce")
     if text.isna().any():
         raise ValueError(
@@ -292,15 +235,13 @@ def _ymd_int_to_date(series: pd.Series) -> pd.Series:
     return pd.to_datetime(text.astype("int64").astype(str), format="%Y%m%d").dt.date
 
 
-# ---------------------------------------------------------------------------
-# write paths
-# ---------------------------------------------------------------------------
+# 分区写入工具
 def table_path(
     table_name: str,
     data_root: str | os.PathLike[str] | None = None,
     **fmt: object,
 ) -> Path:
-    """Compose ``data_root / PARTITION_PATHS[table_name]`` with *fmt*."""
+    """按 PARTITION_PATHS[table_name] 模板拼接目标文件路径。"""
     root = Path(data_root) if data_root is not None else DATA_ROOT
     template = PARTITION_PATHS[table_name]
     return root / template.format(**fmt)
@@ -311,7 +252,7 @@ def write_daily(
     table_name: str,
     data_root: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
-    """Align *df* and write to day or month partitions per ``PARTITION_PATHS``."""
+    """对齐 schema 后按日或按月分区原子写入 parquet。"""
     aligned = align_schema(df, table_name)
     written: list[Path] = []
     if aligned.empty:
@@ -338,7 +279,7 @@ def write_reference(
     data_root: str | os.PathLike[str] | None = None,
     **fmt: object,
 ) -> Path:
-    """Align *df* and write the whole table to its single reference file."""
+    """对齐 schema 后将参考表整表原子写入单一文件。"""
     aligned = align_schema(df, table_name)
     path = table_path(table_name, data_root, **fmt)
     write_parquet_atomic(aligned, path, table=table_name)
@@ -353,7 +294,7 @@ def _iso(day: object) -> str:
 
 
 def yyyymmdd(value: str) -> str:
-    """Accept ``YYYYMMDD`` or ``YYYY-MM-DD``; return the tushare ``YYYYMMDD``."""
+    """支持 YYYYMMDD 或 YYYY-MM-DD，统一转为 YYYYMMDD 字符串。"""
     text = str(value).replace("-", "").strip()
     if len(text) != 8 or not text.isdigit():
         raise ValueError(f"not a date (YYYYMMDD or YYYY-MM-DD): {value!r}")

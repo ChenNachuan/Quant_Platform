@@ -1,1 +1,1 @@
-"""Research domain — factors, DAG, post-processing, combination, evaluation."""
+"""研究域：因子定义、DAG 调度、后处理、合成与评估。"""

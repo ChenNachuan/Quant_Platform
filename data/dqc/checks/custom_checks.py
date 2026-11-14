@@ -1,20 +1,12 @@
-"""DQC custom check functions for rules that cannot be declarative column checks.
+"""DQC 自定义检查函数（无法用声明式列规则表达的逻辑）。
 
-All check functions are pure: they take a DataFrame plus keyword params (from
-YAML) and return ``pd.Series[bool]`` where **True = failure**.
+所有检查均为纯函数，返回 ``pd.Series[bool]``（``True`` 表示校验失败）：
+- 行级检查：索引与输入 DataFrame 对齐。
+- 聚合检查：长度为 1，索引为 ``__aggregate__``。
+- 跨表检查（``cross_checks.py``）：索引为 ``(ticker, trade_date)``。
 
-Return shapes (CheckResult candidate for dqc_runtime.md):
-- Row-level checks: Series indexed like the input DataFrame.
-- Aggregate checks: Series of length 1 (single verdict).
-- Cross-table checks (cross_checks.py): Series indexed by (ticker, trade_date).
-
-External reference data (calendar, universe, corporate actions, etc.) is
-injected at call time, never read from disk inside these functions.
-
-Column names follow ``data/storage_schema.py``.  Where a check historically
-used a different name (``factor_value`` vs ``value``, ``timestamp`` vs
-``datetime``, ``limit_up`` vs ``is_limit_up``), the canonical schema name is
-tried first with a legacy fallback so both DQC-frame spellings bind.
+交易日历、股票池、除权日等外部参考数据均在调用时注入，不在函数内读盘；
+列名优先匹配 ``storage_schema`` 标准名，并兼容旧列名回退。
 """
 
 from __future__ import annotations
@@ -22,11 +14,11 @@ from __future__ import annotations
 import pandas as pd
 
 
-# ── Helpers ────────────────────────────────────────────────────────────
+# ── 辅助函数 ─────────────────────────────────────────────────────────────
 
 
 def _col(df: pd.DataFrame, *candidates: str) -> str | None:
-    """Return the first column name from *candidates* present in *df*."""
+    """返回 *candidates* 中首个存在于 *df* 的列名。"""
     for c in candidates:
         if c in df.columns:
             return c
@@ -34,22 +26,22 @@ def _col(df: pd.DataFrame, *candidates: str) -> str | None:
 
 
 def _value_col(df: pd.DataFrame) -> str | None:
-    """Factor value column: schema name ``value``, legacy ``factor_value``."""
+    """因子值列名：标准名 ``value``，兼容旧名 ``factor_value``。"""
     return _col(df, "value", "factor_value")
 
 
 def _dt_col(df: pd.DataFrame) -> str | None:
-    """Minute bar timestamp column: schema name ``datetime``, legacy ``timestamp``."""
+    """分钟时间戳列名：标准名 ``datetime``，兼容旧名 ``timestamp``。"""
     return _col(df, "datetime", "timestamp")
 
 
 def _date_col(df: pd.DataFrame) -> str | None:
-    """Date column: ``trade_date`` (DQC contract), legacy ``date`` (factor schema)."""
+    """日期列名：``trade_date``，兼容旧名 ``date``。"""
     return _col(df, "trade_date", "date")
 
 
 def _prev_close(df: pd.DataFrame) -> pd.Series:
-    """Return ``prev_close`` if present, else derive from prior-day close."""
+    """优先取 ``prev_close``，缺失时按代码与交易日计算前收盘价。"""
     if "prev_close" in df.columns:
         return df["prev_close"]
     sorted_df = df.sort_values(["ticker", "trade_date"])
@@ -58,29 +50,25 @@ def _prev_close(df: pd.DataFrame) -> pd.Series:
 
 
 def _bool_series(s: pd.Series) -> pd.Series:
-    """Coerce a flag column to bool, treating NaN as False."""
+    """布尔列转型，NaN 视为 False。"""
     return s.fillna(False).astype(bool)
 
 
 def _is_suspended(df: pd.DataFrame) -> pd.Series:
-    """Return a bool Series of suspended rows (all-False when no suspend col)."""
+    """返回停牌行布尔掩码（无 ``suspend`` 列时全为 False）。"""
     c = _col(df, "suspend")
     if c is None:
         return pd.Series(False, index=df.index)
     return _bool_series(df[c])
 
 
-# ── Completeness C01–C10 ──────────────────────────────────────────────
+# ── 完整性 C01–C10 ──────────────────────────────────────────────────────
 
 
 def check_row_count_vs_calendar(
     df: pd.DataFrame, calendar_dates=None, comparison: str = "eq", **_
 ) -> pd.Series:
-    """C01: deduplicated trade_date count must match calendar trading days.
-
-    When *calendar_dates* is not injected the check fails (missing dependency),
-    and the expected count is restricted to the frame's date range.
-    """
+    """C01：去重交易日数须与日历区间内交易日数一致（未注入日历则失败）。"""
     if calendar_dates is None:
         return pd.Series([True], index=["__aggregate__"])
     dc = _date_col(df)
@@ -97,7 +85,7 @@ def check_row_count_vs_calendar(
 def check_row_count_vs_universe(
     df: pd.DataFrame, universe=None, min_ratio: float = 0.95, **_
 ) -> pd.Series:
-    """C02: single-day ticker count >= universe * min_ratio."""
+    """C02：单日去重标的数量须 >= ``len(universe) * min_ratio``。"""
     if universe is None or len(universe) == 0:
         return pd.Series([True], index=["__aggregate__"])
     ratios = df.groupby(_date_col(df) or "trade_date")["ticker"].nunique() / len(
@@ -110,7 +98,7 @@ def check_row_count_vs_universe(
 def check_minute_bar_count(
     df: pd.DataFrame, expected_bars: int = 240, **_
 ) -> pd.Series:
-    """C03: every ticker every day must have exactly *expected_bars* bars."""
+    """C03：每只标的每日分钟线根数须等于 *expected_bars*（默认 240）。"""
     counts = df.groupby(["ticker", _date_col(df) or "trade_date"]).size()
     has_bad = bool((counts != expected_bars).any())
     return pd.Series([has_bad], index=["__aggregate__"])
@@ -119,11 +107,7 @@ def check_minute_bar_count(
 def check_null_soft_fields(
     df: pd.DataFrame, max_null_rate: float = 0.01, columns=None, **_
 ) -> pd.Series:
-    """C05: null rate of *columns* must be <= max_null_rate.
-
-    Columns absent from the frame are silently skipped (the same C05 rule
-    covers both daily and fundamental frames whose column sets differ).
-    """
+    """C05：指定软字段空值率须 <= *max_null_rate*（表中不存在的列跳过）。"""
     if columns is None:
         return pd.Series([False], index=["__aggregate__"])
     for col in columns:
@@ -137,7 +121,7 @@ def check_null_soft_fields(
 def check_adjfactor_present(
     df: pd.DataFrame, max_missing_rate: float = 0.0, **_
 ) -> pd.Series:
-    """C06: ticker x date adjfactor missing rate must be 0 %."""
+    """C06：复权因子缺失率须 <= *max_missing_rate*（默认 0）。"""
     if "adjfactor" not in df.columns:
         return pd.Series([True], index=["__aggregate__"])
     missing = df["adjfactor"].isna()
@@ -152,11 +136,7 @@ def check_calendar_completeness(
     max_gap_days: int = 12,
     **_,
 ) -> pd.Series:
-    """C07: calendar must cover [today, today+forward_days] trading days without gaps.
-
-    *max_gap_days* accommodates A-share holidays (Spring Festival ~11 calendar
-    days).  Gaps beyond this threshold indicate genuinely missing sessions.
-    """
+    """C07：交易日历须至少向后覆盖 *forward_days* 个交易日，且间隔 <= *max_gap_days*（容忍春节等长假约 11 天）。"""
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
@@ -178,12 +158,7 @@ def check_factor_date_coverage(
     calendar_dates=None,
     **_,
 ) -> pd.Series:
-    """C08: rolling *window*-day missing dates <= *max_missing*.
-
-    The window is anchored at the frame's latest date.  When *calendar_dates*
-    is provided, counts truly absent sessions within the last *window*
-    calendar dates up to the frame's max date.
-    """
+    """C08：近 *window* 个交易日内因子缺失天数须 <= *max_missing*。"""
     dc = _date_col(df) or "trade_date"
     frame_dates = pd.to_datetime(df[dc])
     dates = set(frame_dates.unique())
@@ -200,7 +175,7 @@ def check_factor_date_coverage(
 def check_factor_ticker_coverage(
     df: pd.DataFrame, universe=None, min_ratio: float = 0.90, **_
 ) -> pd.Series:
-    """C09: factor ticker coverage >= universe * min_ratio."""
+    """C09：因子覆盖标的比例须 >= *min_ratio*。"""
     if universe is None or len(universe) == 0:
         return pd.Series([True], index=["__aggregate__"])
     coverage = df["ticker"].nunique() / len(universe)
@@ -210,7 +185,7 @@ def check_factor_ticker_coverage(
 def check_industry_coverage(
     df: pd.DataFrame, universe=None, min_ratio: float = 1.0, **_
 ) -> pd.Series:
-    """C10: active ticker industry coverage must be *min_ratio* (default 100 %)."""
+    """C10：行业分类对目标股票池覆盖率须 >= *min_ratio*（默认 100%）。"""
     if universe is None or len(universe) == 0:
         return pd.Series([True], index=["__aggregate__"])
     covered = set(df["ticker"].unique()) if "ticker" in df.columns else set()
@@ -218,11 +193,11 @@ def check_industry_coverage(
     return pd.Series([ratio < min_ratio], index=["__aggregate__"])
 
 
-# ── Legality L03–L05, L12 ─────────────────────────────────────────────
+# ── 合法性 L03–L05, L12 ─────────────────────────────────────────────────
 
 
 def check_ohlc_relation(df: pd.DataFrame, tolerance: float = 0.0, **_) -> pd.Series:
-    """L03: low <= min(open, close) and max(open, close) <= high (inclusive)."""
+    """L03：检查 ``low <= min(open, close)`` 且 ``max(open, close) <= high``（允许 *tolerance* 容差）。"""
     lower = df[["open", "close"]].min(axis=1)
     upper = df[["open", "close"]].max(axis=1)
     failed = (df["low"] > lower + tolerance) | (df["high"] < upper - tolerance)
@@ -237,10 +212,9 @@ def check_price_limit_stock(
     tolerance: float = 0.005,
     **_,
 ) -> pd.Series:
-    """L04: daily price change must stay within board limit + tolerance.
+    """L04：个股日涨跌幅须在板块涨跌停限制 + *tolerance* 范围内。
 
-    Board type is derived from the ticker prefix when dedicated flag columns
-    are absent: 30xxxx.SZ / 68xxxx.SH are ChiNext / STAR (20 % limit).
+    无板块标记列时按代码前缀判定（``30``/``68`` 开头为创业板/科创板 20%）。
     """
     pc = _prev_close(df)
     if pc.isna().all():
@@ -248,7 +222,7 @@ def check_price_limit_stock(
     change = ((df["close"] - pc) / pc).abs()
     limit = pd.Series(main_limit, index=df.index)
 
-    # Derive board from ticker prefix when flags are not in the frame.
+    # 缺少显式板块列时根据代码前缀推断 20% 板块
     tickers = df["ticker"].astype(str)
     is_chinext_star = tickers.str.startswith("30") | tickers.str.startswith("68")
     if "is_chinext_star" in df.columns:
@@ -269,7 +243,7 @@ def check_price_limit_futures(
     lookup_table=None,
     **_,
 ) -> pd.Series:
-    """L05: futures price change must stay within contract limit + tolerance."""
+    """L05：期货日涨跌幅须在合约涨跌停板 + *tolerance* 范围内。"""
     if contract_specs is None:
         contract_specs = lookup_table
     pc = _prev_close(df)
@@ -283,7 +257,7 @@ def check_price_limit_futures(
 def check_factor_nan_rate(
     df: pd.DataFrame, max_nan_rate: float = 0.10, **_
 ) -> pd.Series:
-    """L12: factor NaN rate must be <= max_nan_rate."""
+    """L12：因子值 NaN 比例须 <= *max_nan_rate*。"""
     vc = _value_col(df)
     if vc is None:
         return pd.Series([False], index=["__aggregate__"])
@@ -291,13 +265,13 @@ def check_factor_nan_rate(
     return pd.Series([rate > max_nan_rate], index=["__aggregate__"])
 
 
-# ── Consistency K01–K05, K09–K11 ─────────────────────────────────────
+# ── 一致性 K01–K05, K09–K11 ─────────────────────────────────────────────
 
 
 def check_open_gap(
     df: pd.DataFrame, max_gap: float = 0.10, ca_dates=None, **_
 ) -> pd.Series:
-    """K01: non-ex-right-day adjusted open / prev_close gap <= max_gap."""
+    """K01：非除权除息日开盘跳空幅度须 <= *max_gap*。"""
     pc = _prev_close(df)
     if pc.isna().all():
         return pd.Series([False] * len(df), index=df.index)
@@ -310,14 +284,14 @@ def check_open_gap(
 
 
 def check_volume_amount_match(df: pd.DataFrame, **_) -> pd.Series:
-    """K02: volume > 0 iff amount > 0 (bidirectional)."""
+    """K02：``volume > 0`` 与 ``amount > 0`` 须双向一致。"""
     vol_pos = df["volume"] > 0
     amt_pos = df["amount"] > 0
     return vol_pos != amt_pos
 
 
 def check_suspend_consistency(df: pd.DataFrame, **_) -> pd.Series:
-    """K03: suspended rows must have volume == 0 and OHLC all equal."""
+    """K03：停牌行须满足 ``volume == 0`` 且 OHLC 四价相等。"""
     if "suspend" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
     sus = _bool_series(df["suspend"])
@@ -333,7 +307,7 @@ def check_suspend_consistency(df: pd.DataFrame, **_) -> pd.Series:
 def check_limit_flag_consistency(
     df: pd.DataFrame, tolerance: float = 0.01, **_
 ) -> pd.Series:
-    """K04: limit_up => close ≈ high; limit_down => close ≈ low (within tolerance)."""
+    """K04：涨停时 ``close`` 须贴近 ``high``，跌停时贴近 ``low``（偏差 <= *tolerance*）。"""
     failed = pd.Series(False, index=df.index)
     up_col = _col(df, "is_limit_up", "limit_up")
     down_col = _col(df, "is_limit_down", "limit_down")
@@ -347,7 +321,7 @@ def check_limit_flag_consistency(
 
 
 def check_adjfactor_stable(df: pd.DataFrame, ca_dates=None, **_) -> pd.Series:
-    """K05: adjfactor unchanged on non-corporate-action days."""
+    """K05：非公司行为日 ``adjfactor`` 不得变动。"""
     if "adjfactor" not in df.columns:
         return pd.Series([False] * len(df), index=df.index)
     dc = _date_col(df) or "trade_date"
@@ -369,7 +343,7 @@ def check_factor_cross_section(
     max_abs_mean: float = 100,
     **_,
 ) -> pd.Series:
-    """K09: cross-sectional std > min_std and abs(mean) < max_abs_mean."""
+    """K09：因子横截面标准差须 > *min_std* 且均值绝对值 < *max_abs_mean*。"""
     vc = _value_col(df)
     if vc is None:
         return pd.Series([False], index=["__aggregate__"])
@@ -381,7 +355,7 @@ def check_factor_cross_section(
 
 
 def check_industry_universe_match(df: pd.DataFrame, universe=None, **_) -> pd.Series:
-    """K10: universe set must equal industry set."""
+    """K10：行业表标的集合须与股票池完全一致。"""
     if universe is None:
         return pd.Series([True], index=["__aggregate__"])
     industry_set = set(df["ticker"].unique()) if "ticker" in df.columns else set()
@@ -392,7 +366,7 @@ def check_industry_universe_match(df: pd.DataFrame, universe=None, **_) -> pd.Se
 def check_fund_vs_daily_tickers(
     df: pd.DataFrame, daily_tickers=None, max_diff: int = 5, **_
 ) -> pd.Series:
-    """K11: set difference between fundamental and daily tickers <= max_diff."""
+    """K11：基本面表与日线表标的集合对称差须 <= *max_diff*。"""
     if daily_tickers is None:
         return pd.Series([True], index=["__aggregate__"])
     fund_set = set(df["ticker"].unique()) if "ticker" in df.columns else set()
@@ -400,7 +374,7 @@ def check_fund_vs_daily_tickers(
     return pd.Series([len(diff) > max_diff], index=["__aggregate__"])
 
 
-# ── Timeliness T01–T09 ────────────────────────────────────────────────
+# ── 时效性 T01–T09 ──────────────────────────────────────────────────────
 
 
 def check_daily_freshness(
@@ -410,11 +384,7 @@ def check_daily_freshness(
     calendar_dates=None,
     **_,
 ) -> pd.Series:
-    """T01: latest trade_date within max_stale_days trading days of *today*.
-
-    Trading-day distance is computed against the injected *calendar_dates*
-    when available; falls back to business-day count otherwise.
-    """
+    """T01：最新交易日距 *today* 须在 *max_stale_days* 个交易日内（无日历时退化为工作日计数）。"""
     dc = _date_col(df) or "trade_date"
     latest = pd.to_datetime(df[dc]).max()
     ref = (
@@ -436,14 +406,14 @@ def check_minute_freshness(
     calendar_dates=None,
     **_,
 ) -> pd.Series:
-    """T02: same as T01 but for minute data."""
+    """T02：分钟线新鲜度检查，规则同 T01。"""
     return check_daily_freshness(
         df, max_stale_days=max_stale_days, today=today, calendar_dates=calendar_dates
     )
 
 
 def check_no_future_dates(df: pd.DataFrame, today=None, **_) -> pd.Series:
-    """T03: all trade_date <= today."""
+    """T03：所有交易日须 <= *today*（禁止未来日期）。"""
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
@@ -454,17 +424,10 @@ def check_no_future_dates(df: pd.DataFrame, today=None, **_) -> pd.Series:
 
 
 def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
-    """T04: trade_date strictly ascending with no duplicates within partition.
-
-    For minute frames (240 rows per ticker x trade_date) the partition key is
-    ``(ticker, trade_date)`` and ordering is validated on the ``datetime``
-    column; for other frames it partitions by ``ticker`` on the date column.
-    """
+    """T04：分区内时间须严格递增无重复（分钟线按 ``(ticker, trade_date)`` 检查 ``datetime``，其余按 ``ticker`` 检查日期）。"""
     dc = _date_col(df) or "trade_date"
     ts_col = _dt_col(df)
     if ts_col is not None and "ticker" in df.columns:
-        # Minute-frame: check that timestamps within (ticker, trade_date) are
-        # strictly ascending (no duplicates or out-of-order bars).
         ts = pd.to_datetime(df[ts_col])
         diff = ts.groupby([df["ticker"], df[dc]]).diff()
         bad = (diff <= pd.Timedelta(0)) & diff.notna()
@@ -488,7 +451,7 @@ def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
 
 
 def check_minute_timestamp_order(df: pd.DataFrame, **_) -> pd.Series:
-    """T05: within ticker x date, timestamps strictly ascending and continuous."""
+    """T05：同一 ``(ticker, trade_date)`` 内分钟时间戳须严格递增且连续（午休间隔 88–92 分钟属正常）。"""
     ts_col = _dt_col(df)
     if ts_col is None:
         return pd.Series([False] * len(df), index=df.index)
@@ -496,7 +459,7 @@ def check_minute_timestamp_order(df: pd.DataFrame, **_) -> pd.Series:
     ts = pd.to_datetime(df[ts_col])
     diff = ts.groupby([df["ticker"], df[dc]]).diff()
     bad_order = (diff <= pd.Timedelta(0)) & diff.notna()
-    # Lunch break (11:30 → 13:01 bar-end) is 91 minutes; accept 88-92.
+    # 午休间隔（11:30 -> 13:01）约 91 分钟，容差范围 88–92 分钟
     lunch_break = (diff > pd.Timedelta(minutes=88)) & (diff <= pd.Timedelta(minutes=92))
     gap = (diff > pd.Timedelta(minutes=2)) & ~lunch_break
     return (bad_order | gap).fillna(False)
@@ -505,7 +468,7 @@ def check_minute_timestamp_order(df: pd.DataFrame, **_) -> pd.Series:
 def check_adjfactor_idempotent(
     df: pd.DataFrame, previous_adjfactor=None, **_
 ) -> pd.Series:
-    """T06: re-ingestion adjfactor must be unchanged."""
+    """T06：重入库时历史复权因子不得变化。"""
     if previous_adjfactor is None:
         return pd.Series([False], index=["__aggregate__"])
     dc = _date_col(df) or "trade_date"
@@ -528,13 +491,12 @@ def check_factor_lag(
     calendar_dates=None,
     **_,
 ) -> pd.Series:
-    """T07: D-day factor data must arrive by D+2 (trading days when calendar available)."""
+    """T07：因子到达延迟（``arrival_date - trade_date``）须 <= *max_lag_days*（有日历时按交易日计）。"""
     if "arrival_date" not in df.columns:
         return pd.Series([False], index=["__aggregate__"])
     dc = _date_col(df) or "trade_date"
     td = pd.to_datetime(df[dc])
     ad = pd.to_datetime(df["arrival_date"])
-    # Filter to rows at or before *today*.
     if today is not None:
         ref = pd.to_datetime(today)
         mask = td <= ref
@@ -559,7 +521,7 @@ def check_factor_lag(
 def check_calendar_forward(
     df: pd.DataFrame, min_forward_days: int = 30, today=None, **_
 ) -> pd.Series:
-    """T08: calendar must extend >= min_forward_days trading days from today."""
+    """T08：交易日历须包含不少于 *min_forward_days* 个未来交易日。"""
     ref = (
         pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
     )
@@ -575,7 +537,7 @@ def check_late_correction(
     previous_data=None,
     **_,
 ) -> pd.Series:
-    """T09: historical change > max_change_rate triggers alert."""
+    """T09：历史数值字段相对变动超过 *max_change_rate* 时触发告警。"""
     if previous_data is None:
         return pd.Series([False], index=["__aggregate__"])
     key = ["ticker", _date_col(df) or "trade_date"]

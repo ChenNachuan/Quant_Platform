@@ -1,25 +1,11 @@
-"""Pre-trade risk control: seven rules, PASS/BLOCK, append-only audit.
+"""盘前风控模块：七条风控规则、PASS/BLOCK 判定与追加写审计日志。
 
-Design authority: ``docs/design/execution/risk_control.md`` (§66.3).
-Guards against strategy runaway and operator error — not market risk.
-Pre-trade only, no intra-trade monitoring.  Every interception is traceable
-via :func:`log_risk_audit`.
-
-Settled call semantics (the §66.3 skeleton leaves these open):
-- Rules run as a batch summary, not an order walk: the constraints are on the
-  post-batch state, which walk order must not change.
-- Rule 4 (min trade value) runs first — it is a filter, not a verdict.  A
-  too-small BUY is marked ``skip`` and contributes to no later rule.
-- Any BLOCK refuses the whole batch (``passed is False``); callers reject the
-  batch on ``passed``, while :meth:`RiskCheckResult.is_blocked` attributes
-  which ticker a rule named.  Batch-level rules (total weight, turnover) name
-  every ticker they implicate so per-ticker matching stays batch-wide.
-- The *account* argument must expose ``cash: float`` and
-  ``holdings: dict[str, int]`` (broker.md ``SimAccount`` shape); held shares
-  are valued at the batch's limit price, V1 style.
-
-Gap #3 (limit-price rejection ownership) is undecided — the check position is
-a reserved interface (:func:`check_price_limit`), not an implementation.
+仅在下单前校验，防范策略失控与操作失误，所有拦截均可经 :func:`log_risk_audit` 追溯。
+调用语义：
+- 按整批汇总后状态判定，结果与订单遍历顺序无关。
+- Rule 4（最小交易金额）优先作为过滤器执行：过小买单标记 ``skip``，不参与后续规则。
+- 任一规则触发 BLOCK 即拒绝对整批放行（``passed=False``）。
+- 保留 :func:`check_price_limit` 涨跌停校验接口槽位。
 """
 
 from __future__ import annotations
@@ -32,10 +18,10 @@ from typing import Protocol
 
 from core.asset_rules import ASSET_PREFIXES, get_asset_rules
 
-#: Default audit sink (design §66.3), append-only JSON Lines.
+#: 默认追加写审计日志路径（JSON Lines）
 RISK_AUDIT_PATH = Path("logs/audit/risk_audit.jsonl")
 
-#: Rule-id -> audit reason.  Keep in sync with the seven-rule table (§66.3).
+#: 规则 ID 到审计原因的映射
 RULE_REASONS: dict[str, str] = {
     "single_weight": "post-trade single-name weight exceeds max_single_weight",
     "total_weight": "post-trade total position weight exceeds max_total_weight",
@@ -47,7 +33,7 @@ RULE_REASONS: dict[str, str] = {
 
 
 class SupportsHoldings(Protocol):
-    """Account shape required by :func:`pre_trade_risk_check`."""
+    """:func:`pre_trade_risk_check` 所需的账户接口协议。"""
 
     cash: float
     holdings: dict[str, int]
@@ -56,11 +42,11 @@ class SupportsHoldings(Protocol):
 @dataclass
 class RiskCheckResult:
     passed: bool
-    blocked_by: list[str]  # offending "rule:ticker" strings
-    warnings: list[str]  # warn-only "rule:ticker" strings
+    blocked_by: list[str]  # 拦截条目，格式为 "rule:ticker"
+    warnings: list[str]  # 告警条目，格式为 "rule:ticker"
 
     def is_blocked(self, ticker: str) -> bool:
-        # Elements are "rule:ticker"; match the ticker suffix exactly.
+        # 元素格式为 "rule:ticker"，按后缀精确匹配标的
         return any(
             b == ticker or b.split(":", 1)[-1] == ticker for b in self.blocked_by
         )
@@ -72,28 +58,12 @@ def pre_trade_risk_check(
     nav: float,
     config: dict,
 ) -> RiskCheckResult:
-    """Run the seven pre-trade rules over *orders*.
+    """对 ``orders`` 执行七条盘前风控检查。
 
-    Order dicts follow the order_generation contract:
-    ``ticker`` / ``side`` (``"BUY"``|``"SELL"``) / ``shares`` / ``limit_price``.
-    ``shares`` and ``limit_price`` must be strictly positive, NaN refused —
-    malformed orders raise ``ValueError`` rather than get scored (every rule
-    compares False against NaN, so a scored NaN order would pass as
-    tradable).  One ``limit_price`` per ticker per batch: a conflict raises
-    rather than letting rule 1's verdict flip on walk order.  Rule 4 mutates
-    its order in place (``o["skip"] = True``); rule 6 blocks ST *buys* only.
-
-    Config knobs (defaults = the §66.3 rule table):
-    ``max_single_weight`` 0.25 · ``max_total_weight`` 0.95 ·
-    ``max_daily_turnover`` 1.5 (one-sided, gross/2 — the layer measure) ·
-    ``min_trade_value`` 5000 ·
-    ``max_volume_share`` 0.01 · ``st_tickers`` iterable of tickers ·
-    ``daily_volumes`` mapping ticker -> daily volume in shares (rule 7;
-    the data source is gap #10, so volumes are injected here, not fetched).
+    ``shares`` 与 ``limit_price`` 必须严格为正（拒绝 NaN），同批次同标的限价必须一致。
+    Rule 4 会原地重算并覆写 ``o["skip"]``，保证重复执行幂等；Rule 6 仅拦截 ST 买入。
     """
-    # NaN-safe direction: `not (x > 0)`, never `x <= 0` — `nan <= 0` is False
-    # and a NaN nav would fail open (every rule dividing by nav compares
-    # False), same class as a scored NaN order.
+    # NaN 安全守卫：用 not (nav > 0) 避免 NaN 在比较中返回 False 导致风控失效
     if not nav > 0:
         raise ValueError(f"nav must be strictly positive (NaN refused), got {nav!r}")
 
@@ -108,18 +78,12 @@ def pre_trade_risk_check(
     blocked: list[str] = []
     warnings: list[str] = []
 
-    # Rule 4 first: a skipped BUY fills nowhere, so it must not move any
-    # weight, cash or turnover figure below.  Small SELLs are not filtered —
-    # skipping them would strand odd-lot positions (design skeleton BUY-only).
+    # Rule 4 优先：过滤过小买单（小额卖单不过滤，避免碎股仓位无法清出）
     active: list[dict] = []
     for o in orders:
         if o["side"] not in ("BUY", "SELL"):
             raise ValueError(f"order side must be 'BUY' or 'SELL', got {o['side']!r}")
-        # Malformed quantities invert the verdicts rather than fail them: a
-        # SELL of -2000 passes rule 5 and flips rule 1's post-trade weight,
-        # and every rule compares False against NaN so a NaN order would be
-        # waved through as tradable.  Refuse instead of scoring.  NaN-safe
-        # direction: `not (x > 0)`, since `nan <= 0` is False.
+        # 拒绝非正值与 NaN，防止比较恒为 False 导致风控放行异常订单
         if not o["shares"] > 0:
             raise ValueError(
                 f"order shares must be strictly positive (NaN refused), "
@@ -130,23 +94,13 @@ def pre_trade_risk_check(
                 f"order limit_price must be strictly positive (NaN refused), "
                 f"got {o['limit_price']!r}"
             )
-        # Rule 4 — derive the skip decision fresh from the current threshold
-        # (OCR2 finding 2).  Nothing else writes o["skip"], so a pre-set flag
-        # is leftover state from an earlier pass on these dicts; honouring it
-        # would silently drop the order from every later rule and could make a
-        # batch pass that should be blocked.  Re-running on the same orders is
-        # idempotent: the flag is recomputed, never trusted.
+        # 始终按当前阈值重算 skip，避免残留状态破坏幂等性
         skip = o["side"] == "BUY" and o["shares"] * o["limit_price"] < min_trade
         o["skip"] = skip
         if not skip:
             active.append(o)
 
-    # Batch aggregates: per-ticker post-trade value, per-ticker sell shares.
-    # One price basis per ticker (OCR finding 5): the held shares are valued
-    # at the batch's limit price for that ticker, so two different prices for
-    # one ticker would make rule 1's verdict depend on walk order.  The
-    # pipeline emits one limit price per ticker per day (decision-day close);
-    # anything else is refused rather than scored.
+    # 汇总批次净变动与卖出股数；同标的限价冲突直接报错，避免 Rule 1 结果依赖遍历顺序
     px: dict[str, float] = {}
     buy_value: dict[str, float] = {}
     sell_value: dict[str, float] = {}
@@ -168,47 +122,36 @@ def pre_trade_risk_check(
             sell_shares[ticker] = sell_shares.get(ticker, 0) + o["shares"]
     tickers = list(px)
 
-    # Rule 1 — single-name post-trade weight (held + this batch's net).
+    # Rule 1：单标的事后持仓权重上限
     for ticker in tickers:
         held = account.holdings.get(ticker, 0) * px[ticker]
         post_value = held + buy_value.get(ticker, 0.0) - sell_value.get(ticker, 0.0)
         if post_value / nav > max_single:
             blocked.append(f"single_weight:{ticker}")
 
-    # Rule 2 — total post-trade position weight (cash gap keeps the buffer).
+    # Rule 2：总事后持仓权重上限（保留现金缓冲）
     post_cash = account.cash - sum(buy_value.values()) + sum(sell_value.values())
     if (nav - post_cash) / nav > max_total:
         blocked.extend(f"total_weight:{ticker}" for ticker in tickers)
 
-    # Rule 3 — daily turnover, one-sided like the rest of the execution layer
-    # (portfolio_construction.md: turnover = sum(|Δw|)/2; OCR2 finding 3).
-    # A rotation sells one name and buys another, and gross counts both legs:
-    # warning on gross would fire ordinary rebalances at half the threshold.
-    # Warn only: hard-blocking turnover destroys the signal (§66.3).
+    # Rule 3：单日单边换手率（gross / 2 / nav）超限仅告警，不硬性拦截
     gross = sum(buy_value.values()) + sum(sell_value.values())
     turnover = gross / 2.0 / nav
     if turnover > max_turnover:
         warnings.extend(f"turnover:{ticker}" for ticker in tickers)
 
-    # Rule 5 — no short selling.  The prohibition is the ASSET_RULES
-    # per-type "short" flag (§69.5 parameter source), not a hardcoded False.
+    # Rule 5：禁止裸卖空（按 ASSET_RULES 判定该资产类别是否允许做空）
     for ticker in tickers:
         if sell_shares.get(ticker, 0) > account.holdings.get(ticker, 0):
             if not _asset_rules_for(ticker)["short"]:
                 blocked.append(f"short_forbidden:{ticker}")
 
-    # Rule 6 — ST instruments are excluded upstream (research filter); this
-    # is the defense-in-depth backstop against *adding* them (OCR finding 3).
-    # Sells of an ST name are allowed: a position that became ST after
-    # purchase must stay exitable, or risk control strands it.
+    # Rule 6：禁止买入 ST 标的；允许卖出已持有 ST 仓位以防锁死
     for ticker in tickers:
         if ticker in st_tickers and ticker in buy_value:
             blocked.append(f"st_forbidden:{ticker}")
 
-    # Rule 7 — liquidity: per-order shares vs daily volume.  Warn only (same
-    # treatment as the order_generation split warning).  Volume 0 is real
-    # input (a halted name), not "absent": 1% of 0 is 0, so any order is over
-    # the cap.  Only a missing entry stays silent.
+    # Rule 7：流动性检查（仅告警）；成交量为 0 视为停牌有效输入，仅缺失时不告警
     for o in active:
         volume = daily_volumes.get(o["ticker"])
         if volume is not None and o["shares"] > max_vol_share * volume:
@@ -218,14 +161,9 @@ def pre_trade_risk_check(
 
 
 def log_risk_audit(check: RiskCheckResult, path: str | Path = RISK_AUDIT_PATH) -> None:
-    """Append one JSONL record per finding to *path* (append-only).
+    """将拦截（BLOCK）与告警（WARN）追加写入 JSONL 审计日志。
 
-    Records carry ``timestamp`` / ``rule`` / ``ticker`` / ``action`` /
-    ``reason``.  ``action`` is ``BLOCK`` for each ``blocked_by`` entry and
-    ``WARN`` for each warning.  A clean check writes nothing — only
-    interceptions and warnings must be traceable.  Rule-4 skips are marked on
-    the order dict and are outside :class:`RiskCheckResult`, so they are not
-    audited here.
+    无异常时不写入；Rule 4 跳过的订单不在 ``RiskCheckResult`` 中，故不记入审计。
     """
     records = []
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -251,27 +189,14 @@ def log_risk_audit(check: RiskCheckResult, path: str | Path = RISK_AUDIT_PATH) -
 
 
 def check_price_limit(order: dict, prev_close: float, config: dict) -> str | None:
-    """Reserved check position for limit-price rejection (gap #3) — no body.
-
-    Ownership is undecided (ROADMAP gap #3): §69.5 puts limit rejection in
-    ``pre_trade_risk_check``, §18.3 six-gate ② puts it in broker, §24.6/§24.7
-    ``pre_check`` has its own ``strict_limit`` switch.  Implementing any of
-    them here would pre-judge the ruling, so this slot stays an interface.
-
-    Intended shape once ruled: given one order dict (``ticker`` / ``side`` /
-    ``shares`` / ``limit_price``), the previous close and config (e.g.
-    ``strict_limit``), return ``"price_limit:{ticker}"`` when the order's
-    limit price breaches the board band derived from ASSET_RULES
-    ``price_limits`` / ``st_limit``, else ``None``.  Whether the band is
-    judged against prev close or the session open is part of the same ruling.
-    """
+    """涨跌停价格限制检查预留接口（归属未决，暂不实现具体逻辑）。"""
     raise NotImplementedError(
         "gap #3: limit-price rejection ownership undecided — interface only"
     )
 
 
 def _asset_rules_for(ticker: str) -> dict:
-    """ASSET_RULES row for *ticker*'s prefix.  Unknown prefix fails loudly."""
+    """按标的前缀查询资产规则，未知前缀直接报错。"""
     prefix = ticker[:2]
     asset_type = ASSET_PREFIXES.get(prefix)
     if asset_type is None:

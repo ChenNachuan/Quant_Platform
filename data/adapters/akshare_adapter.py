@@ -1,11 +1,6 @@
-"""AKShare source adapter — A-share daily market data.
+"""AKShare 数据源适配器（A 股日线行情）。
 
-Wraps ``akshare`` to pull raw daily OHLCV.  No watermark support (full pull
-each call).  API constraints handled internally: callers see only
-``fetch()`` → ``FetchResult``.
-
-Raw contract: ``adjust=""`` (no forward/backward adjustment) so the values
-are source-original and idempotent re-runs return identical prices.
+不支持增量水位线（每次全量拉取）；拉取时固定 ``adjust=""`` 保持原始未复权价格，确保重跑幂等。
 """
 
 from __future__ import annotations
@@ -21,15 +16,13 @@ __all__ = ["AkshareAdapter"]
 
 
 class AkshareAdapter(SourceAdapter):
-    """Fetch A-share daily bars via ``akshare``."""
+    """通过 ``akshare`` 拉取 A 股日线行情。"""
 
     requests_per_second = 5.0
 
     _ASSET_TYPES = ["stock"]
 
     def __init__(self, symbols: list[str] | None = None) -> None:
-        # Minimal default: one liquid large-cap.  Full-market paging is
-        # iteration 2+ scope; the ABC contract is what ac-1 verifies.
         self._symbols = symbols or ["000001"]
 
     def list_asset_types(self) -> list[str]:
@@ -56,12 +49,12 @@ class AkshareAdapter(SourceAdapter):
                     period="daily",
                     start_date=date_str,
                     end_date=date_str,
-                    adjust="",  # raw contract: source-original values (fix 5)
-                    timeout=FETCH_TIMEOUT,  # SDK default is None (pins thread on hang)
+                    adjust="",  # 原始未复权价格
+                    timeout=FETCH_TIMEOUT,  # SDK 默认为 None，超时不设限易挂起线程
                 )
                 if df is not None and len(df) > 0:
                     frames.append(df)
-        else:  # pragma: no cover — guarded above
+        else:  # pragma: no cover
             raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
         import pandas as pd
@@ -74,5 +67,5 @@ class AkshareAdapter(SourceAdapter):
             asset_type=asset_type,
             trade_date=trade_date,
             row_count=len(combined),
-            watermark=None,  # akshare does not support incremental watermark
+            watermark=None,  # AKShare 不支持增量水位线
         )

@@ -1,20 +1,18 @@
-
 from typing import Dict, Any
 from .base import BaseRouter
 
+
 class XtQuantConnector(BaseRouter):
-    """
-    Connector for XtQuant trading gateway (ThinkTrader).
-    """
+    """XtQuant 交易网关（迅投 ThinkTrader）连接器。"""
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.connected = False
-        # self.xt_trader = XtQuantTrader(path, session_id)
+        # 预留 XtQuantTrader 实例占位
 
     def connect(self):
         print("Connecting to XtQuant gateway...")
-        # XtQuant connection logic
-        # self.xt_trader.connect()
+        # 预留 XtQuant 网关连接逻辑
         self.connected = True
         print("Connected to XtQuant.")
 
@@ -26,9 +24,9 @@ class XtQuantConnector(BaseRouter):
          print(f"XtQuant: Cancelling order {order_id}")
 
     def query_account(self) -> Dict[str, Any]:
-        # return self.xt_trader.query_asset()
+        # 预留实盘资金查询接口
         return {"total_asset": 1000000.0}
 
     def query_position(self) -> Dict[str, Any]:
-        # return self.xt_trader.query_pos()
+        # 预留实盘持仓查询接口
         return {}

@@ -1,1 +1,1 @@
-# DQC (Data Quality Control) module
+# DQC（数据质量控制）模块

@@ -1,8 +1,4 @@
-"""Test conventions and shared constants (design/core/testing.md).
-
-Constants and conventions only.  Golden-sample strategy logic lives in
-``tests/golden/``; the five-step validation runner lands at S8.
-"""
+"""测试约定与共享常量（见 ``design/core/testing.md``），不含具体黄金样本策略逻辑。"""
 
 TOLERANCE = 1e-4
 

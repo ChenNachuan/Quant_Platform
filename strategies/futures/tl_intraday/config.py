@@ -1,4 +1,4 @@
-"""Single source of parameters for the TL intraday report reproduction."""
+"""TL 日内策略复现参数与研报基准指标配置。"""
 
 from __future__ import annotations
 

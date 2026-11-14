@@ -1,16 +1,6 @@
-"""Factor governance layer (S11-T2).
+"""因子治理层：准入/退出线、生命周期状态机与质量评估。
 
-Admission / exit lines, lifecycle state machine, and quality judgement for
-registered factors.  Consumes IC series from ``factor_evaluation`` and metadata
-from ``FactorRegistry`` (code-is-registry).  See
-``docs/design/research/factor_governance.md`` and §62 of the archive.
-
-Iteration 1 scope (ac-1..ac-3): ``META_FIELDS``, ``list_factor_meta``,
-``evaluate_factor``, ``check_factor_health``, ``check_admission``,
-``transition_lifecycle``.
-
-Iteration 2 scope (ac-4..ac-7): ``detect_redundant_factors``,
-``redundancy_tier``, ``diagnose_factor``, ``plot_factor_report``.
+消费 ``factor_evaluation`` 的 IC 序列及 ``FactorRegistry`` 的元数据。
 """
 
 from __future__ import annotations
@@ -56,10 +46,10 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Constants
+# 常量定义
 # ---------------------------------------------------------------------------
 
-#: Metadata class attributes extracted from every Factor subclass (§62.2).
+#: 从 Factor 子类提取的元数据类属性。
 META_FIELDS: list[str] = [
     "name",
     "version",
@@ -72,37 +62,33 @@ META_FIELDS: list[str] = [
     "created_at",
 ]
 
-# Admission gate thresholds (D2) — same IC / IR / t as ``check_gate``.
-#: Max allowed |avg cross-sectional Spearman| vs existing factors.
+#: 准入条件允许的与现有因子最大平均截面 Spearman 相关系数绝对值。
 CORR_MAX: float = 0.5
 
-# Exit-line thresholds (D1).
-#: Rolling-36m t-statistic exit threshold (strict <).
+#: 滚动 36 个月 t 统计量退出阈值（严格小于）。
 EXIT_T_THRESHOLD: float = 1.5
 
-# Health-cascade ratios (D1).
-#: recent_6m > HEALTHY_RATIO * mean_ic → healthy.
+#: 健康度级联比例阈值：recent_6m > HEALTHY_RATIO * mean_ic → healthy。
 HEALTHY_RATIO: float = 0.7
-#: recent_6m > WARNING_RATIO * mean_ic → warning.
+#: 健康度级联比例阈值：recent_6m > WARNING_RATIO * mean_ic → warning。
 WARNING_RATIO: float = 0.5
-#: recent_12m < EXIT_RATIO * mean_ic → exit (relative decay).
+#: 健康度级联比例阈值：recent_12m < EXIT_RATIO * mean_ic → exit（相对衰减）。
 EXIT_RATIO: float = 0.3
 
-# Window lengths in trading days (daily IC).
+# 日频 IC 窗口长度（交易日）
 WINDOW_6M: int = 126
 WINDOW_12M: int = 252
 WINDOW_36M: int = 756
 
-# Lifecycle legal transitions (D3).
+# 生命周期合法状态转移
 _LIFECYCLE_LEGAL: set[tuple[str, str]] = {
     ("draft", "production"),
     ("production", "deprecated"),
 }
 
-# Redundancy tier / diagnostic thresholds (D8, D4, settled item 2 & 3).
-#: cs_std_cv above this marks an abnormal cross-section.
+#: 截面标准差变异系数异常阈值。
 CS_STD_CV_ABNORMAL: float = 0.5
-#: Default number of quantile groups for plot_factor_report.
+#: plot_factor_report 默认分层组数。
 N_QUANTILE_GROUPS: int = 5
 
 
@@ -112,11 +98,7 @@ N_QUANTILE_GROUPS: int = 5
 
 
 def list_factor_meta() -> list[dict[str, Any]]:
-    """Walk FactorRegistry and extract class-level metadata (§62.2).
-
-    Returns one dict per registered factor with keys from :data:`META_FIELDS`.
-    A missing attribute becomes ``None``.
-    """
+    """遍历 FactorRegistry 提取所有已注册因子的类级元数据（键为 META_FIELDS，缺失则为 None）。"""
     from core.registry import FactorRegistry
 
     result: list[dict[str, Any]] = []
@@ -127,7 +109,7 @@ def list_factor_meta() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# evaluate_factor (D5)
+# evaluate_factor
 # ---------------------------------------------------------------------------
 
 
@@ -136,24 +118,11 @@ def evaluate_factor(
     returns: pd.DataFrame,
     factor_name: str,
 ) -> dict[str, Any]:
-    """Per-date cross-sectional Spearman IC evaluation (§62.3, D5).
+    """按日期计算截面 Spearman IC 评估指标。
 
-    Parameters
-    ----------
-    factor_values
-        ``[date, ticker, factor_name]`` — raw or processed factor values.
-    returns
-        ``[date, ticker, fwd_return]`` — forward returns aligned to the same
-        date / ticker grid.
-    factor_name
-        Column name of the factor in *factor_values*.
-
-    Returns
-    -------
-    dict
-        ``{ic_mean, ic_ir, ic_t, n_periods, coverage}`` — ``ic_mean`` at 4dp,
-        ``ic_ir`` at 3dp, ``ic_t`` at 2dp, ``coverage`` at 3dp.
-        ``ic_ir = 0.0`` when ``std == 0``.  ``t = IR * sqrt(n)``.
+    参数 ``factor_values`` 为 ``[date, ticker, factor_name]``，``returns`` 为对齐后的
+    ``[date, ticker, fwd_return]``。返回 ``{ic_mean, ic_ir, ic_t, n_periods, coverage}``，
+    其中 ``ic_std == 0`` 时 ``ic_ir = 0.0``，``t = IR * sqrt(n)``。
     """
     merged = factor_values.merge(returns, on=["date", "ticker"])
     ic_series = merged.groupby("date").apply(
@@ -176,31 +145,25 @@ def evaluate_factor(
 
 
 # ---------------------------------------------------------------------------
-# check_factor_health (D1 cascade)
+# check_factor_health
 # ---------------------------------------------------------------------------
 
 
 def check_factor_health(ic_history: pd.Series) -> str:
-    """Health cascade: absolute exit line first, then relative decay (D1).
+    """因子健康度级联判定：先判绝对退出线，再判相对衰减。
 
-    Cascade order::
-
-        1. exit  if ic_mean < 0.03  or  trailing-756-obs t < 1.5
-        2. healthy  if recent_6m > 0.7 * mean_ic
-        3. warning  if recent_6m > 0.5 * mean_ic
-        4. exit  if recent_12m < 0.3 * mean_ic
-        5. warning
-
-    A zero-std window does **not** fire the t trigger.  Shorter-than-756
-    series use all available observations for the trailing t.
+    判定顺序：
+    1. ``ic_mean < 0.03`` 或近 756 期 ``t < 1.5`` → ``exit``（零标准差窗口不触发 t 退出，不足 756 期则使用全部样本）
+    2. ``recent_6m > 0.7 * mean_ic`` → ``healthy``
+    3. ``recent_6m > 0.5 * mean_ic`` → ``warning``
+    4. ``recent_12m < 0.3 * mean_ic`` → ``exit``
+    5. 其余 → ``warning``
     """
     mean_ic = float(ic_history.mean())
 
-    # Step 1 — absolute exit line.
     if mean_ic < EXIT_IC_THRESHOLD:
         return "exit"
 
-    # Step 1 (cont) — trailing-36m t exit line.
     window = ic_history.tail(WINDOW_36M)
     if len(window) > 0:
         w_mean = float(window.mean())
@@ -210,7 +173,6 @@ def check_factor_health(ic_history: pd.Series) -> str:
             if t < EXIT_T_THRESHOLD:
                 return "exit"
 
-    # Steps 2-5 — relative decay cascade.
     recent_6m = float(ic_history.tail(WINDOW_6M).mean())
     recent_12m = float(ic_history.tail(WINDOW_12M).mean())
 
@@ -224,34 +186,15 @@ def check_factor_health(ic_history: pd.Series) -> str:
 
 
 # ---------------------------------------------------------------------------
-# check_admission (D2)
+# check_admission
 # ---------------------------------------------------------------------------
 
 
 def check_admission(metrics: dict, max_corr: float) -> tuple[bool, dict]:
-    """Admission gate: per-condition verdict (D2).
+    """因子准入检验（严格不等式，边界值不通过）。
 
-    Four conditions, all strict (boundary values fail):
-
-    - ``ic_mean > 0.04``
-    - ``ic_ir > 0.5``
-    - ``ic_t > 2``
-    - ``max_corr < 0.5``
-
-    Parameters
-    ----------
-    metrics
-        Output of :func:`evaluate_factor` — needs ``ic_mean``, ``ic_ir``,
-        ``ic_t`` keys.
-    max_corr
-        Candidate's max ``|avg cross-sectional Spearman|`` against existing
-        factors.
-
-    Returns
-    -------
-    tuple[bool, dict]
-        ``(all_passed, detail)`` where *detail* maps condition name to
-        ``{value, threshold, passed}``.
+    四项条件：``ic_mean > 0.04``、``ic_ir > 0.5``、``ic_t > 2``、``max_corr < 0.5``。
+    返回 ``(all_passed, detail)``，``detail`` 按条件名记录 ``{value, threshold, passed}``。
     """
     ic = float(metrics["ic_mean"])
     ir = float(metrics["ic_ir"])
@@ -285,17 +228,12 @@ def check_admission(metrics: dict, max_corr: float) -> tuple[bool, dict]:
 
 
 # ---------------------------------------------------------------------------
-# transition_lifecycle (D3)
+# transition_lifecycle
 # ---------------------------------------------------------------------------
 
 
 def transition_lifecycle(current: str, target: str) -> str:
-    """Lifecycle state machine (D3).
-
-    Legal transitions are exactly ``draft → production`` and
-    ``production → deprecated``.  Every other pair — including self,
-    reverse, and ``draft → deprecated`` — raises :class:`ValueError`.
-    """
+    """生命周期状态机：仅允许 ``draft → production`` 与 ``production → deprecated``，其余均抛出 ``ValueError``。"""
     if (current, target) not in _LIFECYCLE_LEGAL:
         raise ValueError(
             f"illegal lifecycle transition: {current!r} -> {target!r}; "
@@ -305,7 +243,7 @@ def transition_lifecycle(current: str, target: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# detect_redundant_factors (D9) + redundancy_tier (D4)
+# detect_redundant_factors & redundancy_tier
 # ---------------------------------------------------------------------------
 
 
@@ -313,19 +251,12 @@ def detect_redundant_factors(
     factor_matrix: pd.DataFrame,
     threshold: float = 0.7,
 ) -> list[tuple[str, str, float]]:
-    """Detect redundant factor pairs by per-date cross-sectional Spearman (§62.7).
+    """按日截面 Spearman 相关系数检测冗余因子对。
 
-    Input *factor_matrix* is the wide table from
-    :func:`research.factor_storage.load_factor_matrix` — ``[date, ticker, f1,
-    f2, ...]``.  Per-date all-NaN rows are dropped before pairwise computation
-    (settled item 1).  For each pair of factor columns the per-date
-    cross-sectional Spearman correlation is averaged; pairs with
-    ``|mean| > threshold`` (strict) are kept.
-
-    Returns ``[(f1, f2, round(avg, 3))]`` sorted by ``-|corr|`` (D4).
+    接收宽表 ``[date, ticker, f1, f2, ...]``，先剔除全 NaN 因子行，保留平均相关系数绝对值
+    严格大于 ``threshold`` 的因子对，按 ``-|corr|`` 降序返回 ``[(f1, f2, round(avg, 3))]``。
     """
     factor_cols = [c for c in factor_matrix.columns if c not in ("date", "ticker")]
-    # Settled item 1: drop rows where all factor columns are NaN.
     cleaned = factor_matrix.dropna(subset=factor_cols, how="all")
     pairs: list[tuple[str, str, float]] = []
     for i, f1 in enumerate(factor_cols):
@@ -341,17 +272,7 @@ def detect_redundant_factors(
 
 
 def redundancy_tier(abs_corr: float) -> str:
-    """Map ``|avg cross-sectional Spearman|`` to a tier label (D4).
-
-    ===============  ==========
-    |corr| range    tier
-    ===============  ==========
-    > 0.9            high
-    (0.7, 0.9]       possible
-    [0.5, 0.7]       warn
-    < 0.5            independent
-    ===============  ==========
-    """
+    """将平均截面 Spearman 相关系数绝对值映射为冗余分档：``high`` (>0.9)、``possible`` ((0.7, 0.9])、``warn`` ([0.5, 0.7])、``independent`` (<0.5)。"""
     if abs_corr > 0.9:
         return "high"
     if abs_corr > 0.7:
@@ -362,28 +283,12 @@ def redundancy_tier(abs_corr: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# diagnose_factor (D8)
+# diagnose_factor
 # ---------------------------------------------------------------------------
 
 
 def diagnose_factor(df: pd.DataFrame, factor_name: str) -> dict[str, Any]:
-    """Five-branch anomaly diagnosis first step (§62.9, D8).
-
-    Returns a 12-key dict describing data quality.  ``cs_std_cv > 0.5``
-    (settled item 2) marks an abnormal cross-section.
-
-    Routing table:
-
-    ==========================  ==================  =================================
-    symptom                     direction           check
-    ==========================  ==================  =================================
-    all tickers abnormal        data problem        load_bars rows / NaN ratio / dates
-    specific ticker abnormal    suspension/ST/exit  listing status
-    specific date abnormal      data source issue   depends_hash changed?
-    value range abnormal        div-zero/overflow   manual single-date cross-section
-    IC sudden change            parameter or decay  §18.3 four indicators
-    ==========================  ==================  =================================
-    """
+    """因子异常数据质量诊断，返回 12 项统计指标（``cs_std_cv > 0.5`` 标识截面异常）。"""
     s = df[factor_name]
     by_date_nan = df.groupby("date")[factor_name].apply(lambda x: x.isna().mean())
     cs_std = df.groupby("date")[factor_name].std()
@@ -406,7 +311,7 @@ def diagnose_factor(df: pd.DataFrame, factor_name: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# plot_factor_report (D7)
+# plot_factor_report
 # ---------------------------------------------------------------------------
 
 
@@ -416,14 +321,7 @@ def plot_factor_report(
     factor_name: str,
     n_groups: int = N_QUANTILE_GROUPS,
 ) -> None:
-    """2×2 factor report tearsheet (§62.10, D7).
-
-    Four panels: IC bars with mean red dashed line / cumulative IC /
-    cross-section distribution histogram (bins=50) / quantile cumulative
-    returns (``n_groups=5``, settled item 3).  Saves to
-    ``research/reports/{factor_name}_tearsheet.png`` at ``dpi=150``.
-    Lazy matplotlib import; never calls ``plt.show``.
-    """
+    """生成 2×2 因子评估报告图（IC 序列、累计 IC、截面分布直方图、分位累计收益），保存至 ``research/reports/{factor_name}_tearsheet.png``。"""
     import matplotlib.pyplot as plt
 
     merged = factor_values.merge(returns, on=["date", "ticker"])
@@ -434,20 +332,16 @@ def plot_factor_report(
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # [1] IC bars + mean red dashed line
     axes[0, 0].bar(range(len(ic_series)), ic_series.values, width=1.0)
     axes[0, 0].axhline(ic_series.mean(), color="red", ls="--")
     axes[0, 0].set_title(f"IC Series (mean={ic_series.mean():.4f})")
 
-    # [2] Cumulative IC
     axes[0, 1].plot(ic_series.cumsum().values)
     axes[0, 1].set_title("Cumulative IC")
 
-    # [3] Cross-section distribution histogram
     axes[1, 0].hist(factor_values[factor_name].dropna(), bins=50)
     axes[1, 0].set_title("Cross-Section Distribution")
 
-    # [4] Quantile cumulative returns (n_groups=5)
     _plot_quantile_returns(axes[1, 1], merged, factor_name, n_groups)
     axes[1, 1].set_title(f"Quantile Returns (n={n_groups})")
 
@@ -459,7 +353,7 @@ def plot_factor_report(
 
 
 def _plot_quantile_returns(ax, merged: pd.DataFrame, factor_name: str, n: int) -> None:
-    """Panel 4 helper: cumulative mean fwd_return per quantile group."""
+    """绘制各分位数组合的累计平均前瞻收益。"""
     try:
         q = merged.groupby("date")[factor_name].transform(
             lambda s: pd.qcut(s.rank(method="first"), n, labels=False) + 1

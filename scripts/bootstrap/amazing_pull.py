@@ -1,31 +1,8 @@
-"""AmazingData -> raw staging parquet (QUANT-35 bootstrap, human-authorized).
+"""AmazingData 原始暂存拉取脚本（QUANT-35，运行于 amazingdata 容器内）。
 
-Runs **inside** the amazingdata container — the SDK is only installed there::
-
-    docker compose run --rm --no-deps amazingdata \\
-        python3 /opt/project/scripts/bootstrap/amazing_pull.py \\
-        --tickers 510300.SH,... --start 2024-12-01 --end 2025-03-31 \\
-        --staging /opt/project/data_platform/raw/amazingdata
-
-Writes the source's own frames (source column names, source units) with plain
-``to_parquet``.  No schema alignment happens here: the container has no
-pandera, and ``data/storage_schema.py`` is the host-side authority.  The
-fetchers land the schema-aligned files from this staging.
-
-Measured source facts (``task/probe_amazing_quant35.log``, not inferred):
-
-* ``query_kline`` columns ``code, kline_time, open, high, low, close, volume,
-  amount``; ``volume`` is 股 and ``amount`` is 元 — already the storage unit,
-  so no ×100 / ×1000 scaling the way tushare needs.
-* ``code`` is ``{6 digits}.{SH|SZ|BJ}``, the same string as the repo ticker.
-* ``InfoData.get_fund_nav`` carries ``NAV_ADJ_FACTOR`` — a measured cumulative
-  adjustment factor that moves on distributions.  ``get_dividend`` /
-  ``get_right_issue`` return 0 rows for these ETFs over 1990-2025, so the NAV
-  factor is the only adjustment source this vendor exposes.
-* ``InfoData.get_fund_share`` carries ``FLOAT_SHARE`` in 万份.
-
-Credentials arrive from the container's env (``docker-compose.yml`` env_file);
-they are never printed and never written to disk by this script.
+从 AmazingData 拉取交易日历、日线（volume 股、amount 元）、基金净值（NAV_ADJ_FACTOR）
+与份额（FLOAT_SHARE 万份），以原始列名写入暂存 parquet，再由宿主机拉取脚本完成 schema 对齐。
+登录凭证从容器环境变量读取，不打印、不落盘。
 """
 
 from __future__ import annotations
@@ -37,8 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-#: Source frames that must survive the staging round-trip.  Anything else the
-#: SDK returns is dropped on write so the staging files stay small and stable.
+#: 暂存保留列白名单，其余 SDK 返回字段写入前丢弃
 KLINE_COLS = ["code", "kline_time", "open", "high", "low", "close", "volume", "amount"]
 NAV_COLS = [
     "MARKET_CODE",
@@ -51,7 +27,7 @@ SHARE_COLS = ["MARKET_CODE", "CHANGE_DATE", "FUND_SHARE", "FLOAT_SHARE"]
 
 
 def parse_ymd(value: str) -> int:
-    """``YYYYMMDD`` or ``YYYY-MM-DD`` -> the int AmazingData expects."""
+    """将 YYYYMMDD 或 YYYY-MM-DD 转为整数日期。"""
     text = str(value).replace("-", "").strip()
     if len(text) != 8 or not text.isdigit():
         raise ValueError(f"not a date (YYYYMMDD or YYYY-MM-DD): {value!r}")
@@ -59,7 +35,7 @@ def parse_ymd(value: str) -> int:
 
 
 def filter_calendar(all_days, start: int, end: int) -> pd.DataFrame:
-    """Narrow ``BaseData.get_calendar()``'s full history to ``[start, end]``."""
+    """将全量交易日历裁剪至 [start, end] 区间。"""
     frame = pd.DataFrame({"cal_date": list(all_days)})
     frame["cal_date"] = pd.to_numeric(frame["cal_date"], errors="coerce").astype(
         "Int64"
@@ -70,7 +46,7 @@ def filter_calendar(all_days, start: int, end: int) -> pd.DataFrame:
 
 
 def pull_kline(market_data, tickers: list[str], start: int, end: int) -> pd.DataFrame:
-    """One ``query_kline`` call for the whole ticker list; stacked source frame."""
+    """批量调用 query_kline 拉取指定标的日线并拼接。"""
     import AmazingData as ad
 
     result = market_data.query_kline(
@@ -107,7 +83,7 @@ def _dict_frames(result, label: str) -> pd.DataFrame:
 
 
 def keep(frame: pd.DataFrame, wanted: list[str]) -> pd.DataFrame:
-    """Project *frame* onto *wanted*, keeping every column that actually exists."""
+    """筛选并校验必需列，缺列时报错。"""
     present = [c for c in wanted if c in frame.columns]
     missing = [c for c in wanted if c not in frame.columns]
     if missing:
@@ -181,7 +157,7 @@ def main() -> int:
         share.to_parquet(share_path, engine="pyarrow", index=False)
         print(f"fund_share: {len(share)} rows -> {share_path}", flush=True)
     finally:
-        # Release the connection slot — the shared account has a login cap.
+        # 释放登录连接名额（共享账号有并发上限）
         try:
             ad.logout(username=os.getenv("USER"))
             print("logout ok", flush=True)

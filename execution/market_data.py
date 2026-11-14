@@ -1,29 +1,11 @@
-"""Gap #10 data-fetching contract for the execution domain.
+"""执行域纯函数行情读取接口。
 
-Design authority: ``docs/design/execution/order_generation.md`` (§66) and the
-contract settled in QUANT-27 (pinned in issue metadata ``kb_snapshot``).
-Three entry points shared by order generation now and the broker (S7-T4)
-later — defined once here; consumers import, never re-derive.
-
-Rules (kb_snapshot):
-
-1. *bars* is a ``load_bars`` long table (``date`` / ``ticker`` / OHLCV).
-   Pure functions: no IO, no module state, no caching.
-2. ``asof`` is strict trade-date equality — **no last-known fallback**.  A
-   suspended day returns ``None`` / is omitted; the order path then skips
-   the ticker and the broker REJECTs.
-3. Missing / NaN / non-positive prices return ``None`` (keys are omitted)
-   — NaN-safe refusal to report a price, never a fabricated one.
-4. Prices are **raw and unadjusted** (tradeable).  Adjustment belongs
-   upstream; never adjust here.
-5. ``field`` is ``"close"`` or ``"open"`` only.  T3 sizes and limits on the
-   decision-day close; T4 fills on T+1 open via ``field="open"`` (gap #5
-   ruling B) — no second fetch, no second copy of this code.
-6. ``get_daily_volume`` is that day's **shares** (``bars_daily.volume``,
-   int64 shares).  Liquidity / rule-7 checks compare order shares against
-   ``max_volume_share * volume``.
-7. A duplicate ``(ticker, date)`` row raises ``ValueError`` — a frame with
-   two rows for one day has no single price.
+契约规则：
+1. ``bars`` 为长表（date / ticker / OHLCV），纯函数无 I/O、无模块状态、无缓存。
+2. ``asof`` 严格按交易日等值匹配，绝不向历史最近日回退；停牌日返回 ``None``。
+3. 缺失、NaN 或非正价格返回 ``None``（批量查询时忽略对应键），绝不伪造价格。
+4. 返回未复权的原始可交易价格，``field`` 仅允许 ``"close"`` 或 ``"open"``。
+5. ``get_daily_volume`` 返回当日成交股数（shares）；同 ``(ticker, date)`` 重复行抛出 ``ValueError``。
 """
 
 from __future__ import annotations
@@ -43,15 +25,7 @@ def get_latest_price(
     asof: date | str,
     field: str = "close",
 ) -> float | None:
-    """Raw *field* price of *ticker* on *asof*, or ``None``.
-
-    Strict trade-date equality (rule 2): a day without a row is a suspended
-    day and reports no price — the caller skips the ticker rather than
-    pricing it off a stale close.  A NaN or non-positive price reports
-    ``None`` too (rule 3).  Raises ``ValueError`` for an unknown *field*
-    (rule 5), a *bars* frame missing its contract columns (rule 1), or
-    duplicate ``(ticker, date)`` rows (rule 7).
-    """
+    """获取 ``ticker`` 在 ``asof`` 当日的原始 ``field`` 价格；停牌或无效价格返回 ``None``。"""
     _check_field(field)
     _require_columns(bars, ("date", "ticker", field))
     rows = _day_rows(bars, ticker, asof)
@@ -66,12 +40,7 @@ def get_prices(
     asof: date | str,
     field: str = "close",
 ) -> dict[str, float]:
-    """Map of ticker -> raw *field* price on *asof*.
-
-    Keys with no valid price are **omitted** (rules 2/3) — the dict holds
-    only prices a caller may trade against.  A bare string is refused: it
-    would iterate as characters instead of one ticker.
-    """
+    """批量获取 ``asof`` 当日有效价格映射，缺失或停牌标的自动省略（拒绝裸字符串）。"""
     if isinstance(tickers, (str, bytes)):
         raise TypeError(
             f"tickers must be a sequence of tickers, not a bare string — "
@@ -90,14 +59,7 @@ def get_daily_volume(
     ticker: str,
     asof: date | str,
 ) -> float | None:
-    """That day's traded **shares** for *ticker*, or ``None``.
-
-    Rule 6: the unit is shares (``bars_daily.volume``), not lots or notional.
-    A missing row (suspended), a NaN volume or a negative volume reports
-    ``None`` — refusing to make up liquidity.  A genuine zero-volume day
-    reports ``0.0``: that is data, not absence of data.  Raises ``ValueError``
-    for a *bars* frame without the contract columns or duplicate rows.
-    """
+    """获取 ``ticker`` 在 ``asof`` 当日的成交股数；缺失或无效返回 ``None``，零成交返回 ``0.0``。"""
     _require_columns(bars, ("date", "ticker", "volume"))
     rows = _day_rows(bars, ticker, asof)
     if rows.empty:
@@ -114,9 +76,7 @@ def get_daily_volume(
     return value
 
 
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
+# --- 内部工具函数 ---
 
 
 def _check_field(field: str) -> None:
@@ -148,11 +108,7 @@ def _as_date(asof: date | str) -> date:
 
 
 def _day_rows(bars: pd.DataFrame, ticker: str, asof: date | str) -> pd.DataFrame:
-    """Rows of *bars* for (*ticker*, *asof*) — exact day, no fallback (rule 2).
-
-    Duplicate ``(ticker, date)`` rows raise (rule 7) before any value is
-    read: the caller must never have to pick between two closes.
-    """
+    """精确匹配 ``(ticker, asof)`` 当日行情行，存在重复行时抛出 ``ValueError``。"""
     day = _as_date(asof)
     subset = bars.loc[bars["ticker"] == ticker]
     if subset.empty:
@@ -168,7 +124,7 @@ def _day_rows(bars: pd.DataFrame, ticker: str, asof: date | str) -> pd.DataFrame
 
 
 def _positive_float(value: object) -> float | None:
-    """Report only a strictly positive finite float (NaN-safe, rule 3)."""
+    """仅返回严格为正且有限的浮点数（NaN 安全）。"""
     if value is None:
         return None
     try:

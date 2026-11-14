@@ -1,12 +1,7 @@
-"""Trading calendar -> ``data_platform/asset/calendar/{exchange}.parquet``.
+"""交易日历拉取脚本 -> ``data_platform/asset/calendar/{exchange}.parquet``。
 
-Source is **tushare ``trade_cal``** (see README "日历源" for why not akshare).
-One call covers the whole window; the file is a single per-exchange parquet,
-not one file per day.
-
-``--from-amazing`` lands the calendar ``amazing_pull.py`` staged instead —
-used by the golden-sample runner, whose bars come from AmazingData and whose
-tushare ``trade_cal`` quota is 1 call/hour.
+默认通过 tushare ``trade_cal`` 拉取开市交易日；传入 ``--from-amazing`` 时直接读取
+``amazing_pull.py`` 暂存的日历文件落库。
 """
 
 from __future__ import annotations
@@ -26,7 +21,7 @@ from _common import (
 
 
 def fetch_calendar(pro, exchange: str, start: str, end: str) -> pd.DataFrame:
-    """Return the open trading days in ``[start, end]`` for *exchange*."""
+    """拉取指定交易所 [start, end] 区间内的开市交易日。"""
     raw = pro.trade_cal(exchange=exchange, start_date=start, end_date=end)
     if raw is None or raw.empty:
         raise RuntimeError(f"trade_cal({exchange}, {start}, {end}) returned no rows")
@@ -68,9 +63,7 @@ def main() -> int:
             pro, args.exchange, yyyymmdd(args.start), yyyymmdd(args.end)
         )
 
-    # Filename exchange token is the lowercase storage name (core.asset_rules
-    # EXCHANGE_MAP): SSE -> sse, SZSE -> szse.  AmazingData's calendar is
-    # market-wide; the exchange only names the output file.
+    # 输出文件名使用小写交易所代码（SSE -> sse，SZSE -> szse）
     target = write_reference(
         frame, "calendar", args.data_root, exchange=args.exchange.lower()
     )

@@ -1,4 +1,4 @@
-"""Data domain — ingestion, storage schema, and access (DataAPI).
+"""数据域 — 采集、存储模式与访问接口（DataAPI）。
 
-Shared logic belongs here or in ``core/``; strategies do not grow private copies.
+共享逻辑归属本模块或 ``core/``，策略层禁止各自维护副本。
 """

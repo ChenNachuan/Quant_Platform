@@ -1,4 +1,4 @@
-"""Aggregate local CFFEX tick snapshots into report-period TL 1-minute bars."""
+"""将本地 CFFEX Tick 快照聚合为研报周期 TL 1 分钟 K 线。"""
 
 from __future__ import annotations
 

@@ -1,16 +1,8 @@
-"""Fundamentals -> ``data_platform/asset/cn_stock_fundamental/{month}.parquet``.
+"""基本面估值与股本拉取脚本 -> ``data_platform/asset/cn_stock_fundamental/{month}.parquet``。
 
-Source: tushare ``daily_basic`` (valuation ratios + share counts).  One file
-per month, 11 columns per ``FUNDAMENTAL_SCHEMA``.
-
-Unit conversions into the storage schema (``test_storage_schema`` fixtures:
-Maotai ``total_market_cap=2.0e12`` 元, ``total_shares=1_256_000_000`` 股):
-
-* ``total_mv`` / ``circ_mv`` are 万元 -> x 1e4 -> 元
-* ``total_share`` / ``float_share`` are 万股 -> x 1e4 -> 股
-
-``pe_lyr`` (static PE) has no ``daily_basic`` column and is left null — the
-schema allows it.  Optional for the golden sample.
+从 tushare ``daily_basic`` 按月写入 11 列基本面数据，并换算为标准单位：
+``total_mv``/``circ_mv``（万元 → 元）、``total_share``/``float_share``（万股 → 股），
+``pe_lyr`` 无对应来源字段故留空。
 """
 
 from __future__ import annotations
@@ -38,9 +30,7 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> pd.DataFrame:
     out["trade_date"] = pd.to_datetime(
         out["trade_date"].astype(str), format="%Y%m%d"
     ).dt.date
-    # Rename first, then validate the renamed column.  Mapping ``ts_code`` into
-    # a new ``ticker`` before this rename would leave two ``ticker`` columns
-    # and ``align_schema`` refuses the duplicate.
+    # 先重命名再做 ticker 校验，避免出现重复 ticker 列
     out = out.rename(columns=_RENAME)
     out["ticker"] = out["ticker"].map(ticker_convert)
 
@@ -55,7 +45,7 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> pd.DataFrame:
     out["pe_ttm"] = pd.to_numeric(out["pe_ttm"], errors="coerce")
     out["pb"] = pd.to_numeric(out["pb"], errors="coerce")
     out["ps_ttm"] = pd.to_numeric(out["ps_ttm"], errors="coerce")
-    out["pe_lyr"] = float("nan")  # no daily_basic column; schema-nullable
+    out["pe_lyr"] = float("nan")  # daily_basic 无静态市盈率字段，按 schema 留空
     out["quality_flag"] = 0
     return out
 

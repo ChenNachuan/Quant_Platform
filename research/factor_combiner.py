@@ -1,32 +1,11 @@
-"""Multi-factor combination and combination quality evaluation.
+"""多因子合成与合成质量评估。
 
-Turns the N z-scored factor columns that survived single-factor screening into
-one ``combined_score`` per ``(date, ticker)``, then judges whether that score
-deserves to become an :class:`~research` AlphaSignal (factor_combiner.md §16,
-§63).  Three responsibilities and nothing else:
-
-1. :func:`preprocess` — the pre-combination clean-up every factor column goes
-   through first: **winsorize (3 MAD) → cross-sectional z-score → neutralize**.
-   Each step is ``groupby(date)``; a full-sample statistic is look-ahead.
-2. :class:`FactorCombiner` — ``equal_weight`` (the default and the primary
-   path) or ``ic_ir_weight`` / ``ic_weight`` from an exogenous IC history.
-3. :func:`FactorCombiner.evaluate` / :func:`write_eval_report` — the 8-metric
-   table, a :func:`factor_contribution` breakdown, and
-   ``data/signals/{name}/eval_report.json`` carrying ``config_snapshot`` as
-   ``path@hash``.
-
-Not this module: single-factor evaluation gating (S11 ``factor_evaluation``),
-``score → position weights`` (S6-T2 ``alpha_signal.signal_to_weights``), ML
-combination (that is ``MLFactor``, S11), Gram-Schmidt / PCA orthogonalisation,
-portfolio-level Barra neutralisation, and correlation-clustering de-duplication
-(which lives at factor-ingestion time in the governance layer).  Combination
-here means *scores*, never *bets*.
-
-The weight window is **expanding** (fixed start, end rolls at ``t-1``), updated
-**monthly**, and every weight uses **only IC strictly before** the date it
-scores.  Using the current period's IC to set the current period's weight is
-look-ahead, and :meth:`FactorCombiner.combine` is built so that it cannot
-happen: see ``TestLookahead``.
+职责边界：
+1. ``preprocess``：按日截面执行 ``3-MAD 缩尾 → z-score 标准化 → 行业与市值中性化``。
+2. ``FactorCombiner``：支持 ``equal_weight``（默认主路径）、``ic_weight`` 与 ``ic_ir_weight``；
+   加权方法采用扩张窗口并按月更新，仅使用严格早于当期的历史 IC，杜绝前视偏差。
+3. ``FactorCombiner.evaluate`` / ``write_eval_report``：输出 8 项评估指标与因子贡献分解，
+   并落盘 ``eval_report.json``。
 """
 
 from __future__ import annotations
@@ -54,25 +33,13 @@ __all__ = [
     "write_eval_report",
 ]
 
-#: Minimum IC observations a weighted method needs before its weights are
-#: trusted.  Below this :class:`FactorCombiner` falls back to equal weights —
-#: an ICIR estimated on a handful of dates is noise, and acting on noise is
-#: how a "smart" combiner under-performs the baseline it was meant to beat.
-#:
-#: The window itself is **expanding** (fixed start, end at ``t-1``), not
-#: rolling: the design rejects rolling windows for a 3–5 factor book with
-#: short history (factor_combiner.md §63.4).  ``lookback`` is therefore the
-#: warm-up gate, not a window length.
+# 加权方法启用所需的最小历史 IC 样本数（扩张窗口的预热期门限）
 DEFAULT_LOOKBACK: int = 60
 
-#: The three methods the design allows.  ``ic_weight`` is kept in the enum
-#: because the interface names it, but the primary path is ``equal_weight``
-#: and the recommended optional path is ``ic_ir_weight`` (ICIR punishes an
-#: unstable factor; a raw IC mean does not).
+# 允许的合成方法（equal_weight 为基准，ic_ir_weight 惩罚高波动因子）
 WEIGHT_METHODS: tuple[str, ...] = ("equal_weight", "ic_weight", "ic_ir_weight")
 
-#: The 8-metric table (§63.6), in report order.  ``factor_contribution`` is
-#: the breakdown itself, not a scalar.
+# 评估报告 8 项核心指标键名顺序
 EVAL_METRIC_KEYS: tuple[str, ...] = (
     "ic_mean",
     "ic_ir",
@@ -84,17 +51,12 @@ EVAL_METRIC_KEYS: tuple[str, ...] = (
     "factor_contribution",
 )
 
-#: Stand-in for a ``+∞`` ICIR.  A factor whose IC never moves has ``std == 0``;
-#: its ``mean / std`` is undefined in floats but its meaning is not — a steady
-#: positive IC is the *best* ICIR there is.  Dividing would be the only way to
-#: score it, and the sketch's ``else 0.0`` would hand the whole book to the
-#: unstable factor instead.  A large finite value wins the normalisation
-#: without needing an infinity special case.
+# IC 标准差为 0 且均值大于 0 时的有限大替代值，用于归一化胜出
 ZERO_SIGMA_IR: float = 1e12
 
 
 # ---------------------------------------------------------------------------
-# Pre-combination clean-up
+# 合成前清洗
 # ---------------------------------------------------------------------------
 
 
@@ -108,30 +70,9 @@ def preprocess(
     n_mad: float = 3.0,
     neutralize: bool = True,
 ) -> pd.DataFrame:
-    """Return a copy of *df* with *factor_col* ready to combine.
+    """返回 *df* 副本，对 *factor_col* 按日截面依次执行缩尾、z-score 与可选中性化。
 
-    The pre-combination contract (factor_combiner.md §16.2, §63.4) is three
-    steps in this order, each **cross-sectional**:
-
-    1. **winsorize** — MAD clip at ``3 × 1.4826 × MAD``
-    2. **z-score** — per-date ``(x - mean) / std``
-    3. **neutralize** — per-date OLS residual on industry dummies + log market
-       cap.  Mandatory on the stock pool; the ETF pool earns sector/style
-       rotation and callers pass ``neutralize=False`` to skip it.
-
-    Every step runs through ``groupby(date_col)`` (step 3 fits one regression
-    per date), so one cross-section's statistics never touch another's.  A
-    full-sample mean/σ/MAD/regression would let tomorrow's names decide
-    today's cleaned value — :func:`research.post_processor` pins the
-    counter-example and this module re-asserts it.
-
-    Note the omission relative to :class:`research.post_processor.PostProcessor`:
-    there is no ``fillna`` step.  The combine contract is winsorize → z-score
-    → neutralize; :meth:`FactorCombiner.combine` renormalises weights over the
-    factors a row actually has rather than inventing a filled value.
-
-    Returns a copy; *df* is never mutated.  Rows with a null date belong to no
-    group and keep their input value.
+    不执行缺失值填充（由合成阶段按有效因子重归一化）；日期为空的行保留原值。
     """
     if factor_col not in df.columns:
         raise ValueError(f"factor_col {factor_col!r} not in columns {list(df.columns)}")
@@ -148,9 +89,7 @@ def preprocess(
 
     if neutralize:
         if date_col != "date":
-            # research.post_processor.neutralize is hard-wired to "date".
-            # Forwarding a different column would KeyError, or worse, fit
-            # against a stale "date" column the caller did not mean.
+            # neutralize 内部固定按 "date" 分组，不允许传入其他日期列名
             raise ValueError(
                 "neutralize=True requires date_col='date': "
                 "research.post_processor.neutralize is hard-wired to 'date'"
@@ -165,7 +104,7 @@ def preprocess(
 
 
 # ---------------------------------------------------------------------------
-# factor_contribution
+# 因子贡献分解
 # ---------------------------------------------------------------------------
 
 
@@ -174,38 +113,9 @@ def factor_contribution(
     factor_returns: pd.DataFrame,
     factor_exposures: pd.DataFrame,
 ) -> pd.Series:
-    """Decompose combined performance into per-factor shares.
+    """按 ``Σ_t Σ_j w_{j,t} · exposure_{j,i,t} · factor_return_{i,t}`` 分解各因子对组合的贡献。
 
-    The design's formula (§63.6) is
-
-        ``contribution_i = Σ_t Σ_j w_{j,t} · exposure_{j,i,t} · factor_return_{i,t}``
-
-    and its simplification note is the one that governs here: **use the factor
-    value as the exposure and the grouped (quantile) return as the factor
-    return.**  That is an approximation — a true exposure is the portfolio's
-    holding, not its z-score — and its error is the price of not running a
-    full Brinson attribution.  The breakdown is for spotting a single factor
-    carrying the book (``max |share| > 0.7`` is fake diversification), which
-    the approximation is good enough for.
-
-    Parameters
-    ----------
-    weights
-        ``[date, ticker, weight]`` — the book.  ``signal_to_weights`` (S6-T2)
-        produces these; this function never invents them.
-    factor_returns
-        ``[date, factor_name, factor_return]`` — one return per factor per date.
-    factor_exposures
-        ``[date, ticker, {factor_name: z}]`` — the preprocessed z-scores that
-        went into the combination.  Wide, one column per factor.
-
-    Returns
-    -------
-    pd.Series
-        One share per factor, normalised so the **absolute** shares sum to 1.
-        Signs are kept: a factor whose contribution ran against the book shows
-        up negative.  ``max |share|`` is the concentration the metric table
-        warns about.
+    返回按绝对值之和归一化（保留正负号）的 ``pd.Series``，用于识别单一因子主导的伪分散风险。
     """
     for frame, name, cols in (
         (weights, "weights", ("date", "ticker", "weight")),
@@ -227,14 +137,12 @@ def factor_contribution(
         )
     orphan = sorted(set(exposure_cols) - set(names.unique()))
     if orphan:
-        # An exposure with no return is a data gap, not a zero contribution.
-        # Dropping it here would inflate the remaining shares and make the
-        # "strongest factor > 70%" fake-diversification check read wrong numbers.
+        # 存在无收益数据的暴露列视为数据缺失，避免剔除后虚高剩余因子占比
         raise ValueError(
             f"factor_exposures columns {orphan} have no factor_returns rows"
         )
 
-    # Long form: one row per (date, ticker, factor).
+    # 转为 (date, ticker, factor_name) 长表
     wide = factor_exposures.melt(
         id_vars=["date", "ticker"],
         value_vars=exposure_cols,
@@ -260,8 +168,7 @@ def factor_contribution(
     )
     total = float(raw.abs().sum())
     if total == 0.0:
-        # Nothing moved.  Equal shares beat an arbitrary one and keep the
-        # "shares sum to 1" contract observable.
+        # 总贡献为 0 时按等权返回，维持绝对占比和为 1 的契约
         return pd.Series(
             {c: 1.0 / len(exposure_cols) for c in exposure_cols}, dtype="float64"
         )
@@ -269,7 +176,7 @@ def factor_contribution(
 
 
 # ---------------------------------------------------------------------------
-# eval_report.json
+# 评估报告写入
 # ---------------------------------------------------------------------------
 
 
@@ -283,20 +190,7 @@ def write_eval_report(
     walk_forward_folds: list | None = None,
     combiner: dict | None = None,
 ) -> Path:
-    """Write ``{out_dir}/{name}/eval_report.json`` and return its path.
-
-    The report is the run record the validation discipline points at
-    (§63.6): walk-forward, test set looked at once, everything on disk.
-    ``config_snapshot`` is the platform's ``path@hash`` form produced by
-    :func:`core.config.config_snapshot` — a string, not a parameter dict —
-    so the exact config that produced these numbers can be re-read from the
-    path and re-hashed.  Secrets never enter it (``.env`` is never read).
-
-    ``walk_forward_folds`` is passed through untouched.  Its field structure
-    is still an open design item (factor_combiner.md "实施时定稿项"), so the
-    writer does not invent one; callers that ran folds put theirs in, callers
-    that did not leave it as ``[]``.
-    """
+    """将 8 项评估指标、``config_snapshot``（``path@hash``）与折次信息写入 ``eval_report.json`` 并返回路径。"""
     if not name:
         raise ValueError("name must be non-empty")
     missing = [k for k in EVAL_METRIC_KEYS if k not in metrics]
@@ -326,7 +220,7 @@ def write_eval_report(
 
 
 def _jsonable(value):
-    """JSON cannot carry numpy scalars, Timestamps or NaN; normalise them."""
+    """将 numpy 标量、时间对象与非有限浮点数规范化为可 JSON 序列化值。"""
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -346,18 +240,10 @@ def _jsonable(value):
 
 
 class FactorCombiner:
-    """Combine preprocessed factor z-scores into one ``combined_score``.
+    """多因子打分合成器，将预处理后的因子 z-score 合成为 ``combined_score``。
 
-    ``equal_weight`` is the primary path and always runs first: any more
-    complicated scheme has to beat it out of sample, and if it cannot, the
-    complexity is overfitting and gets dropped (§63.2).  The default is
-    therefore ``equal_weight`` and a caller who picks a weighted method is
-    taking on the burden of proof.
-
-    Weighted methods need ``ic_history`` in **wide** form — ``[date, f1, f2, …]``
-    of Rank IC, one column per factor name, sourced from
-    ``factor_eval/{name}/ic_series.parquet`` and pivoted by the caller.  The
-    combiner never computes IC itself (single source, one definition).
+    默认使用 ``equal_weight``；选择 ``ic_weight`` 或 ``ic_ir_weight`` 时需提供宽表格式的历史 Rank IC
+    ``[date, f1, f2, ...]``。
     """
 
     def __init__(self, method: str = "equal_weight", lookback: int = DEFAULT_LOOKBACK):
@@ -368,25 +254,17 @@ class FactorCombiner:
         self.method = method
         self.lookback = int(lookback)
 
-    # -- combination ------------------------------------------------------
+    # -- 合成主流程 -----------------------------------------------------------
 
     def combine(
         self,
         factor_scores: pd.DataFrame,
         ic_history: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
-        """Return ``[date, ticker, combined_score]``.
+        """计算 ``[date, ticker, combined_score]``。
 
-        ``factor_scores`` is ``[date, ticker] × N factor z-score columns`` —
-        already through :func:`preprocess`.  For a weighted method the score
-        at date *t* is built from weights computed on IC **strictly before**
-        *t*, refreshed only at month boundaries (month-end IC sets next
-        month's weights).  A row whose factors are partly missing gets the
-        weighted mean of the factors it does have; a row with none keeps NaN.
-
-        Raises ``ValueError`` for a weighted method with no ``ic_history``:
-        silently falling back to equal weights there would let a caller think
-        they ran ICIR when they did not.
+        加权方法按月更新权重且仅使用严格早于当月首日的 IC（``ic_date < as_of``）；
+        单行部分因子缺失时对有效因子权重重归一化，全缺失保留 NaN。
         """
         id_cols = [c for c in ("date", "ticker") if c in factor_scores.columns]
         if "date" not in id_cols:
@@ -408,9 +286,7 @@ class FactorCombiner:
         if "date" not in ic_history.columns:
             raise ValueError("ic_history must carry a 'date' column")
         if not set(factor_cols) & set(ic_history.columns):
-            # Every factor column is absent → the estimators would assign 0
-            # to all of them and _normalise would fall back to equal weights,
-            # silently degrading to the baseline the caller did not ask for.
+            # 无任何共同因子列时直接报错，防止静默退化为等权
             raise ValueError(
                 f"ic_history shares no factor columns with {factor_cols}; "
                 f"its columns are {list(ic_history.columns)}"
@@ -428,13 +304,7 @@ class FactorCombiner:
         ic_history: pd.DataFrame,
         factor_cols: list[str],
     ) -> list[tuple[pd.Index, dict]]:
-        """Month-by-month weights: one dict per calendar month of *factor_scores*.
-
-        Month *M* uses IC with ``date < first_score_date_of_M`` — i.e. the
-        month-end of *M-1* at the earliest, and never anything at or after the
-        first date being scored.  That single ``<`` is the anti-look-ahead
-        boundary; widening it to ``<=`` makes ``TestLookahead`` fail.
-        """
+        """按自然月生成权重调度表；第 *M* 月仅使用严格早于该月首日（``<``）的历史 IC。"""
         dates = pd.to_datetime(factor_scores["date"])
         periods = dates.dt.to_period("M")
         ic_dates = pd.to_datetime(ic_history["date"])
@@ -444,10 +314,7 @@ class FactorCombiner:
             as_of = dates.loc[idx].min()
             hist = ic_history.loc[ic_dates < as_of]
             if len(hist) < self.lookback:
-                # Fast-path warm-up.  The per-factor :attr:`lookback` gate in
-                # the estimators is what actually enforces the contract — it
-                # also covers a ragged history where this row count is high
-                # but one factor's IC column is mostly NaN.
+                # 预热期不足时直接走等权；逐因子长度门限仍在各权重估计器内强制执行
                 w = self._equal_weights(factor_cols)
             elif self.method == "ic_weight":
                 w = self._ic_weights(hist, factor_cols)
@@ -456,26 +323,17 @@ class FactorCombiner:
             schedule.append((idx, w))
         return schedule
 
-    # -- weight estimators -------------------------------------------------
+    # -- 权重估计器 -----------------------------------------------------------
 
     def _equal_weights(self, factor_cols) -> dict:
-        """``w_i = 1/n``.  The baseline every weighted method has to beat."""
+        """生成等权字典 ``1/n``。"""
         n = len(factor_cols)
         if n == 0:
             raise ValueError("factor_cols is empty")
         return {c: 1.0 / n for c in factor_cols}
 
     def _ic_weights(self, ic_history, factor_cols) -> dict:
-        """``w_i = mean(IC_i)`` over the supplied window, negative → 0, sum 1.
-
-        *ic_history* is already cut to the legal window (see
-        :meth:`_weight_schedule`); this method does no slicing of its own, so
-        it cannot accidentally widen it.  A factor with no IC column, with
-        fewer than :attr:`lookback` finite ICs, or with a non-positive mean
-        gets 0.  If every factor's IC is non-positive the book would sit at
-        zero weight, which is not a portfolio — fall back to equal weights so
-        the returned dict always sums to 1.
-        """
+        """基于 ``mean(IC)`` 计算非负归一化权重，样本不足 ``lookback`` 或均值非正置 0，全 0 回退等权。"""
         w = {}
         for c in factor_cols:
             if c not in ic_history.columns:
@@ -489,26 +347,7 @@ class FactorCombiner:
         return self._normalise(w, factor_cols)
 
     def _ic_ir_weights(self, ic_history, factor_cols) -> dict:
-        """``w_i = mean(IC_i)/std(IC_i)`` over the window, negative → 0, sum 1.
-
-        ICIR, not IC, because a factor whose IC is high but swings wildly is a
-        worse bet than a slightly weaker steady one.  Negative ICIR is
-        truncated to 0 — A-share cannot short, and a negative weight here
-        would be a directional bet the combiner is not licensed to make.
-
-        A series with two or more observations and zero dispersion is the one
-        case ``mean/std`` cannot express: its ICIR is ``+∞`` when the mean is
-        positive (the best possible) and meaningless when it is not.  It is
-        scored as :data:`ZERO_SIGMA_IR` or 0 respectively — see that constant
-        for why 0 is wrong for the first case.  Fewer than two observations
-        has no dispersion estimate at all and gets 0.
-
-        Both the :attr:`lookback` warm-up and the two-observation floor apply
-        **per factor**, not to the wide frame's row count: a ragged IC history
-        (a 3–5 factor book with different launch dates) would otherwise let a
-        factor with a handful of ICs through on the strength of its siblings'
-        history.
-        """
+        """基于 ``mean(IC)/std(IC)`` 计算非负归一化权重；逐因子校验 ``lookback`` 与最少 2 个样本，零波动正均值取 ``ZERO_SIGMA_IR``。"""
         w = {}
         for c in factor_cols:
             if c not in ic_history.columns:
@@ -531,13 +370,13 @@ class FactorCombiner:
         return self._normalise(w, factor_cols)
 
     def _normalise(self, w: dict, factor_cols) -> dict:
-        """Scale *w* to sum 1, or fall back to equal weights if all are 0."""
+        """将权重字典归一化为和为 1；总和不大于 0 时回退等权。"""
         total = sum(w.values())
         if total <= 0:
             return self._equal_weights(factor_cols)
         return {c: w[c] / total for c in factor_cols}
 
-    # -- evaluation --------------------------------------------------------
+    # -- 评估入口 -------------------------------------------------------------
 
     def evaluate(
         self,
@@ -549,20 +388,10 @@ class FactorCombiner:
         factor_exposures: pd.DataFrame | None = None,
         factor_returns: pd.DataFrame | None = None,
     ) -> dict:
-        """Return the 8-metric table (§63.6) as a plain dict.
+        """计算 8 项合成质量指标并返回字典。
 
-        * ``ic_mean`` / ``ic_ir`` — cross-sectional Spearman of
-          ``combined_score`` vs next-period return, per date.
-        * ``ann_return`` / ``ann_sharpe`` / ``max_drawdown`` / ``calmar`` —
-          from *portfolio_returns* ``[date, ret]``.  This module scores
-          factors; turning a score into a book is ``signal_to_weights``
-          (S6-T2), which is why the returns come in rather than get built here.
-        * ``turnover_monthly`` — ``Σ|Δw|/2`` at month frequency, from *weights*.
-        * ``factor_contribution`` — :func:`factor_contribution` shares.
-
-        ``weights`` + ``factor_exposures`` + ``factor_returns`` are all needed
-        for the last two; without them the function raises rather than
-        returning a table with holes in it.
+        包含 ``ic_mean``、``ic_ir``、``ann_return``、``ann_sharpe``、``max_drawdown``、``calmar``、
+        ``turnover_monthly`` 与 ``factor_contribution``；后两项需同时传入 ``weights``、``factor_exposures`` 与 ``factor_returns``。
         """
         for frame, name, cols in (
             (combined, "combined", ("date", "ticker", "combined_score")),
@@ -608,17 +437,12 @@ class FactorCombiner:
 
 
 # ---------------------------------------------------------------------------
-# metric primitives
+# 指标计算原语
 # ---------------------------------------------------------------------------
 
 
 def _weighted_score(scores: pd.DataFrame, factor_cols: list[str], w: dict) -> pd.Series:
-    """``Σ w_i z_i`` over the factors a row actually has, renormalised.
-
-    Renormalising means a name missing one factor gets the weighted mean of
-    the rest rather than NaN — the same choice ``Series.mean`` makes, kept
-    here because the weights are not uniform under a weighted method.
-    """
+    """按行对非 NaN 有效因子权重重归一化并计算加权均分，全缺失返回 NaN。"""
     values = scores[factor_cols].astype("float64").to_numpy()
     weight_vec = np.array([w[c] for c in factor_cols], dtype="float64")
     finite = np.isfinite(values)
@@ -631,7 +455,7 @@ def _weighted_score(scores: pd.DataFrame, factor_cols: list[str], w: dict) -> pd
 
 
 def _rank_ic_series(combined: pd.DataFrame, forward_returns: pd.DataFrame) -> pd.Series:
-    """Per-date cross-sectional Spearman of score vs next-period return."""
+    """计算每日截面 ``combined_score`` 与下期收益的 Spearman 秩相关系数序列。"""
     merged = combined.merge(
         forward_returns[["date", "ticker", "ret"]], on=["date", "ticker"]
     )
@@ -651,7 +475,7 @@ def _rank_ic_series(combined: pd.DataFrame, forward_returns: pd.DataFrame) -> pd
 
 
 def _ann_return(rets: pd.Series) -> float:
-    """``(1 + total) ** (252 / n) - 1`` over the period's daily returns."""
+    """按 252 个交易日年化日收益序列。"""
     r = rets.dropna()
     if r.empty:
         return float("nan")
@@ -660,7 +484,7 @@ def _ann_return(rets: pd.Series) -> float:
 
 
 def _ann_sharpe(rets: pd.Series) -> float:
-    """``mean / std × √252`` over the period's daily returns."""
+    """计算年化夏普比率（``mean / std * sqrt(252)``）。"""
     r = rets.dropna()
     if len(r) < 2:
         return float("nan")
@@ -671,12 +495,7 @@ def _ann_sharpe(rets: pd.Series) -> float:
 
 
 def _max_drawdown(rets: pd.Series) -> float:
-    """Deepest peak-to-trough of the cumulative NAV; negative or 0.
-
-    The running peak is clipped at 1.0 so a loss in the first period is
-    measured: without it, ``nav.cummax()`` starts at the post-loss NAV and
-    the drawdown from the initial capital is invisible.
-    """
+    """计算累计净值最大回撤（峰值下限钳位为 1.0 以覆盖首期亏损）。"""
     r = rets.dropna()
     if r.empty:
         return float("nan")
@@ -686,14 +505,14 @@ def _max_drawdown(rets: pd.Series) -> float:
 
 
 def _turnover_monthly(weights: pd.DataFrame) -> float:
-    """Mean over months of ``Σ|Δw|/2`` between consecutive month-end books."""
+    """计算相邻月末持仓之间的平均月度单边换手率 ``Σ|Δw|/2``。"""
     if not {"date", "ticker", "weight"} <= set(weights.columns):
         raise ValueError("weights must carry columns ['date', 'ticker', 'weight']")
     frame = weights.copy()
     frame["_t"] = pd.to_datetime(frame["date"])
     frame["_p"] = frame["_t"].dt.to_period("M")
 
-    # Month-end book per month: the last date's weight vector.
+    # 取每月最后一个交易日作为月末持仓
     month_ends = []
     for _, group in frame.groupby("_p", sort=True):
         last = group["_t"].max()

@@ -1,17 +1,10 @@
-"""QDCData normalizer — format conversion only (C3).
+"""QDCData 标准化器（仅格式转换）。
 
-Maps QDCData raw columns (``cn_daily_full``, ``cn_etf_1d``, etc.) to the
-unified ``bars_daily`` schema per ``docs/data_source/QDCData/`` and
-``docs/design/data/QDC_ingestion_contract.md``:
-
-* Ticker conversion: ``.XSHG -> .SH``, ``.XSHE -> .SZ``, ``.XBSE -> .BJ``;
-  bare 6-digit codes are qualified via :data:`core.asset_rules.PREFIX_EXCHANGE`.
-* Date conversion: ``ts`` (Unix ms ``BIGINT``) is converted via
-  ``Asia/Shanghai`` timezone before extracting ``.dt.date`` (never naive UTC).
-* CA events: ``hfq_factor`` / ``adj_factor`` / ``adjfactor`` preserved verbatim
-  (defaults to ``1.0`` when absent, never overwritten based on ``suspend``).
-* ``volume``: ``cn_daily_full`` and ``cn_etf_1d`` report shares (股) directly;
-  cast with NaN-preserving ``Int64``.
+映射规则：
+* 代码后缀：``.XSHG -> .SH``、``.XSHE -> .SZ``、``.XBSE -> .BJ``，裸代码按前缀补全。
+* 时间转换：``ts``（Unix 毫秒）按 ``Asia/Shanghai`` 时区转 ``date``（不使用朴素 UTC）。
+* 复权因子：按 ``hfq_factor -> adj_factor -> adjfactor`` 优先级保留原值，缺失默认 ``1.0``，不因停牌覆写。
+* 成交量：``cn_daily_full`` / ``cn_etf_1d`` 原生单位即为股，转为可空 ``Int64``。
 """
 
 from __future__ import annotations
@@ -78,14 +71,13 @@ def _normalize_qdc_ticker(value: str) -> str:
 
 
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-    """Format conversion only: QDC columns/suffixes/ts -> unified bars_daily."""
+    """将 QDC 原始列名、交易所后缀与毫秒时间戳转换为统一 ``bars_daily`` 格式。"""
     if asset_type not in _SUPPORTED_ASSET_TYPES:
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
     df = raw_df.copy()
 
-    # Coalesce multiple possible date columns before renaming so duplicate targets
-    # are avoided (prefer explicit trade_date / trade_day over ts only if ts absent).
+    # 重命名前合并多个候选日期列，避免列名重复
     if "ts" in df.columns:
         df["trade_date"] = (
             pd.to_datetime(
@@ -98,14 +90,14 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         if drop_extra:
             df = df.drop(columns=drop_extra)
 
-    # Coalesce ticker source columns (prefer symbol -> ts_code -> code)
+    # 代码列优先级：symbol -> ts_code -> code
     for alt in ("symbol", "ts_code", "code"):
         if alt in df.columns:
             if alt != "ticker":
                 df = df.rename(columns={alt: "ticker"})
             break
 
-    # Coalesce adjfactor columns (prefer hfq_factor -> adj_factor -> adjfactor)
+    # 复权因子优先级：hfq_factor -> adj_factor -> adjfactor
     if "hfq_factor" in df.columns:
         if "adj_factor" in df.columns:
             df["hfq_factor"] = df["hfq_factor"].fillna(df["adj_factor"])

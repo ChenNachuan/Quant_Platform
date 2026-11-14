@@ -1,34 +1,12 @@
-"""Multi-source ingestion arbitration (QUANT-40, S10-T1).
+"""多源数据接入仲裁与交叉校验。
 
-Priority, cross-source comparison and gap-fill marking per
-``docs/design/data/ingestion.md`` (settled details in
-``docs/archive/OPEN_QUESTIONS.md`` §41).  Core rule: the asset layer is
-written from **one** source; backups only cross-check and backfill gaps —
-never mix-write, so lineage stays traceable to a single source and batch.
-
-Scope of this module: arbitration and comparison.  Fetching is
-:mod:`data.source_adapter` (called from the ingest pipeline, never rewritten
-here); DQC is ``data/dqc/``; landing primitives are :mod:`data.storage_ops`
-and :mod:`data.raw`.  Comparison runs on **post-Normalizer** frames — raw
-column names and units differ per source and are not comparable.
-
-Implementation-time rulings (recorded in the QUANT-40 PR description):
-
-* ``should_cross_check`` fires when the primary source's ingest has just
-  completed and every backup's raw batch has arrived (§41.4 default).  A
-  backup's own ingest never triggers, and an asset type with no backup never
-  cross-checks.
-* ``raw_exists`` is raw landing **file presence** (:func:`data.raw.raw_path`),
-  not watermark inspection — watermark formats are subclass-defined and the
-  platform never parses them.
-* ``NUMERIC_FIELDS`` (§41 open item) is defined here from the storage
-  schemas: the compared numeric columns per asset type.  Single-source or
-  static metadata tables map to ``()``.
-* The ``pe_pb`` tolerance class covers the valuation ratios ``pe_ttm`` /
-  ``pe_lyr`` / ``pb`` / ``ps_ttm`` — same cross-source definition-difference
-  rationale as PE/PB.
-* ``field_override`` sources must appear in the same entry's ``priority`` —
-  an override naming a source we do not fetch is a config error.
+核心原则：资产层仅由主源写入，备源仅用于交叉校验与缺口回补，严禁混合写入以保持血缘单一可追溯。
+交叉校验在 Normalizer 标准化后的 DataFrame 上执行：
+- ``should_cross_check``：仅当主源入库完成且全部备源原始批次均已落地时触发；无备源表不触发。
+- ``raw_exists``：按原始落地文件路径检查是否到达，不解析 watermark。
+- ``NUMERIC_FIELDS``：按表定义参与交叉对比的数值列，单源或静态元数据表映射为 ``()``。
+- ``pe_pb`` 容差类覆盖 ``pe_ttm`` / ``pe_lyr`` / ``pb`` / ``ps_ttm`` 等估值比率。
+- ``field_override`` 指定的源必须包含在同一条目的 ``priority`` 列表中。
 """
 
 from __future__ import annotations
@@ -99,19 +77,12 @@ def _resolve_source_priority_path(path: str | os.PathLike[str] | None = None) ->
     return _REPO_CONFIG_PATH
 
 
-# ---------------------------------------------------------------------------
-# Field classification (§41 open item: NUMERIC_FIELDS was referenced from
-# three design docs and defined nowhere — defined here, from the storage
-# schemas).  Only numeric columns participate; flags (suspend / is_limit_up /
-# quality_flag) are not cross-compared.  Wrapped in _AliasedDict so legacy
-# short names ("bars_daily", "fundamental", ...) resolve transparently to
-# canonical names.
-# ---------------------------------------------------------------------------
+# --- 参与交叉校验的数值字段（状态标志列不参与；通过 _AliasedDict 兼容旧表名） ---
 NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
     {
-        # Calendar (1)
+        # 交易日历 (1)
         "cn_calendar": (),
-        # Stock Core & Status (6)
+        # 股票核心行情与状态 (6)
         "cn_stock_basic": (),
         "cn_stock_bars_daily": (
             "open",
@@ -141,7 +112,7 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
             "rights_price",
             "rights_ratio",
         ),
-        # Stock Index / Industry / Concept (4)
+        # 指数 / 行业 / 成分权重 (4)
         "cn_stock_index_basic": (),
         "cn_stock_index_bars_daily": (
             "open",
@@ -158,7 +129,7 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
         ),
         "cn_stock_industry": (),
         "cn_stock_index_weights": ("weight",),
-        # Stock Fundamental PIT (7)
+        # 股票基本面 PIT 表 (7)
         "cn_stock_fundamental_income": (
             "basic_eps",
             "diluted_eps",
@@ -240,7 +211,7 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
             "rating_score",
             "tp_median",
         ),
-        # Stock Special Flows / Sentiment / Chips (9)
+        # 资金流 / 情绪 / 筹码 (9)
         "cn_stock_auction": (
             "price",
             "pre_close",
@@ -303,7 +274,7 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
             "weight_avg",
             "winner_rate",
         ),
-        # Stock Holders & Capital Events (8)
+        # 股东与资本运作事件 (8)
         "cn_stock_holder_num": ("holder_num", "holder_num_chg_pct", "avg_hold_shares"),
         "cn_stock_top_holders": ("hold_amount", "hold_ratio", "hold_change"),
         "cn_stock_restricted_release": ("float_share", "float_ratio"),
@@ -317,10 +288,10 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
         ),
         "cn_stock_pledge": ("pledge_amount", "pledge_ratio"),
         "cn_stock_research_visits": (),
-        # Stock Tick & L2 (2)
+        # 股票逐笔与 L2 盘口 (2)
         "cn_stock_tick": ("price", "volume", "amount"),
         "cn_stock_tick_l2": ("last_price", "volume", "amount"),
-        # Independent ETF Domain (5)
+        # 独立 ETF 域 (5)
         "cn_etf_basic": ("m_fee", "c_fee"),
         "cn_etf_bars_daily": (
             "open",
@@ -342,7 +313,7 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
             "total_nav",
         ),
         "cn_etf_tick": ("price", "volume", "amount"),
-        # OTC & Listed Public Mutual Funds (5)
+        # 场外与上市公募基金 (5)
         "cn_fund_basic": ("m_fee", "c_fee"),
         "cn_fund_managers": (),
         "cn_fund_nav": (
@@ -355,7 +326,7 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
         ),
         "cn_fund_dividend": ("div_cash",),
         "cn_fund_portfolio": ("mkv", "amount", "stk_mkv_ratio", "stk_float_ratio"),
-        # Futures (4)
+        # 期货 (4)
         "cn_futures_bars_daily": (
             "open",
             "high",
@@ -379,13 +350,13 @@ NUMERIC_FIELDS: dict[str, tuple[str, ...]] = _AliasedDict(
             "settle",
             "adjfactor",
         ),
-        # Legacy compatibility entries
+        # 旧版兼容条目
         "option_basic": (),
         "reference": (),
     }
 )
 
-# Field name -> tolerance class.  Anything not listed falls to "default".
+# 字段名 -> 容差类别（未列出字段回落到 "default"）
 TOLERANCE_CLASS: dict[str, str] = {
     "open": "price",
     "high": "price",
@@ -413,9 +384,7 @@ TOLERANCE_CLASS: dict[str, str] = {
     "ps_ttm": "pe_pb",
 }
 
-# The five tolerance classes of §41.3.  Values live in source_priority.yaml
-# (cross_check.tolerances); the comparison mode is fixed here — price and
-# adjfactor are absolute, everything else is relative to the primary value.
+# 五级容差类别：阈值配置于 source_priority.yaml（cross_check.tolerances）；price 与 adjfactor 采用绝对误差，其余采用相对主源误差
 TOLERANCE_CLASSES: tuple[str, ...] = (
     "price",
     "volume",
@@ -426,25 +395,19 @@ TOLERANCE_CLASSES: tuple[str, ...] = (
 )
 _ABSOLUTE_CLASSES = frozenset({"price", "adjfactor"})
 
-# Tiered response bands (§41.5): <0.1% silent record, 0.1–1% WARNING,
-# >1% ERROR.  Any adjfactor mismatch is at least WARNING whatever the band.
+# 分级响应阈值：<0.1% 静默记录，0.1%–1% WARNING，>1% ERROR；adjfactor 不一致至少触发 WARNING
 ResponseLevel = Literal["silent", "WARNING", "ERROR"]
 SILENT_BAND_MAX = 0.001
 ERROR_BAND_MIN = 0.01
 
 
-# ---------------------------------------------------------------------------
-# source_priority.yaml loading
-# ---------------------------------------------------------------------------
+# --- source_priority.yaml 加载与校验 ---
 def load_source_priority(
     path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    """Load and validate the source arbitration table.
+    """加载并校验数据源仲裁配置。
 
-    Validation: every entry exposes a ``priority`` list (directly, or per
-    sub-table for nested sections like ``reference``), and every
-    ``field_override`` source appears in the same entry's ``priority`` list.
-    Raises ``ValueError`` otherwise.
+    要求每项包含 ``priority`` 列表（支持嵌套子表），且 ``field_override`` 指定的源必须在对应 ``priority`` 中，否则抛出 ``ValueError``。
     """
     resolved = _resolve_source_priority_path(path)
     cfg = yaml.safe_load(resolved.read_text(encoding="utf-8"))
@@ -522,7 +485,7 @@ def _entry_for(cfg: dict, asset_type: str, sub_type: str | None) -> dict:
 def load_tolerances(
     path: str | os.PathLike[str] | None = None,
 ) -> dict[str, float]:
-    """Return the five-tier tolerance table from ``cross_check.tolerances``."""
+    """从 ``cross_check.tolerances`` 读取五级容差阈值表。"""
     cfg = load_source_priority(path)
     section = cfg.get("cross_check") or {}
     tolerances = section.get("tolerances") or {}
@@ -538,7 +501,7 @@ def get_source_priority(
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    """Priority-ordered source list for *asset_type* (first = primary)."""
+    """返回 *asset_type* 按优先级排序的数据源列表（首位为主源）。"""
     cfg = load_source_priority(path)
     return list(_entry_for(cfg, asset_type, sub_type)["priority"])
 
@@ -549,7 +512,7 @@ def get_primary_source(
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> str:
-    """The one source allowed to write the asset layer for *asset_type*."""
+    """返回允许写入 *asset_type* 资产层的唯一主源。"""
     priority = get_source_priority(asset_type, sub_type, path=path)
     if not priority:
         raise ValueError(f"no source assigned for {asset_type}/{sub_type or '-'}")
@@ -562,23 +525,17 @@ def get_field_overrides(
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> dict[str, str]:
-    """Field -> source overrides for *asset_type* (``{}`` when none)."""
+    """返回 *asset_type* 的字段级数据源覆盖映射（无则返回 ``{}``）。"""
     cfg = load_source_priority(path)
     entry = _entry_for(cfg, asset_type, sub_type)
     return dict(entry.get("field_override") or {})
 
 
-# ---------------------------------------------------------------------------
-# Tolerances (five tiers, §41.3)
-# ---------------------------------------------------------------------------
+# --- 五级容差查询 ---
 def tolerance_for(
     field: str, tolerances: Mapping[str, float] | None = None
 ) -> tuple[float, str]:
-    """``(value, mode)`` for *field*; mode is ``absolute`` or ``relative``.
-
-    Falls back to the ``default`` class for unlisted fields, and to
-    :func:`load_tolerances` when no table is passed.
-    """
+    """返回 *field* 的 ``(容差阈值, 比较模式)``（``absolute`` 或 ``relative``）；未列出字段使用 ``default``。"""
     cls = TOLERANCE_CLASS.get(field, "default")
     table = dict(tolerances) if tolerances is not None else load_tolerances()
     value = float(table[cls] if cls in table else table["default"])
@@ -586,27 +543,24 @@ def tolerance_for(
     return value, mode
 
 
-# ---------------------------------------------------------------------------
-# Cross-check dataclasses (ingestion.md interface signatures)
-# ---------------------------------------------------------------------------
+# --- 交叉校验数据结构 ---
 @dataclass
 class MismatchDetail:
-    """Per-field mismatch aggregate (not per-ticker detail)."""
+    """单字段不一致聚合统计。"""
 
     field: str
     mismatch_count: int
-    mismatch_rate: float  # mismatch_count / matched_rows
+    mismatch_rate: float  # 不一致行数 / 匹配总行数
     max_abs_diff: float
-    sample_tickers: list[str]  # first 5 mismatching tickers
+    sample_tickers: list[str]  # 前 5 个不一致标的样本
 
 
 @dataclass
 class CrossCheckResult:
-    """One cross-check run over a (trade_date, asset_type) cross-section.
+    """单次 ``(trade_date, asset_type)`` 截面交叉校验结果。
 
-    ``total_rows`` is the outer-join size and ``matched_rows`` the tickers
-    both sources carry; ``missing_in_primary`` counts tickers only the backup
-    has, ``missing_in_secondary`` tickers only the primary has.
+    ``total_rows`` 为外连接总行数，``matched_rows`` 为双源共有行数；
+    ``missing_in_primary`` 为仅备源存在的行数，``missing_in_secondary`` 为仅主源存在的行数。
     """
 
     asset_type: str
@@ -621,15 +575,13 @@ class CrossCheckResult:
 
     @property
     def mismatch_rate(self) -> float:
-        """Worst per-field mismatch rate (``0.0`` when everything matched)."""
+        """各字段中最高的不一致率（全部匹配时为 ``0.0``）。"""
         if not self.mismatched_fields:
             return 0.0
         return max(d.mismatch_rate for d in self.mismatched_fields.values())
 
 
-# ---------------------------------------------------------------------------
-# cross_source_check
-# ---------------------------------------------------------------------------
+# --- 截面交叉校验 ---
 def cross_source_check(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
@@ -639,18 +591,10 @@ def cross_source_check(
     *,
     secondary_source: str | None = None,
 ) -> CrossCheckResult:
-    """Compare two post-Normalizer cross-sections of *asset_type*.
+    """对比同一资产类型经 Normalizer 标准化后的主备源截面。
 
-    ``df_a`` is the primary-side frame (the one that owns the asset layer),
-    ``df_b`` the backup side.  Rows join on ``[ticker, trade_date]`` (or
-    ``[ticker]`` alone when neither frame carries ``trade_date``).  Numeric
-    fields are compared per :data:`NUMERIC_FIELDS` with the five-tier
-    tolerance table; a pair mismatches past the tier's tolerance, or when the
-    value is present on one side only (both sides null matches).
-
-    ``primary_source`` comes from ``source_priority.yaml`` (the authority for
-    who owns the asset layer); ``secondary_source`` is passed in, falling back
-    to ``df_b.attrs["source"]``.
+    ``df_a`` 为主源数据，``df_b`` 为备源数据；按 ``[ticker, trade_date]``（无日期列时按 ``[ticker]``）外连接。
+    依 :data:`NUMERIC_FIELDS` 与五级容差表逐列比较，超出容差或单边缺失判为不一致（双边均空视为一致）。
     """
     if "ticker" not in df_a.columns or "ticker" not in df_b.columns:
         raise ValueError("both frames need a 'ticker' join column")
@@ -678,7 +622,7 @@ def cross_source_check(
     for field in fields:
         col_a, col_b = f"{field}_a", f"{field}_b"
         if col_a not in both.columns or col_b not in both.columns:
-            continue  # only fields both sources deliver are comparable
+            continue  # 仅比较双源均提供的字段
         a, b = both[col_a], both[col_b]
         na, nb = a.isna(), b.isna()
         valid = ~(na | nb)
@@ -739,11 +683,9 @@ def _primary_source_or(df_a: pd.DataFrame, asset_type: str) -> str:
         return str(df_a.attrs.get("source", "primary"))
 
 
-# ---------------------------------------------------------------------------
-# Tiered response (§41.5)
-# ---------------------------------------------------------------------------
+# --- 分级响应 ---
 def response_level(mismatch_rate: float) -> ResponseLevel:
-    """Band for a mismatch rate: <0.1% silent, 0.1–1% WARNING, >1% ERROR."""
+    """按不一致率划分响应级别：<0.1% 为 silent，0.1%–1% 为 WARNING，>1% 为 ERROR。"""
     if mismatch_rate > ERROR_BAND_MIN:
         return "ERROR"
     if mismatch_rate >= SILENT_BAND_MAX:
@@ -752,13 +694,10 @@ def response_level(mismatch_rate: float) -> ResponseLevel:
 
 
 def respond(result: CrossCheckResult) -> ResponseLevel:
-    """Decide (and log) the response for one cross-check result.
+    """判定并记录单次交叉校验的响应级别。
 
-    The worst per-field band wins.  An adjfactor mismatch is **always** at
-    least ``WARNING`` — its effect on every downstream adjustment makes the
-    tiered bands' silent suppression inapplicable to it.  A result with zero
-    overlapping rows is inconclusive, not clean: it warns and returns
-    ``WARNING`` before the bands are consulted.
+    取各字段最严重级别；``adjfactor`` 出现任何不一致至少为 ``WARNING``；
+    若存在数据但无重叠标的，则判定为结论不明确并返回 ``WARNING``。
     """
     if result.matched_rows == 0 and result.total_rows:
         logger.warning(
@@ -795,11 +734,9 @@ def respond(result: CrossCheckResult) -> ResponseLevel:
     return level
 
 
-# ---------------------------------------------------------------------------
-# Fallback backfill marking (§41.6)
-# ---------------------------------------------------------------------------
+# --- 备源回补标记与资产层写入 ---
 def backfill_source_tag(backup: str) -> str:
-    """Lineage tag for a gap-fill batch: ``"{backup}:backfill"``."""
+    """生成缺口回补批次的血缘标签：``"{backup}:backfill"``。"""
     return f"{backup}:backfill"
 
 
@@ -812,20 +749,11 @@ def write_asset(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
     target_path: str | os.PathLike[str] | None = None,
 ) -> Path:
-    """Land one batch on the asset layer with lineage in Parquet metadata.
+    """将单批次数据原子写入资产层，并在 Parquet 元数据中记录血缘标签。
 
-    ``source_tag`` and ``ingest_time`` go into the file's key-value metadata —
-    **never a data column** (§41.6): the asset schema stays stable and
-    ``pq.read_metadata`` is enough for audits.  ``source_tag`` is the plain
-    source name for a normal ingest, :func:`backfill_source_tag` for a backup
-    gap-fill.
-
-    Schema validation is DQC's step 7 (``ingest_with_dqc``) — this is the
-    tagged landing step the fallback path runs after that gate, written
-    atomically (``FileLock`` + tmp → fsync → ``os.replace`` → parent-dir
-    fsync, the :mod:`data.raw` pattern; ``write_parquet_atomic`` cannot
-    carry schema metadata) and refusing at the CRITICAL disk tier
-    (:func:`~data.storage_ops.check_capacity`, like the platform writer).
+    ``source_tag`` 与 ``ingest_time`` 写入文件键值元数据（不新增数据列）。
+    写入前检查磁盘容量（CRITICAL 级别拒写），月度分区自动按 ``trade_date`` 合并去重排序，
+    采用 ``FileLock`` + tmp -> fsync -> ``os.replace`` -> 父目录 fsync 保证原子性与持久性。
     """
     path = (
         Path(target_path)
@@ -892,7 +820,7 @@ def write_asset(
                 pass
             raise
 
-        # fsync parent dir for rename durability
+        # 刷盘父目录确保 rename 持久性
         try:
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -910,9 +838,7 @@ def _landing_path(
     return partition_path(asset_type, trade_date, data_root)
 
 
-# ---------------------------------------------------------------------------
-# Cross-check trigger hook (§41.4)
-# ---------------------------------------------------------------------------
+# --- 交叉校验触发判断 ---
 def raw_exists(
     source: str,
     asset_type: str,
@@ -920,12 +846,7 @@ def raw_exists(
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> bool:
-    """Has *source*'s raw batch for (*asset_type*, *trade_date*) landed?
-
-    Ruling (§41 open item: file scan vs watermark): raw landing **file
-    presence** — watermarks are subclass-defined and never parsed, so a file
-    either landed or it did not.
-    """
+    """检查 *source* 在 ``(asset_type, trade_date)`` 的原始落地文件是否存在（不解析 watermark）。"""
     if isinstance(trade_date, str):
         trade_date = date.fromisoformat(trade_date)
     return raw_path(source, asset_type, trade_date, data_root).exists()
@@ -938,19 +859,11 @@ def should_cross_check(
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> bool:
-    """Hook: is this the moment to cross-check *asset_type* on *trade_date*?
-
-    Fires only when the **primary** source's ingest just completed (a backup
-    ingest does not write the asset layer, so it never triggers) **and** every
-    backup's raw batch has arrived (§41.4).  An asset type with no backup
-    never cross-checks, and one the YAML does not arbitrate (e.g. ``factor``,
-    per-table ``reference`` without sub-table) answers ``False`` instead of
-    raising.  *source* is the source whose ingest just finished.
-    """
+    """判断是否应触发交叉校验：仅当主源刚入库完成且全部备源原始批次均已落地时返回 ``True``。"""
     try:
         priority = get_source_priority(asset_type)
     except (KeyError, ValueError):
-        # Asset type not arbitrated here (e.g. factor, bare reference)
+        # 未在仲裁配置中定义的资产类型（如 factor、裸 reference）
         return False
     if not priority or source != priority[0]:
         return False

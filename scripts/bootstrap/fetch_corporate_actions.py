@@ -1,13 +1,7 @@
-"""Corporate actions -> ``data_platform/asset/reference/corporate_actions.parquet``.
+"""公司行为拉取脚本 -> ``data_platform/asset/reference/corporate_actions.parquet``。
 
-Source: tushare ``dividend`` (分红送转).  A single reference file, PK
-``(ticker, ex_date, event_type)``.
-
-``event_type`` is narrowed to the schema's four values
-(``dividend`` / ``split`` / ``rights`` / ``bonus``) from the dividend record's
-fields: cash -> ``dividend``, share allotment -> ``rights``, share bonus /
-capitalisation -> ``bonus``, pure split -> ``split``.  Optional for the golden
-sample — its role is cross-checking ``adjfactor`` later.
+从 tushare ``dividend``（分红送转）拉取记录并映射为 ``dividend`` / ``split`` /
+``rights`` / ``bonus`` 四类事件，主键为 ``(ticker, ex_date, event_type)``，用于后续复权因子交叉校验。
 """
 
 from __future__ import annotations

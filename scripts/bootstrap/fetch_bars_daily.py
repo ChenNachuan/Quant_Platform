@@ -1,22 +1,8 @@
-"""Daily bars -> ``data_platform/asset/bars_daily/{date}.parquet``.
+"""日线行情拉取脚本 -> ``data_platform/asset/bars_daily/{date}.parquet``。
 
-One file per day, 14 columns per ``BARS_DAILY_SCHEMA``.  Sources per the
-ticket's source table: tushare ``daily`` + ``adj_factor`` + ``suspend_d`` +
-limit flags, merged onto the schema.  ``quality_flag`` is always 0.
-
-Known limits of the tushare API surface (measured, not inferred — see README
-"实测" and ``task/probe_tushare_quant35*.log``):
-
-* ``daily`` is **stock-only**; an ETF/LOF ``ts_code`` returns 0 rows.  Its bars
-  live in ``fund_daily``, which is a separate permission.
-* ``pro.limit_list`` is not a real interface name.  The real ones are
-  ``limit_list_d`` / ``stk_limit``, both of which may be permission-gated.
-  When no limit data is reachable, ``is_limit_up`` / ``is_limit_down`` are
-  written as ``False`` — a **source limitation, not a market fact**.
-
-Nothing here fabricates a price or an adjustment factor: if the bar or
-``adj_factor`` source is unreachable the fetch fails loudly instead of
-writing a plausible-looking wrong file.
+按日写入符合 ``BARS_DAILY_SCHEMA`` 的 14 列数据：合并 tushare ``daily``/``fund_daily``、
+``adj_factor``/``fund_adj``、``suspend_d`` 及涨跌停标志（不可达时置为 False），
+或通过 ``--from-amazing`` 读取 AmazingData 暂存文件落库；缺失行情或复权因子直接报错。
 """
 
 from __future__ import annotations
@@ -36,12 +22,7 @@ from _common import (
     yyyymmdd,
 )
 
-#: Column renames applied to the raw bar frame before the adj merge.
-#:
-#: ``adj_factor`` is deliberately absent: the merge that produces that column
-#: runs after this rename, and renaming a column that does not exist yet is a
-#: no-op — the frame kept ``adj_factor`` and ``align_schema`` then refused the
-#: missing required ``adjfactor``.  It is renamed after the merge instead.
+#: 合并复权因子前先重命名基础列；adj_factor 留待合并后再重命名为 adjfactor
 _RENAME = {
     "ts_code": "ticker",
     "vol": "volume",
@@ -49,12 +30,12 @@ _RENAME = {
 
 
 def _to_date(series: pd.Series) -> pd.Series:
-    """tushare ``trade_date`` (``YYYYMMDD``) -> ``datetime.date``."""
+    """将 tushare YYYYMMDD 日期列转为 datetime.date。"""
     return pd.to_datetime(series.astype(str), format="%Y%m%d").dt.date
 
 
 def _try_api(pro, name: str, **kwargs) -> pd.DataFrame | None:
-    """Call tushare *name*; return its frame, or ``None`` when unreachable."""
+    """安全调用 tushare 接口，无权限或不可用时返回 None。"""
     fn = getattr(pro, name, None)
     if fn is None:
         return None
@@ -67,12 +48,7 @@ def _try_api(pro, name: str, **kwargs) -> pd.DataFrame | None:
 
 
 def _fetch_bars(pro, ts_code: str, start: str, end: str) -> tuple[pd.DataFrame, str]:
-    """Return (raw bars, api_name) for *ts_code*.
-
-    ``daily`` covers stocks; ``fund_daily`` covers ETF/LOF.  Whichever answers
-    first wins; when both return nothing the ticket's premise is wrong for this
-    token and we fail rather than write an empty day file.
-    """
+    """拉取单标的行情（股票走 daily，ETF/LOF 走 fund_daily），均无数据则报错。"""
     for api_name in ("daily", "fund_daily"):
         frame = _try_api(pro, api_name, ts_code=ts_code, start_date=start, end_date=end)
         if frame is not None and not frame.empty:
@@ -103,7 +79,7 @@ def _fetch_suspend(pro, ts_code: str, start: str, end: str) -> pd.DataFrame | No
 
 
 def _fetch_limit_flags(pro, ts_code: str, start: str, end: str) -> pd.DataFrame | None:
-    """Try each known limit-flag interface; ``None`` when none is reachable."""
+    """依次尝试涨跌停接口，均不可达时返回 None。"""
     for api_name in ("limit_list_d", "stk_limit", "limit_list"):
         frame = _try_api(
             pro,
@@ -118,16 +94,10 @@ def _fetch_limit_flags(pro, ts_code: str, start: str, end: str) -> pd.DataFrame 
 
 
 def _turnover(bars: pd.DataFrame, basic: pd.DataFrame | None) -> pd.Series:
-    """AC-A2: ``amount / float_market_cap``, NaN when market cap is unreachable.
-
-    *amount* is already in CNY here; tushare ``circ_mv`` is 流通市值 in 万元,
-    so the cap is scaled by 1e4 before the division.
-    """
+    """计算换手率 amount / (circ_mv * 1e4)，缺少流通市值数据时返回 NaN。"""
     if basic is None or basic.empty or "circ_mv" not in basic.columns:
         return pd.Series(float("nan"), index=bars.index, dtype="float64")
-    # ``basic["trade_date"]`` is tushare's YYYYMMDD int; ``bars["trade_date"]``
-    # is already a datetime.date.  Keying the cap on the raw int makes every
-    # lookup miss and the whole turnover column silently NaN.
+    # basic["trade_date"] 需先转为 datetime.date 再与 bars 对齐映射
     keyed = basic.assign(trade_date=_to_date(basic["trade_date"]))
     cap = keyed.set_index("trade_date")["circ_mv"]
     market_cap = pd.to_numeric(bars["trade_date"].map(cap), errors="coerce")
@@ -135,7 +105,7 @@ def _turnover(bars: pd.DataFrame, basic: pd.DataFrame | None) -> pd.Series:
 
 
 def build_frame(pro, ts_code: str, start: str, end: str) -> tuple[pd.DataFrame, dict]:
-    """Pull one ticker's bars and map them onto the 14-column schema frame."""
+    """拉取单标的日线、复权因子及辅助字段并映射为 14 列标准表。"""
     bars, bars_api = _fetch_bars(pro, ts_code, start, end)
     adj = _fetch_adjfactor(pro, ts_code, start, end)
     suspend = _fetch_suspend(pro, ts_code, start, end)
@@ -146,13 +116,10 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> tuple[pd.DataFrame, 
 
     out = bars.copy()
     out["trade_date"] = _to_date(out["trade_date"])
-    # Rename first, then validate the renamed column.  Mapping ``ts_code`` into
-    # a new ``ticker`` before this rename would leave two ``ticker`` columns
-    # and ``align_schema`` refuses the duplicate.
+    # 先重命名再做 ticker 校验，避免出现重复 ticker 列
     out = out.rename(columns=_RENAME)
     out["ticker"] = out["ticker"].map(ticker_convert)
-    # Unit conversions into the storage schema's units (storage_schema.md §55.2
-    # + test_storage_schema fixtures): volume is 股, amount is 元.
+    # 单位换算为存储标准：volume 股（手×100），amount 元（千元×1000）
     out["volume"] = (pd.to_numeric(out["volume"]) * 100).round().astype("int64")
     out["amount"] = pd.to_numeric(out["amount"]) * 1000.0
 
@@ -163,7 +130,7 @@ def build_frame(pro, ts_code: str, start: str, end: str) -> tuple[pd.DataFrame, 
         on="trade_date",
         how="left",
     )
-    # Renamed here, not in _RENAME — the merge above is what creates the column.
+    # 合并后将 adj_factor 重命名为 adjfactor
     merged = merged.rename(columns={"adj_factor": "adjfactor"})
     if merged["adjfactor"].isna().any():
         raise RuntimeError(f"{ts_code}: adjfactor missing for some days; not writing")
@@ -209,7 +176,7 @@ def _apply_limit_flags(merged: pd.DataFrame, limits: pd.DataFrame) -> pd.DataFra
 
 
 def _frame_from_staging(staging: Path) -> pd.DataFrame:
-    """Read ``amazing_pull.py``'s raw staging and map it onto the schema."""
+    """读取 amazing_pull.py 暂存文件并映射为标准日线表。"""
 
     def load(name: str) -> pd.DataFrame:
         path = staging / name

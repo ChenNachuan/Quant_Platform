@@ -1,22 +1,12 @@
-"""Storage operations — atomic writes, locking, lifecycle cleanup, capacity.
+"""存储层运行时操作：原子写、文件锁、生命周期清理与容量检查。
 
-Runtime behaviour of the storage layer.  Structure (what a table looks like)
-lives in :mod:`data.storage_schema`; this module never redefines columns,
-types, nullability or checks (QUANT-13 §0).  Every write path calls
-``SCHEMA[table].validate(df)`` before touching disk — a validation failure
-means **do not write**.
+表结构定义统一归属 :mod:`data.storage_schema`，本模块不重复定义列、类型或校验规则；
+所有写入路径均先调用 ``SCHEMA[table].validate(df)``，校验失败则拒绝落盘。
 
-Three-phase atomic write (``lock -> tmp -> rename``)::
-
-    with FileLock(path):                 # phase 1: declare intent
-        df.to_parquet(tmp, ...)          # phase 2: write {path}.tmp
-        os.replace(tmp, path)            # phase 3: atomic commit
-
-An exception at any point leaves neither a half-written target nor a stray
-``.tmp``: the tmp is removed on the error path and the target is only ever
-created by the final ``os.replace``.
-
-Field authority: ``docs/design/data/storage_ops.md`` (§48–§51).
+三阶段原子写（``lock -> tmp -> rename``）：
+1. ``FileLock(path)`` 获取排他锁；
+2. 写入 ``{path}.tmp`` 并 ``fsync``；
+3. ``os.replace(tmp, path)`` 原子提交，异常路径清理残留 ``.tmp``。
 """
 
 from __future__ import annotations
@@ -72,9 +62,7 @@ __all__ = [
     "factor_view_name",
 ]
 
-# ---------------------------------------------------------------------------
-# Write configuration (§48) — one dict, no per-table overrides
-# ---------------------------------------------------------------------------
+# --- Parquet 写入配置（全局统一，不按表覆盖） ---
 PARQUET_WRITE_CONFIG: dict[str, Any] = dict(
     compression="zstd",
     row_group_size=65536,
@@ -83,61 +71,37 @@ PARQUET_WRITE_CONFIG: dict[str, Any] = dict(
     index=False,
 )
 
-# Capacity tiers (§51): free > 50 GB OK; 10–50 GB WARNING; ≤ 10 GB CRITICAL.
+# 容量分级阈值：可用空间 > 50 GB 为 OK，10–50 GB 为 WARNING，<= 10 GB 为 CRITICAL
 CAPACITY_OK_BYTES = 50 * 1024**3
 CAPACITY_WARNING_BYTES = 10 * 1024**3
 
-# Daily-growth anomaly baseline (§51): normal day is ~16 MB; > 100 MB is a
-# duplicate-ingestion / bloat signal.  Single global baseline (§5 decision 9).
+# 日增量异常基线：单日 > 100 MB 视为重复入库或体积异常告警
 GROWTH_BASELINE_BYTES = 100 * 1024**2
 
-# Stale-residue threshold for .tmp / .lock sweepers (§48).  Single threshold
-# for all tables (§5 decision 1).
+# .tmp / .lock 残留过期判定阈值（小时，全局统一）
 STALE_MAX_AGE_HOURS = 1
 
 _TMP_SUFFIX = ".tmp"
 _LOCK_SUFFIX = ".lock"
 
 
-# ---------------------------------------------------------------------------
-# Errors (§5 decision 5 — defined beside the code that raises them)
-# ---------------------------------------------------------------------------
+# --- 异常定义 ---
 class ConcurrentWriteError(OSError):
-    """Another writer already holds the lock for this target.
-
-    Concurrent writes to the same day/table are a configuration error, not a
-    normal condition to coordinate (§50).  Subclasses :class:`OSError` so
-    callers that just want "the write failed" can catch one type.
-    """
+    """目标文件锁已被其他写入方持有（同日同表并发写入视为配置错误，不自动重试）。"""
 
 
 class DiskFullError(OSError):
-    """Free space has crossed the CRITICAL tier; the write is refused.
-
-    Recovery is operational, not automatic (§5 decision 7): run the cleanup
-    sweepers, then retry by hand.  No auto-retry loop is attempted here.
-    """
+    """磁盘可用空间处于 CRITICAL 级别，拒绝写入（需人工清理后重试）。"""
 
 
-# ---------------------------------------------------------------------------
-# FileLock — flock LOCK_EX | LOCK_NB (§48.6)
-# ---------------------------------------------------------------------------
+# --- FileLock（flock LOCK_EX | LOCK_NB） ---
 class FileLock:
-    """Exclusive, non-blocking advisory lock on a target path.
+    """基于 ``flock(LOCK_EX | LOCK_NB)`` 的非阻塞排他文件锁。
 
-    ``flock(LOCK_EX | LOCK_NB)``: if another writer holds the lock the enter
-    raises :class:`ConcurrentWriteError` immediately (§50).  No retry —
-    see §5 decision 6.
-
-    The lock **file** is a permanent inode and is deliberately never unlinked
-    here.  The mutex is the ``flock``, which is released atomically with
-    ``close()``.  Unlinking on exit re-opens a two-holders race: after the
-    unlock a second process can flock the old inode before the unlink
-    completes, and a third creates a fresh inode and flocks it as well.  That
-    silently breaks the one-writer-per-day/table contract.
-
-    Lock files from crashed runs are swept by :func:`cleanup_stale_locks`,
-    which only removes a lock it can itself exclusively hold.
+    锁被占用时立即抛出 :class:`ConcurrentWriteError`（不重试）。
+    锁文件作为永久 inode 在退出时不执行 unlink，仅通过 ``close()`` 释放 ``flock``，
+    避免 unlink 间隙引发多写入方分别锁定不同 inode 的竞态问题；
+    崩溃遗留的锁文件由 :func:`cleanup_stale_locks` 巡检报告。
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
@@ -160,7 +124,7 @@ class FileLock:
                 f"another writer holds the lock for {self._target}"
             ) from exc
         except BaseException:
-            # Any other flock failure must not leak the fd.
+            # 其他 flock 异常时关闭 fd 防止句柄泄漏
             os.close(fd)
             raise
         self._fd = fd
@@ -175,23 +139,16 @@ class FileLock:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-        # Deliberately no unlink — see the class docstring.
+        # 退出时不删除锁文件，原因见类文档字符串
 
 
-# ---------------------------------------------------------------------------
-# Missing-float normalization (Review note carried into T2)
-# ---------------------------------------------------------------------------
+# --- 缺失浮点值标准化 ---
 def _is_float_dtype(dtype: Any) -> bool:
     return str(dtype).startswith("float")
 
 
 def _normalize_for_schema(df: pd.DataFrame, schema: Any) -> pd.DataFrame:
-    """Replace ``None`` in the schema's float columns with ``NaN``.
-
-    A column of all-``None`` becomes ``object`` dtype in pandas, which then
-    fails the whole schema type check.  Float column names are read off the
-    schema — this module does not name columns itself (§0).
-    """
+    """将 Schema 中浮点列的 ``None`` 替换为 ``NaN``（避免全空列退化为 ``object`` 类型导致校验失败）。"""
     out = df.copy()
     for name, col in schema.columns.items():
         if name not in out.columns:
@@ -205,31 +162,16 @@ def _normalize_for_schema(df: pd.DataFrame, schema: Any) -> pd.DataFrame:
 
 
 def normalize_missing_floats(df: pd.DataFrame, table: str) -> pd.DataFrame:
-    """Normalize missing floats against ``SCHEMA[table]``.
-
-    Public entry for the 11 registered tables.  Factor tables with a named
-    value column are normalized inside :func:`write_parquet_atomic` against
-    the resolved per-factor schema instead.
-    """
+    """按 ``SCHEMA[table]`` 标准化浮点列缺失值（指定值列名的因子表由写入入口按动态 Schema 处理）。"""
     return _normalize_for_schema(df, SCHEMA[table])
 
 
-# ---------------------------------------------------------------------------
-# Schema resolution — T1 is the only authority (§0)
-# ---------------------------------------------------------------------------
+# --- Schema 解析 ---
 _FIXED_FACTOR_COLUMNS = ("ticker", "date")
 
 
 def _resolve_schema(table: str, value_column: str | None = None):
-    """Return the pandera schema for *table*.
-
-    Standard tables resolve through ``SCHEMA``; factor tables may name their
-    value column via :func:`factor_schema`.  ``value_column`` values that
-    collide with the factor table's fixed columns are refused here rather
-    than left to the silent dict-key overwrite inside ``factor_schema``
-    (QUANT-13 finding; the one-line guard in ``storage_schema.py`` is a
-    must-ask-back because this ticket forbids editing that file).
-    """
+    """解析 *table* 对应的 Pandera Schema；factor 表支持指定 ``value_column``（禁止与保留列冲突）。"""
     if table not in SCHEMA:
         raise KeyError(f"unknown table {table!r}; known: {sorted(SCHEMA)}")
     if table == "factor" and value_column is not None:
@@ -242,9 +184,7 @@ def _resolve_schema(table: str, value_column: str | None = None):
     return SCHEMA[table]
 
 
-# ---------------------------------------------------------------------------
-# Partition resolution helpers (supports both {date} and {month} layouts)
-# ---------------------------------------------------------------------------
+# --- 分区路径解析（支持 {date} 与 {month}） ---
 def _coerce_date(value: date | datetime | str) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -254,7 +194,7 @@ def _coerce_date(value: date | datetime | str) -> date:
 
 
 def is_monthly_partition(table: str) -> bool:
-    """Return ``True`` when *table* lands at a ``{month}`` (YYYY-MM) partition."""
+    """若表按 ``{month}`` (YYYY-MM) 分区落地则返回 ``True``。"""
     template = PARTITION_PATHS.get(table, "")
     return "{month}" in template
 
@@ -264,11 +204,7 @@ def partition_path(
     data_date: date | datetime | str,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """Resolve *table*'s landing path for *data_date* (``{date}`` or ``{month}``).
-
-    Raises :class:`NotImplementedError` for tables whose ``PARTITION_PATHS``
-    template is not date- or month-partitioned (e.g. reference / factor).
-    """
+    """解析 *table* 在 *data_date* 下的分区路径（仅支持 ``{date}`` 或 ``{month}`` 模板）。"""
     template = PARTITION_PATHS.get(table)
     if template is None:
         raise NotImplementedError(
@@ -285,9 +221,7 @@ def partition_path(
     )
 
 
-# ---------------------------------------------------------------------------
-# Atomic write (§1) — lock → tmp → rename
-# ---------------------------------------------------------------------------
+# --- 原子写入（lock -> tmp -> rename） ---
 def write_parquet_atomic(
     df: pd.DataFrame,
     path: str | os.PathLike[str],
@@ -297,28 +231,18 @@ def write_parquet_atomic(
     check_disk: bool = True,
     **parquet_kwargs: Any,
 ) -> None:
-    """Write *df* to *path* atomically, after schema validation.
+    """经 Schema 校验后将 *df* 原子写入 *path*。
 
-    1. Resolve the T1 schema and ``validate`` — failure means **do not write**.
-    2. Normalize missing floats to ``NaN`` first (they would otherwise become
-       ``object`` dtype and fail the type check).
-    3. ``FileLock`` → write ``{path}.tmp`` → ``os.replace`` onto the target.
-
-    A crash mid-write leaves neither a half-written target nor a stray
-    ``.tmp``: the tmp is unlinked on the error path, and the target is only
-    ever created by the final ``os.replace``.
-
-    ``table`` names a key of :data:`data.storage_schema.SCHEMA`.  For factor
-    tables pass ``value_column`` to select the per-factor value column.
+    流程：标准化浮点缺失值 -> Schema 校验（失败不写盘）-> 容量检查 ->
+    ``FileLock`` 加锁写 ``{path}.tmp`` 并 ``fsync`` -> ``os.replace`` 原子提交。
+    异常路径自动清理残留 ``.tmp``；factor 表可通过 ``value_column`` 指定值列名。
     """
     target = Path(path)
     schema = _resolve_schema(table, value_column=value_column)
 
-    # Missing floats must be NaN or the column turns object and the type
-    # check fails.  Normalize against the *resolved* schema so a factor table
-    # with a named value column is handled too (Review note for T2).
+    # 按已解析 Schema 将浮点列中的 None 转为 NaN，避免全空列变成 object 类型
     prepared = _normalize_for_schema(df, schema)
-    # Validation failure propagates; nothing has been written yet.
+    # 校验失败直接抛出异常，不触碰磁盘
     validated = schema.validate(prepared)
 
     if check_disk:
@@ -335,10 +259,7 @@ def write_parquet_atomic(
         try:
             kwargs = {**PARQUET_WRITE_CONFIG, **parquet_kwargs}
             validated.to_parquet(tmp, **kwargs)
-            # fsync the tmp so its data is durable before the rename is
-            # visible.  Exception-atomicity is already guaranteed by
-            # os.replace; this is **durability** — without it a power cut
-            # can leave a present-but-truncated target (QUANT-15 #5).
+            # 先刷盘 tmp 数据再执行 os.replace，确保断电等场景下的持久性
             fd = os.open(tmp, os.O_RDONLY)
             try:
                 os.fsync(fd)
@@ -346,18 +267,14 @@ def write_parquet_atomic(
                 os.close(fd)
             os.replace(tmp, target)
         except BaseException:
-            # Never leave a half-written file or a stray .tmp behind.
+            # 异常路径确保不残留半成品文件或 .tmp
             try:
                 os.remove(tmp)
             except FileNotFoundError:
                 pass
             raise
 
-        # Durability, after the commit: the rename is not crash-safe until the
-        # parent directory is fsynced. Kept **outside** the block above on
-        # purpose — the target is already atomically committed at this point,
-        # and a raise here would make callers record a successful write as a
-        # failed one.
+        # 提交后刷盘父目录确保 rename 持久性；置于 try 块外以免已提交却误报写入失败
         try:
             dir_fd = os.open(target.parent, os.O_RDONLY)
             try:
@@ -382,13 +299,10 @@ def upsert_parquet_atomic(
     check_disk: bool = True,
     **parquet_kwargs: Any,
 ) -> None:
-    """Atomically merge *df* into a multi-day partition file (e.g. ``{month}.parquet``).
+    """在 ``FileLock`` 保护下将 *df* 原子合并写入多日分区文件（如 ``{month}.parquet``）。
 
-    Under :class:`FileLock`, any existing rows at *path* whose ``trade_date``
-    matches *partition_dates* or incoming rows' ``trade_date`` are replaced by
-    *df* while preserving all other dates in the same partition file.  The
-    combined frame is sorted by ``(trade_date, ticker)`` and validated against
-    ``SCHEMA[table]`` before the atomic ``tmp -> fsync -> os.replace`` commit.
+    替换匹配 *partition_dates* 或入参 ``trade_date`` 的已有行，保留同分区其余日期数据，
+    按 ``(trade_date, ticker)`` 排序并经 Schema 校验后执行 ``tmp -> fsync -> os.replace`` 原子提交。
     """
     target = Path(path)
     schema = _resolve_schema(table, value_column=value_column)
@@ -471,9 +385,7 @@ def upsert_parquet_atomic(
             )
 
 
-# ---------------------------------------------------------------------------
-# Filename date parsing (§51) — used by the lifecycle sweeper
-# ---------------------------------------------------------------------------
+# --- 文件名日期解析（供生命周期清理使用） ---
 _DATE_PATTERNS = (
     re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)"),
     re.compile(r"(?<!\d)(\d{8})(?!\d)"),
@@ -482,13 +394,7 @@ _DATE_PATTERNS = (
 
 
 def parse_date_from_filename(name: str) -> date | None:
-    """Return the date encoded in *name*, or ``None`` if there is none.
-
-    Accepts ``YYYY-MM-DD``, ``YYYYMMDD`` and a bare ``YYYY`` year token (the
-    factor year-partition shape).  Names with no date — ``contract_specs.parquet``
-    and other full-file reference tables — return ``None`` and are never
-    expired (§5 decision 8: a leftover file is cheap, a wrong delete is not).
-    """
+    """解析文件名中的日期（支持 ``YYYY-MM-DD``、``YYYYMMDD`` 与 ``YYYY``）；无日期的全量参考表返回 ``None`` 且永不过期。"""
     stem = Path(name).name
     for pattern, kind in (
         (_DATE_PATTERNS[0], "iso"),
@@ -506,15 +412,12 @@ def parse_date_from_filename(name: str) -> date | None:
                 return datetime.strptime(token, "%Y%m%d").date()
             return date(int(token), 1, 1)
         except ValueError:
-            # A date-shaped token that is not a real date is a malformed
-            # name — do not fall through and guess a year from it.
+            # 形似日期但非合法日期时直接返回 None，不回退猜测年份
             return None
     return None
 
 
-# ---------------------------------------------------------------------------
-# Residue sweepers — .tmp and .lock left by a crashed writer (§48)
-# ---------------------------------------------------------------------------
+# --- 残留 .tmp 与 .lock 清理 ---
 def _iter_files(root: Path) -> Iterator[Path]:
     if not root.exists():
         return
@@ -539,17 +442,7 @@ def cleanup_stale_tmp(
     now: datetime | None = None,
     dry_run: bool = True,
 ) -> list[Path]:
-    """Remove ``.tmp`` residue older than *max_age_hours*.
-
-    These are crashed-writer leftovers, not expiring data — ``cleanup_expired``
-    is the other sweeper (§48: 残留 vs 过期).  A live write's tmp is younger
-    than the write itself, so a single one-hour threshold is safe for every
-    table (§5 decision 1).
-
-    ``dry_run`` defaults to **True**, like the other two ``cleanup_*``: a bare
-    call reports and deletes nothing, so there is no 「不传就删」 path (§3).
-    Production callers pass ``dry_run=False`` explicitly.
-    """
+    """清理超过 *max_age_hours* 的残留 ``.tmp`` 文件；默认 ``dry_run=True`` 仅报告不删除。"""
     root = Path(root)
     removed: list[Path] = []
     for path in _iter_files(root):
@@ -564,13 +457,7 @@ def cleanup_stale_tmp(
 
 
 def _try_exclusive_lock(path: Path) -> int | None:
-    """Acquire ``flock(LOCK_EX | LOCK_NB)`` on *path*, returning the fd.
-
-    Returns ``None`` when the lock is already held or the file is gone.  The
-    caller owns a returned fd and must unlock and close it.  This is a
-    *probe* — it distinguishes live writers from residue.  It is not, and
-    must never become, a prelude to unlinking the lock file.
-    """
+    """尝试对 *path* 获取非阻塞排他锁，成功返回 fd（仅用于探测活跃写入方，禁止用于删除锁文件）。"""
     try:
         fd = os.open(path, os.O_RDWR)
     except OSError:
@@ -590,35 +477,10 @@ def cleanup_stale_locks(
     now: datetime | None = None,
     dry_run: bool = True,
 ) -> list[Path]:
-    """Report unheld ``.lock`` residue older than *max_age_hours*. Never deletes.
+    """报告超过 *max_age_hours* 且未被持有的 ``.lock`` 文件（永不删除）。
 
-    **Lock files are never unlinked — by this function or any other.**  The
-    lock file is a permanent inode and the ``flock`` on it is the only mutex
-    (:class:`FileLock`).  Unlinking re-opens a two-holders race no matter how
-    carefully it is sequenced, because ``FileLock.__enter__`` does
-    ``os.open()`` *before* ``flock()``: a writer can hold inode I without
-    yet having flocked, the unlink removes the name, that writer then flocks
-    the orphaned I, and a second writer ``O_CREAT``s I2 and flocks that.
-    Two exclusive holders on the same target.
-
-    Holding the flock across an unlink does not close that window — it only
-    narrows it.  And since a lock file's mtime is its **creation** time and
-    never refreshes while held, an unheld stale lock is the common case, so
-    any unlink path here is reachable in practice rather than theoretical.
-
-    Unlinking also buys nothing: the file is empty residue, and ``flock``
-    drops on process death regardless.  So this function reports and stops.
-    A stale lock file is cheap to leave behind; a second writer on the same
-    day is not.
-
-    A lock is reported only if it is genuinely unheld, so the list separates
-    real residue from a write that has simply been running for hours.
-
-    ``dry_run`` is kept for signature symmetry with the other two
-    ``cleanup_*``; this function never deletes, so it has no effect.
-
-    Returns the stale, unheld lock files — candidates a human may tidy by
-    hand.  Nothing is removed either way.
+    锁文件作为永久 inode，删除会重新引入多写入方竞态；本函数仅巡检并返回候选列表。
+    ``dry_run`` 仅为保持清理接口签名一致，无实际删除行为。
     """
     root = Path(root)
     found: list[Path] = []
@@ -629,7 +491,7 @@ def cleanup_stale_locks(
             continue
         fd = _try_exclusive_lock(path)
         if fd is None:
-            # Held by a live writer (or already gone).  Not residue.
+            # 仍被活跃写入方持有或已不存在，不属于残留
             continue
         try:
             found.append(path)
@@ -639,16 +501,9 @@ def cleanup_stale_locks(
     return found
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle cleanup — driven by data/lifecycle.yaml (§3)
-# ---------------------------------------------------------------------------
+# --- 生命周期清理（由 data/lifecycle.yaml 驱动） ---
 def load_lifecycle(config_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-    """Load the retention policy from ``data/lifecycle.yaml``.
-
-    The YAML file is the single source of retention truth; nothing is
-    hard-coded here.  ``pyyaml`` is currently a transitive dependency of the
-    stack — declaring it explicitly is a follow-up (see the PR description).
-    """
+    """从 ``data/lifecycle.yaml`` 加载数据保留策略。"""
     if config_path is None:
         config_path = Path(__file__).with_name("lifecycle.yaml")
     with open(config_path, encoding="utf-8") as handle:
@@ -659,7 +514,7 @@ def load_lifecycle(config_path: str | os.PathLike[str] | None = None) -> dict[st
 
 
 def _match_policy(rel_parts: tuple[str, ...], policies: list[dict]) -> dict:
-    """Return the longest-prefix policy matching *rel_parts*, or the default."""
+    """返回与相对路径 *rel_parts* 最长前缀匹配的保留策略（无匹配返回空字典）。"""
     best: dict | None = None
     best_len = -1
     for policy in policies:
@@ -684,23 +539,10 @@ def cleanup_expired(
     config_path: str | os.PathLike[str] | None = None,
     today: date | None = None,
 ) -> list[Path]:
-    """Delete files older than their lifecycle.yaml retention window.
+    """按 ``lifecycle.yaml`` 清理超过保留期限的历史文件。
 
-    ``dry_run`` defaults to **True**: a bare call reports and deletes nothing,
-    so there is no "call it and it deletes" path.  Production callers pass
-    ``dry_run=False`` explicitly (§3).
-
-    *subdir* scopes the walk and deletion to one subtree under *root* while
-    keeping policy-relative paths rooted at *root* — so ``subdir="raw"`` only
-    touches files under ``root/raw/`` but still matches the ``raw/`` lifecycle
-    policy.
-
-    Rules with ``retention: permanent`` are skipped.  Files whose name has no
-    parseable date are kept.  ``.tmp`` / ``.lock`` residue is the job of
-    :func:`cleanup_stale_tmp` / :func:`cleanup_stale_locks`, not this one.
-
-    Returns the paths that were deleted (``dry_run=False``) or would be
-    (``dry_run=True``).
+    默认 ``dry_run=True`` 仅返回待删路径；跳过 ``permanent`` 规则、无日期文件名及 ``.tmp`` / ``.lock`` 残留。
+    可通过 *subdir* 将扫描范围限定到 *root* 下的单个子目录。
     """
     root = Path(root)
     if subdir is not None:
@@ -741,20 +583,9 @@ def cleanup_expired(
     return removed
 
 
-# ---------------------------------------------------------------------------
-# Capacity tiers (§51)
-# ---------------------------------------------------------------------------
+# --- 磁盘容量与日增量检查 ---
 def check_capacity(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> str:
-    """Return the free-space tier for the filesystem holding *data_root*.
-
-    ``OK`` above 50 GB free, ``WARNING`` at 10–50 GB, ``CRITICAL`` at or
-    below 10 GB.  ``CRITICAL`` is the "refuse the write" tier.
-
-    When *data_root* does not exist yet the nearest existing ancestor is
-    measured — that is the filesystem the path would land on.  Falling back
-    to the current directory would report free space for an unrelated
-    filesystem and turn a capacity refusal into a silent pass.
-    """
+    """返回 *data_root* 所在文件系统的可用空间分级（``OK`` >50GB / ``WARNING`` 10–50GB / ``CRITICAL`` <=10GB）；目录尚未创建时向上探测最近祖先目录。"""
     target = Path(data_root)
     probe = target
     while not probe.exists():
@@ -776,17 +607,7 @@ def check_daily_growth(
     today: date | None = None,
     baseline_bytes: int = GROWTH_BASELINE_BYTES,
 ) -> dict[str, Any]:
-    """Return today's data volume against the single 100 MB/day baseline.
-
-    Volume is the total size of files whose *filename date* equals *today* —
-    the same date the partition is named after, so a rewrite of an existing
-    day does not count as new data.  Exceeding the baseline is an anomaly
-    signal (duplicate ingestion / bloat), not a write refusal (§51).
-
-    ``.tmp`` and ``.lock`` residue is not data and is not counted, matching
-    the split :func:`cleanup_expired` already draws between residue and
-    content.
-    """
+    """统计文件名日期等于 *today* 的数据文件总字节数并对比 100 MB 日增量基线（忽略 ``.tmp`` / ``.lock``，超限仅告警不拒写）。"""
     root = Path(data_root)
     day = today if today is not None else date.today()
     total = 0

@@ -1,21 +1,12 @@
-"""DQC severity — disposition of check findings (S9-T3).
+"""DQC 严重级别与处置策略配置。
 
-Field authority: ``docs/design/data/dqc_severity.md`` (§37).  This module
-answers "what to do about a finding"; *what to check* lives in
-``data/dqc/rules/`` + ``data/dqc/checks/`` (S9-T2) and execution lives in
-:mod:`data.dqc.engine`.
+核心机制：
+1. :class:`DQCSeverityConfig`：单规则行处置方式（``drop``/``flag``/``pass``）、升级阈值与粒度。
+2. 三级硬拒收粒度：行级剔除（``row``）、分组剔除（``partition``）、整批拦截（``batch``）。
+3. :class:`QualityFlag`：int64 行级质量位掩码（目前分配前 5 位，其余预留）。
+4. :class:`BatchRejectConfig`：全局批次安全阀。
 
-Core mechanisms (design §37):
-1. :class:`DQCSeverityConfig` — per-rule ``row_action`` + escalation threshold,
-   the 44-rule disposition table of §37.3.
-2. Three-level hard-reject granularity: row drop / partition reject / batch
-   reject (``granularity`` field).
-3. :class:`QualityFlag` — int64 row-level bitmask, re-exported from
-   :mod:`core.types` (five bits, ``storage_schema.md`` §47.15).
-4. :class:`BatchRejectConfig` — global batch safety valve.
-
-HARD findings go to quarantine, SOFT findings only mark ``quality_flag`` — the
-two are never interchanged (issue red line).
+原则：HARD 违规剔除或进隔离区，SOFT 仅标记 ``quality_flag``，两者互不越界。
 """
 
 from __future__ import annotations
@@ -27,7 +18,7 @@ import pandas as pd
 
 from core.types import QualityFlag
 
-if TYPE_CHECKING:  # pragma: no cover - typing only, avoids the import cycle
+if TYPE_CHECKING:  # pragma: no cover - 仅类型检查导入，避免循环依赖
     from data.dqc.engine import CheckResult
 
 __all__ = [
@@ -41,31 +32,24 @@ __all__ = [
     "compute_quality_flag",
 ]
 
-# rule_id -> quality_flag bit for the five §47.15 bits.  The other SOFT rules
-# have no bit yet (bit5+ reserved; §37 open item "bit assignment outside the
-# five").  Rows they flag carry no bit until that ruling lands.
+# 已分配 quality_flag 比特位的 5 条 SOFT 规则（bit5+ 预留）
 RULE_FLAG_BITS: dict[str, QualityFlag] = {
-    "C02": QualityFlag.C02_COVERAGE,  # 1 << 0 — coverage insufficient
-    "C05": QualityFlag.C05_NULL_RATE,  # 1 << 1 — null rate high
-    "L04": QualityFlag.L04_BEYOND_LIMIT,  # 1 << 2 — beyond price limit
-    "L07": QualityFlag.L07_ADJFACTOR_RANGE,  # 1 << 3 — adjfactor range abnormal
-    "K01": QualityFlag.K01_OVERNIGHT_GAP,  # 1 << 4 — overnight gap too large
+    "C02": QualityFlag.C02_COVERAGE,  # 1 << 0：覆盖率不足
+    "C05": QualityFlag.C05_NULL_RATE,  # 1 << 1：软字段空值率偏高
+    "L04": QualityFlag.L04_BEYOND_LIMIT,  # 1 << 2：超出涨跌停幅度
+    "L07": QualityFlag.L07_ADJFACTOR_RANGE,  # 1 << 3：复权因子范围异常
+    "K01": QualityFlag.K01_OVERNIGHT_GAP,  # 1 << 4：隔夜跳空过大
 }
 
 
 @dataclass(frozen=True)
 class DQCSeverityConfig:
-    """Per-rule disposition (§37.2/§37.3).
+    """单规则处置策略。
 
-    ``row_action`` — what failing rows get: ``"drop"`` removes them,
-    ``"flag"`` keeps rows and records the finding (``quality_flag`` is set
-    only for rules with a ``RULE_FLAG_BITS`` entry), ``"pass"`` touches no
-    row (batch-level gates).  ``escalation_threshold`` — failing-row rate above which the rule
-    escalates: batch reject for ``drop``/``pass`` rules, an escalated alarm for
-    ``flag`` rules (K06–K08 only; ``None`` = never escalate).  ``granularity``
-    is the three-level hard-reject scale: ``"row"`` drops the failing rows,
-    ``"partition"`` expands to whole ticker×date groups, ``"batch"`` judges
-    the batch as a whole.
+    - ``row_action``：``drop`` 剔除违规行；``flag`` 保留行并记标；``pass`` 不改行（用于整批门禁）。
+    - ``escalation_threshold``：触发升级的失败比例阈值；``drop``/``pass`` 超限拒收整批，
+      ``flag``（仅 K06–K08）超限仅发升级告警；``None`` 表示不升级。
+    - ``granularity``：``row`` 按行；``partition`` 扩展至整个 ``(ticker, trade_date)``；``batch`` 整批判定。
     """
 
     row_action: str  # "drop" | "flag" | "pass"
@@ -85,54 +69,53 @@ class DQCSeverityConfig:
             )
 
 
-# §37.3 disposition table, rule by rule.  "flag" rules never escalate except
-# K06–K08 (alarm at 10%, rows kept).  C07–C10 are absent from the §37.3 table
-# and follow the same regime: HARD aggregate rules are batch gates
-# (row_action "pass", escalation 0), SOFT aggregate rules flag the batch.
+# 逐规则处置配置表（flag 规则仅 K06–K08 设 10% 告警阈值且保留数据行）
 SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
-    # completeness
-    "C01": DQCSeverityConfig("pass", 0.0, "batch"),  # date missing -> hard reject
-    "C02": DQCSeverityConfig("flag", None, "batch"),  # coverage low -> day flag
-    "C03": DQCSeverityConfig("drop", 0.05, "partition"),  # drop ticker×date
-    "C04": DQCSeverityConfig("drop", 0.20),  # >20% null critical -> reject
-    "C05": DQCSeverityConfig("flag"),  # never escalates
+    # 完整性
+    "C01": DQCSeverityConfig("pass", 0.0, "batch"),  # 缺失交易日直接整批拒收
+    "C02": DQCSeverityConfig("flag", None, "batch"),  # 覆盖率不足仅打日标
+    "C03": DQCSeverityConfig(
+        "drop", 0.05, "partition"
+    ),  # 分钟线根数异常按 ticker×date 剔除
+    "C04": DQCSeverityConfig("drop", 0.20),  # 关键字段空值超 20% 拒收
+    "C05": DQCSeverityConfig("flag"),
     "C06": DQCSeverityConfig("drop", 0.05),
-    "C07": DQCSeverityConfig("pass", 0.0, "batch"),  # gap in calendar -> reject
+    "C07": DQCSeverityConfig("pass", 0.0, "batch"),  # 日历缺口直接拒收
     "C08": DQCSeverityConfig("flag", None, "batch"),
     "C09": DQCSeverityConfig("flag", None, "batch"),
     "C10": DQCSeverityConfig("pass", 0.0, "batch"),
-    # legality
-    "L01": DQCSeverityConfig("drop", 0.01),  # negative price = corruption
+    # 合法性
+    "L01": DQCSeverityConfig("drop", 0.01),  # 负价格视为数据损坏
     "L02": DQCSeverityConfig("drop", 0.01),
     "L03": DQCSeverityConfig("drop", 0.01),
-    "L04": DQCSeverityConfig("flag"),  # limit breaches are often legal
+    "L04": DQCSeverityConfig("flag"),  # 涨跌停突破多属新股/特殊交易日，仅标记
     "L05": DQCSeverityConfig("flag"),
     "L06": DQCSeverityConfig("drop", 0.01),
     "L07": DQCSeverityConfig("flag"),
-    "L08": DQCSeverityConfig("drop", 0.01),  # schema violation
+    "L08": DQCSeverityConfig("drop", 0.01),
     "L09": DQCSeverityConfig("flag"),
-    "L10": DQCSeverityConfig("drop", 0.05),  # structural missing
+    "L10": DQCSeverityConfig("drop", 0.05),
     "L11": DQCSeverityConfig("drop", 0.05),
     "L12": DQCSeverityConfig("flag"),
-    "L13": DQCSeverityConfig("drop", 0.01),  # format change upstream
+    "L13": DQCSeverityConfig("drop", 0.01),  # 上游格式变更
     "L14": DQCSeverityConfig("drop", 0.01),
-    # consistency
+    # 一致性
     "K01": DQCSeverityConfig("flag"),
     "K02": DQCSeverityConfig("drop", 0.05),
     "K03": DQCSeverityConfig("drop", 0.05),
     "K04": DQCSeverityConfig("flag"),
-    "K05": DQCSeverityConfig("drop", 0.01),  # adjfactor mutation
-    "K06": DQCSeverityConfig("flag", 0.10),  # cross-granularity: alarm at 10%
-    "K07": DQCSeverityConfig("flag", 0.10),  # (rows kept, §37.3)
+    "K05": DQCSeverityConfig("drop", 0.01),  # 非除权日复权因子突变
+    "K06": DQCSeverityConfig("flag", 0.10),  # 跨粒度偏差超 10% 告警但保留行
+    "K07": DQCSeverityConfig("flag", 0.10),
     "K08": DQCSeverityConfig("flag", 0.10),
     "K09": DQCSeverityConfig("flag"),
     "K10": DQCSeverityConfig("pass", 0.0, "batch"),
     "K11": DQCSeverityConfig("flag"),
-    # timeliness
-    "T01": DQCSeverityConfig("pass", 0.0, "batch"),  # stale -> no ingest
+    # 时效性
+    "T01": DQCSeverityConfig("pass", 0.0, "batch"),  # 数据过期拒绝入库
     "T02": DQCSeverityConfig("pass", 0.0, "batch"),
-    "T03": DQCSeverityConfig("drop", 0.0),  # 1 future row rejects the batch
-    "T04": DQCSeverityConfig("drop", None, "partition"),  # time reversal
+    "T03": DQCSeverityConfig("drop", 0.0),  # 出现 1 条未来日期即整批拒收
+    "T04": DQCSeverityConfig("drop", None, "partition"),  # 时间倒流按分区剔除
     "T05": DQCSeverityConfig("drop", None, "partition"),
     "T06": DQCSeverityConfig("flag"),
     "T07": DQCSeverityConfig("flag"),
@@ -142,11 +125,7 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
 
 
 def severity_config_for(rule_id: str) -> DQCSeverityConfig:
-    """Return the disposition for *rule_id*.
-
-    Fail-closed: a rule missing from the table must be classified before it
-    may run, never silently defaulted.
-    """
+    """返回 *rule_id* 的处置配置；未登记规则直接报错（fail-closed）。"""
     try:
         return SEVERITY_CONFIGS[rule_id]
     except KeyError:
@@ -158,26 +137,14 @@ def severity_config_for(rule_id: str) -> DQCSeverityConfig:
 
 @dataclass(frozen=True)
 class BatchRejectConfig:
-    """Global batch safety valve (§37.6).
-
-    ``max_hard_drop_rate`` — HARD ``drop`` rows above this share of the batch
-    reject the whole batch (the "many rules each failing a little" case).
-    ``soft_alarm_rate`` — rows with ``quality_flag != 0`` above this share
-    raise an alarm only; SOFT findings never reject.
-    """
+    """全局批次安全阀：``max_hard_drop_rate`` 超限拒收整批，``soft_alarm_rate`` 超限仅告警。"""
 
     max_hard_drop_rate: float = 0.20
     soft_alarm_rate: float = 0.50
 
 
 class DQCBatchReject(Exception):
-    """The batch was refused and saved to quarantine.
-
-    ``detail`` is the rejection metadata written next to the quarantined
-    parquet (``data.quarantine.save_quarantine``): data_date, asset_type,
-    reject_time, batch_status, total_rows, rows_would_drop, drop_rate,
-    hard_rules_triggered, reject_reason.
-    """
+    """批次被 DQC 拒收并写入隔离区时抛出的异常（``detail`` 含拒绝详情元数据）。"""
 
     def __init__(self, message: str, detail: dict | None = None) -> None:
         super().__init__(message)
@@ -187,13 +154,7 @@ class DQCBatchReject(Exception):
 def compute_quality_flag(
     df: pd.DataFrame, soft_results: list[CheckResult]
 ) -> pd.Series:
-    """Return the per-row ``quality_flag`` int64 bitmask (§37.4).
-
-    Each SOFT result contributes its bit (``RULE_FLAG_BITS``) on its failing
-    rows; rows failing several rules OR the bits together.  SOFT rules without
-    a bit contribute nothing (bit5+ reserved).  Masks are reindexed onto
-    *df* so this works on the post-drop frame too.
-    """
+    """按 ``RULE_FLAG_BITS`` 计算逐行 ``quality_flag``（int64 按位或掩码，未分配比特的规则跳过）。"""
     flags = pd.Series(0, index=df.index, dtype="int64")
     for result in soft_results:
         bit = RULE_FLAG_BITS.get(result.rule_id)

@@ -1,1 +1,1 @@
-"""Trading strategy packages grouped by asset class."""
+"""按资产类别组织的交易策略包。"""

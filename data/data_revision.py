@@ -1,29 +1,11 @@
-"""Data revision — detect, apply, propagate impact (QUANT-42, S10-T3).
+"""数据修订检测、回写与下游影响传播。
 
-Sources overwrite history silently and never flag a correction, so the
-platform has to find revisions itself, write them back safely, and tell the
-downstream what is now stale.  Three steps per ``docs/design/data/data_revision.md``:
+由于上游源站会静默覆盖历史且不标记修订，本模块按三阶段处理：
+- **检测**（:func:`detect_corrections`）：重拉近 *lookback* 个交易日并与资产层逐行比对；
+- **回写**（:func:`apply_corrections`）：先追加审计日志，再通过完整 ``daily_ingest`` 流程覆盖写入（不保留历史版本）；
+- **传播**（:func:`assess_correction_impact`、:func:`mark_factors_stale`）：分级记录影响并标记关联因子过期，绝不自动重算因子或回测。
 
-* **detect** — re-pull the last *lookback* trade dates and diff row by row
-  against the asset layer (:func:`detect_corrections`).  Nothing else finds a
-  revision: there is no source-side correction marker to trust.
-* **apply** — append the correction log, *then* re-run the full ingest
-  pipeline (:func:`apply_corrections`).  Overwrite, never version: the platform
-  always wants the latest and most accurate values, and the log is the audit.
-* **propagate** — classify severity, record the impact, mark affected factors
-  stale (:func:`assess_correction_impact`, :func:`mark_factors_stale`).
-  **Nothing is recomputed here** — the rerun decision is a human's, made from
-  the severity.
-
-Boundaries (issue 边界): no data versioning, no automatic cascade into factor /
-backtest recomputation, and no writes to ``data_lake/``.  This module is the
-detection / logging / marking code path only.
-
-``data.ingestion.daily_ingest`` resolves at call time (:func:`_daily_ingest`)
-so this module stays importable on a tree where the ingest pipeline has not
-landed yet, and so a unit test can stand in a double without patching an
-import graph.  When it is genuinely absent the call raises a :class:`RuntimeError`
-that names it, rather than an opaque :class:`ImportError` from mid-write.
+``data.ingestion.daily_ingest`` 在调用时延迟导入，确保本模块独立可测；缺失时抛出明确 ``RuntimeError``。
 """
 
 from __future__ import annotations
@@ -64,8 +46,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Per-field comparison tolerances (§45.2).  A source-side float / unit wobble
-#: at or under these thresholds is not a correction and must not alert.
+# 各字段对比容差：不超过阈值视为上游浮点/单位微调，不触发修订记录
 CORRECTION_TOLERANCES: dict[str, float] = {
     "close": 0.01,
     "volume": 100,
@@ -76,55 +57,36 @@ CORRECTION_TOLERANCES: dict[str, float] = {
 CORRECTIONS_ROOT = "corrections"
 IMPACT_LOG_NAME = "impact_log.jsonl"
 
-#: Weekly scan window, in trade dates (§45.2).
+# 周度常规扫描回溯交易日数
 DEFAULT_LOOKBACK = 30
-#: Quarterly full-scan window, in trade dates — the long-tail fallback for
-#: revisions that arrive after the weekly window has moved on (§45.2).
+# 季度全量扫描回溯交易日数（兜底长尾历史修订）
 QUARTERLY_LOOKBACK = 250
 
-#: ``rel_diff`` recorded when one side of a comparison is absent — a value that
-#: appears from nothing, or vanishes, is a total change of that field.  Finite
-#: on purpose so the correction log stays strict JSON, and always clears
-#: ``MEDIUM_REL_DIFF`` (100% is not a minor correction).
+# 单边缺失（新增或被移除）记录的相对变化率，确保为有限 JSON 数值且触发 MEDIUM 以上级别
 TOTAL_CHANGE_REL_DIFF = 1.0
 
-#: Relative difference above which a correction is MEDIUM (§45.4).
+# 判定为 MEDIUM 级别的相对差异阈值
 MEDIUM_REL_DIFF = 0.01
 
 SEVERITY_LOW = "LOW"
 SEVERITY_MEDIUM = "MEDIUM"
 SEVERITY_HIGH = "HIGH"
 
-#: Alerting floor.  Only MEDIUM and above raise a warning — a LOW correction is
-#: noise, and alerting on all of them drowns the real ones (§45.4).
+# 触发告警日志的最低严重级别集合（过滤 LOW 级噪音）
 ALERT_SEVERITIES = frozenset({SEVERITY_MEDIUM, SEVERITY_HIGH})
 
-#: Storage table name (``PARTITION_PATHS`` key) → the source-domain asset type
-#: the adapters and normalizers accept (``TushareAdapter._ASSET_TYPES`` and
-#: friends — ``"stock"``, ``"option"``).  The two domains are not
-#: interchangeable: ``get_primary_source`` and the asset layer are keyed by
-#: table name (``bars_daily``), while ``adapter.fetch`` / ``normalize`` reject
-#: anything outside the source domain.  Today's fetch + normalize pair serves
-#: the unified bars_daily schema only; extend this map when another table gets
-#: a source mapping.
+# 存储表名到适配器/标准化器源域资产类型的映射（仅覆盖已接入的统一日线表）
 STORAGE_TO_SOURCE_ASSET: dict[str, str] = {
     "bars_daily": "stock",
 }
 
 
-# ---------------------------------------------------------------------------
-# Records
-# ---------------------------------------------------------------------------
+# --- 修订记录数据结构 ---
 
 
 @dataclass(frozen=True)
 class FieldChange:
-    """One field of one ticker that moved past its tolerance.
-
-    ``asset_type`` and ``trade_date`` locate the change so
-    :func:`apply_corrections` can group a scan's flat list into one
-    :class:`CorrectionRecord` per asset/date and name the log file it writes.
-    """
+    """单个标的单个字段超出容差的变更记录（含定位用的 ``asset_type`` 与 ``trade_date``）。"""
 
     ticker: str
     field: str
@@ -138,11 +100,7 @@ class FieldChange:
 
 @dataclass(frozen=True)
 class CorrectionRecord:
-    """All changes found for one ``asset_type`` / ``trade_date``.
-
-    Serialised to ``corrections/{asset_type}/{date}.jsonl`` — one JSON object
-    per change, appended (same-day corrections accumulate, §45.3).
-    """
+    """单个 ``(asset_type, trade_date)`` 的聚合修订记录，按行追加写入 ``corrections/{asset_type}/{date}.jsonl``。"""
 
     asset_type: str
     trade_date: date
@@ -150,9 +108,7 @@ class CorrectionRecord:
     changes: tuple[FieldChange, ...] = ()
 
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
+# --- 路径辅助 ---
 
 
 def correction_log_path(
@@ -160,7 +116,7 @@ def correction_log_path(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """``{data_root}/corrections/{asset_type}/{date}.jsonl`` (§45.3)."""
+    """返回修订审计日志路径：``{data_root}/corrections/{asset_type}/{date}.jsonl``。"""
     date_str = trade_date.strftime("%Y-%m-%d")
     return Path(data_root) / CORRECTIONS_ROOT / asset_type / f"{date_str}.jsonl"
 
@@ -168,29 +124,20 @@ def correction_log_path(
 def impact_log_path(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """``{data_root}/corrections/impact_log.jsonl`` (§45.4)."""
+    """返回影响日志路径：``{data_root}/corrections/impact_log.jsonl``。"""
     return Path(data_root) / CORRECTIONS_ROOT / IMPACT_LOG_NAME
 
 
-# ---------------------------------------------------------------------------
-# Detection
-# ---------------------------------------------------------------------------
+# --- 修订检测 ---
 
 
 def _now() -> datetime:
-    """Clock seam — tests never call ``datetime.now()`` directly (conftest)."""
+    """时钟接缝，便于测试注入固定时间。"""
     return datetime.now()
 
 
 def _source_asset_type(asset_type: str) -> str:
-    """Translate a storage table name into the adapter/normalizer domain.
-
-    ``detect_corrections`` speaks storage tables (``bars_daily``) because
-    ``get_primary_source``, the asset layer and ``depends_on`` all do, while
-    ``adapter.fetch`` / ``normalize`` validate against their source-domain
-    ``_ASSET_TYPES`` (``"stock"``, ``"option"``).  No single input satisfies
-    both without this translation.
-    """
+    """将存储表名转换到适配器/标准化器认可的源域资产类型。"""
     try:
         return STORAGE_TO_SOURCE_ASSET[asset_type]
     except KeyError:
@@ -202,26 +149,17 @@ def _source_asset_type(asset_type: str) -> str:
 
 
 def _fetch_normalized(asset_type: str, trade_date: date) -> Any:
-    """Re-pull one trade date from the primary source, post-Normalizer.
-
-    *asset_type* is the storage table name; the adapter and normalizer are
-    handed its source-domain translation (:data:`STORAGE_TO_SOURCE_ASSET`)
-    because passing the table name through is rejected by both.
-
-    I/O seam: the source layer lands with the ingest pipeline, and a unit test
-    stands in a frame here rather than opening a connection.
-    """
+    """从主数据源重拉单日数据并经过标准化器处理（I/O 测试接缝）。"""
     from data.adapters import get_adapter
     from data.ingestion import get_primary_source
     from data.normalizers import get_normalizer
 
-    source = get_primary_source(asset_type)  # storage domain
-    source_asset_type = _source_asset_type(asset_type)  # adapter domain
+    source = get_primary_source(asset_type)  # 存储域主数据源
+    source_asset_type = _source_asset_type(asset_type)  # 适配器域资产类型
     adapter = get_adapter(source)
     try:
         result = adapter.fetch(source_asset_type, trade_date)
-        # get_normalizer() returns the normalize function itself (see
-        # data/normalizers/__init__.py and the sibling call in dqc/report.py).
+        # get_normalizer() 直接返回 normalize 可调用对象
         return get_normalizer(source)(source_asset_type, result.df)
     finally:
         adapter.close()
@@ -232,7 +170,7 @@ def _load_local(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Any:
-    """Read the asset layer's existing batch for one trade date."""
+    """读取资产层指定交易日的既有本地批次。"""
     import pandas as pd
 
     from data.storage_ops import is_monthly_partition, partition_path
@@ -263,34 +201,14 @@ def _load_local(
 
 
 def _no_rows(frame: Any) -> bool:
-    """True when one side has nothing to compare: ``None`` or a 0-row frame.
-
-    The normalizers reindex to ``UNIFIED_COLUMNS``, so a source that returned
-    nothing comes back as a 0-row frame rather than ``None``.  An empty pull
-    is "no data" — the same call ``dqc.report.reingest`` makes — never
-    "every ticker was removed", which would page out false corrections for a
-    whole date.
-    """
+    """判断单边结果是否为空（``None`` 或 0 行），空拉取视为无数据而非全量删除。"""
     return frame is None or len(frame) == 0
 
 
 def _post_dqc_baseline(
     df: Any, asset_type: str, trade_date: date, data_root: str | os.PathLike[str]
 ) -> Any:
-    """Shape the fresh pull the way the asset layer stores it — post-DQC.
-
-    ``ingest_with_dqc`` drops every HARD-failing row before its Parquet write
-    and refuses the whole batch when the valve trips, so a raw-vs-layer diff
-    would report rows our own DQC dropped as "backfill" corrections on every
-    scan (and ``apply_corrections`` would re-ingest them into the same
-    refusal).  :func:`data.dqc.engine.evaluate_batch` is the same judgement
-    the write path runs and writes nothing itself, so detection can drop
-    exactly ``rows_to_drop`` here.  ``None`` means the batch would have been
-    refused: none of it would land, so there is no like-for-like baseline to
-    diff against.
-
-    The boundary holds: detection stays read-only on ``data_lake/``.
-    """
+    """对新拉取数据运行只读 DQC 评估并剔除会被拦截的行，使新旧基线口径一致（不写入数据湖）。"""
     from data.dqc.engine import evaluate_batch
     from data.dqc.report import build_reference_overrides
 
@@ -306,14 +224,7 @@ def _post_dqc_baseline(
 
 
 def _foreign_fields(asset_type: str) -> set[str]:
-    """Fields the asset layer takes from a source other than this pull.
-
-    ``source_priority.yaml``'s ``field_override`` pins a field to one source
-    whatever the row priority is.  When that source is not the one detection
-    pulls, the layer's values come from elsewhere and cannot be compared
-    against this pull's column — the difference would read as a correction on
-    every scan.  Such fields are dropped from the comparison instead.
-    """
+    """获取由其他数据源覆盖接管的字段集合，比对前剔除以避免误报。"""
     from data.ingestion import get_field_overrides, get_primary_source
 
     primary = get_primary_source(asset_type)
@@ -325,12 +236,12 @@ def _foreign_fields(asset_type: str) -> set[str]:
 
 
 def _rel_diff(old: float, new: float) -> float:
-    """``abs_diff / |old|``, floored so a zero baseline is not a division blow-up."""
+    """计算相对差异 ``abs_diff / |old|``，分母设下限防零除。"""
     return abs(new - old) / max(abs(old), 1e-9)
 
 
 def _is_missing(value: Any) -> bool:
-    """True for NaN / None / NaT — a side that has no value to compare."""
+    """判断值是否为 NaN / None / NaT。"""
     import pandas as pd
 
     try:
@@ -340,7 +251,7 @@ def _is_missing(value: Any) -> bool:
 
 
 def _jsonable(value: float) -> float | None:
-    """NaN / Inf → ``null`` so the JSONL logs stay strict JSON."""
+    """将 NaN / Inf 转为 ``None`` 以保证 JSONL 严格合法。"""
     return value if math.isfinite(value) else None
 
 
@@ -350,22 +261,10 @@ def compare_frames(
     asset_type: str,
     trade_date: date,
 ) -> list[FieldChange]:
-    """Row-diff two normalised frames against :data:`CORRECTION_TOLERANCES`.
+    """按 :data:`CORRECTION_TOLERANCES` 逐行比对两份标准化 DataFrame。
 
-    An **outer** merge on ``(ticker, trade_date)`` with an indicator, so two
-    classes of real correction are not silently dropped:
-
-    * **one-sided rows** — a ticker the source backfilled (``right_only``) or
-      removed (``left_only``);
-    * **NaN ↔ value** — a field that was missing and got filled in, or cleared.
-
-    Both are recorded as a total change of that field
-    (:data:`TOTAL_CHANGE_REL_DIFF`).  Two populated values are compared against
-    the field's tolerance as usual.  Only the four tolerance fields are
-    compared; a field either frame does not carry is skipped rather than
-    treated as a zero.  Duplicated ``(ticker, trade_date)`` keys are refused
-    before the merge — one row per key on both sides, as in
-    ``data.ingestion.cross_source_check``.
+    采用外连接（outer merge）捕获单边新增/缺失与 ``NaN <-> 数值`` 填充/清空（记为 :data:`TOTAL_CHANGE_REL_DIFF`）；
+    仅比对容差表内共有字段，且合并前拒绝重复 ``(ticker, trade_date)`` 主键。
     """
     import pandas as pd
 
@@ -377,16 +276,11 @@ def compare_frames(
     key = ["ticker", "trade_date"]
     if any(c not in old.columns or c not in new.columns for c in key):
         raise ValueError(f"frames must carry {key} to be compared")
-    # One row per key on each side, refused like the sibling comparison
-    # (data.ingestion.cross_source_check): a duplicated key fans the outer
-    # merge out into a cross product and would record several FieldChanges
-    # for the same ticker/field.
+    # 拒绝重复主键，防止外连接产生笛卡尔积并重复记录 FieldChange
     if old.duplicated(key).any() or new.duplicated(key).any():
         raise ValueError(f"duplicate join keys {key} in input frames")
 
-    # `indicator=` (not `indicator=True`) names the column explicitly: the
-    # default `_merge` is invisible to `itertuples`, which renames `_`-prefixed
-    # fields.  Outer is the point — inner would drop exactly the rows below.
+    # 显式命名 indicator 列为 merge_state（默认 _merge 会被 itertuples 重命名）
     merged = old.merge(
         new, on=key, suffixes=("_old", "_new"), how="outer", indicator="merge_state"
     )
@@ -405,7 +299,7 @@ def compare_frames(
                 continue
 
             if old_missing or new_missing:
-                # One side has no value: a backfill, a removal, or a fill.
+                # 单边缺失：回填、删除或空值填充/清空
                 present = new_raw if old_missing else old_raw
                 changes.append(
                     FieldChange(
@@ -447,22 +341,7 @@ def detect_corrections(
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[FieldChange]:
-    """Re-pull the last *lookback* trade dates and diff against the asset layer.
-
-    The weekly scan uses ``lookback=DEFAULT_LOOKBACK`` (30 trade dates); the
-    quarterly fallback passes ``lookback=QUARTERLY_LOOKBACK`` (250).  Dates
-    missing on either side are skipped — a gap is not a correction.
-
-    ``data_root`` names the tree to read (asset layer and calendar), defaulting
-    as :func:`apply_corrections` / :func:`assess_correction_impact` /
-    :func:`mark_factors_stale` do, so a scan and a write can be pointed at the
-    same non-default tree instead of detection silently reading another.
-
-    The diff is like-for-like with the asset layer, which is post-DQC: the
-    fresh pull is reduced to the rows that would survive the write
-    (:func:`_post_dqc_baseline`), fields owned by another source are dropped
-    (:func:`_foreign_fields`), and an empty side is "no data", not a removal.
-    """
+    """重拉最近 *lookback* 个交易日并与本地资产层（post-DQC 同口径）比对，跳过任一侧无数据的日期。"""
     from data.calendar_adjustment import TradingCalendar
 
     cal = TradingCalendar("sse", data_root=data_root)
@@ -489,15 +368,13 @@ def detect_corrections(
     return changes
 
 
-# ---------------------------------------------------------------------------
-# Apply — log first, then overwrite through the ingest pipeline
-# ---------------------------------------------------------------------------
+# --- 修订回写（先写日志，再走完整入库覆盖） ---
 
 
 def _group_changes(
     changes: Sequence[FieldChange], detected_at: datetime
 ) -> list[CorrectionRecord]:
-    """One record per ``(asset_type, trade_date)``, order preserved."""
+    """按 ``(asset_type, trade_date)`` 分组聚合变更记录并保持原有顺序。"""
     buckets: dict[tuple[str, date], list[FieldChange]] = {}
     for change in changes:
         if not change.asset_type or change.trade_date is None:
@@ -519,7 +396,7 @@ def _group_changes(
 def _append_correction_log(
     record: CorrectionRecord, data_root: str | os.PathLike[str]
 ) -> Path:
-    """Append one JSON line per change.  Creates the directory when missing."""
+    """逐条追加写入修订 JSONL 日志（目录不存在时自动创建）。"""
     path = correction_log_path(record.asset_type, record.trade_date, data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
@@ -545,20 +422,7 @@ def _append_correction_log(
 
 
 def _daily_ingest(source: str, asset_type: str, trade_date: date) -> None:
-    """Call the full ingest pipeline (§40.9).
-
-    Resolved at call time on purpose: ``daily_ingest`` lands with the ingest
-    pipeline work, and importing it at module load would make this module
-    unimportable on a tree where it is absent.  The order guarantee in
-    :func:`apply_corrections` is that this runs *after* the correction log is
-    on disk.
-
-    When the pipeline is not on the tree this raises :class:`RuntimeError`
-    naming the missing function — never a bare :class:`ImportError` from
-    inside a write sequence, and never a silent skip.  A correction must
-    overwrite through ``daily_ingest`` (DQC, raw and watermark all have to see
-    the corrected batch); a direct Parquet write is not a fallback.
-    """
+    """延迟导入并调用完整入库流水线覆盖写入；不可用时抛 ``RuntimeError``（禁止绕过 DQC 直接写 Parquet）。"""
     try:
         from data.ingestion import daily_ingest
     except ImportError as exc:
@@ -577,28 +441,18 @@ def apply_corrections(
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[CorrectionRecord]:
-    """Group *changes*, log each record, then re-ingest to overwrite.
-
-    Order is the audit guarantee and is asserted by the tests: the correction
-    log is appended **before** ``daily_ingest`` overwrites the asset layer.  A
-    crash between the two leaves a log describing a write that did not happen —
-    the safe direction.  The reverse loses the record of a write that did.
-
-    The overwrite goes through the complete ``daily_ingest`` pipeline rather
-    than a Parquet rewrite, so DQC, the raw layer and the watermark all see the
-    corrected batch (§45.3).
-    """
+    """分组记录修订并先写审计日志、再调用 ``daily_ingest`` 覆盖资产层（保证崩溃时日志先于落盘）。"""
     from data.ingestion import get_primary_source
 
     records = _group_changes(list(changes), _now())
     applied: list[CorrectionRecord] = []
     for record in records:
-        _append_correction_log(record, data_root)  # 1. log first
+        _append_correction_log(record, data_root)  # 1. 先记录审计日志
         _daily_ingest(
             source=get_primary_source(record.asset_type),
             asset_type=record.asset_type,
             trade_date=record.trade_date,
-        )  # 2. then overwrite
+        )  # 2. 再覆盖写入
         logger.warning(
             "Correction applied: %s %s, %d field(s) changed",
             record.asset_type,
@@ -609,13 +463,11 @@ def apply_corrections(
     return applied
 
 
-# ---------------------------------------------------------------------------
-# Impact propagation — classify, record, mark stale.  Never recompute.
-# ---------------------------------------------------------------------------
+# --- 影响传播（分级、记账、标脏，严禁自动重算） ---
 
 
 def _classify(record: CorrectionRecord) -> tuple[str, str, dict[str, Any]]:
-    """Severity, reason, and the impact payload written to the log."""
+    """计算修订严重级别、原因说明及影响负载字典。"""
     changes = list(record.changes)
     max_rel_diff = max((c.rel_diff for c in changes), default=0.0)
     impact: dict[str, Any] = {
@@ -646,12 +498,7 @@ def assess_correction_impact(
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> str:
-    """Classify *record*, append ``impact_log.jsonl``, and warn on MEDIUM+.
-
-    Returns the severity string: ``HIGH`` = any ``adjfactor`` change (every
-    price-based factor is affected), ``MEDIUM`` = ``max_rel_diff > 0.01``,
-    ``LOW`` = everything else (§45.4).  Only MEDIUM and above alert.
-    """
+    """对修订记录分级并追加 ``impact_log.jsonl``（``adjfactor`` 变更=HIGH，相对差异>1%=MEDIUM，其余=LOW），MEDIUM 及以上发告警。"""
     severity, reason, impact = _classify(record)
     impact["severity"] = severity
     impact["reason"] = reason
@@ -673,13 +520,7 @@ def mark_factors_stale(
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[str]:
-    """Mark factors that depend on the touched table as stale (§45.4).
-
-    Writes ``stale_since`` into each affected factor's ``metadata.json``
-    (§62.3 — the registry is the factor's own metadata, not a side file) and
-    returns the affected factor names.  **Does not recompute anything**:
-    ``recompute --stale`` is a human decision taken from the severity.
-    """
+    """将依赖受影响表的因子在其 ``metadata.json`` 中写入最早未重算 ``stale_since`` 日期（只标脏，不触发重算）。"""
     factors_dir = Path(data_root) / "factors"
     if not factors_dir.is_dir():
         return []
@@ -700,9 +541,7 @@ def mark_factors_stale(
         name = str(meta.get("factor_name") or meta_path.parent.parent.name)
         stale = str(record.trade_date)
         prior = meta.get("stale_since")
-        # Keep the earliest pending staleness: a later correction must not
-        # window out an earlier one that has not been recomputed yet (ISO
-        # date strings sort lexicographically).
+        # 保留最早的待重算过期日期，防止后续修订覆盖更早的脏起点
         meta["stale_since"] = (
             min(prior, stale) if isinstance(prior, str) and prior else stale
         )

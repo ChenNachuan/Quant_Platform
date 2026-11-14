@@ -1,32 +1,13 @@
-"""Factor post-processing — winsorize → fillna → standardize → neutralize.
+"""因子后处理层：按固定顺序执行消费侧截面清洗。
 
-Consumption-time clean-up of the **raw** values ``Factor.compute()`` produces
-and :mod:`research.factor_storage` stores (post_processor.md §60).  The four
-stages run in exactly this order:
+四阶段处理契约：
+1. ``winsorize`` — MAD 去极值，边界 ``median ± n × 1.4826 × MAD``
+2. ``fillna`` — 截面中位数填充
+3. ``standardize`` — z-score 标准化（偏态因子可改用秩标准化）
+4. ``neutralize``（可选独立调用）— 按日期对行业哑变量与对数市值做 OLS 残差中性化
 
-1. **winsorize** — MAD clip, bounds ``median ± n × 1.4826 × MAD``
-2. **fillna** — cross-section median
-3. **standardize** — z-score, or rank for badly skewed factors
-4. **neutralize** *(optional, separate call)* — per-date OLS residual on
-   industry dummies + log market cap
-
-The order is not negotiable: extreme values distort the mean/σ a z-score
-needs, and standardizing before filling would compute those statistics from
-the un-filled rows only.
-
-Every step is **cross-sectional** — :meth:`PostProcessor.transform` runs each
-one through ``groupby(date)``, and :func:`neutralize` fits one regression per
-date.  A full-sample mean/σ/MAD/regression is look-ahead bias: tomorrow's
-cross-section would decide today's cleaned value.  The tests pin this with
-counter-examples, not with prose.
-
-Store raw, clean on read — swapping ``n`` or the standardize method never
-touches the parquet tree.
-
-Not this module: factor computation (:mod:`research.factor_interface`),
-persistence (:mod:`research.factor_storage`), evaluation / IC (S11), and a
-standalone orthogonalisation step — :func:`neutralize` takes only the industry
-and size columns its signature names.
+所有步骤均按日期截面执行（``groupby(date)``），杜绝全样本统计带来的前视偏差；
+仅在读取消费时清洗，不修改磁盘上的原始因子数据。
 """
 
 from __future__ import annotations
@@ -56,48 +37,23 @@ __all__ = [
     "winsorize_mad",
 ]
 
-#: Normal-consistency constant: ``MAD × 1.4826`` estimates σ for Gaussian data,
-#: so the ``n = 3.0`` default is a 3σ-equivalent clip that survives outliers.
+#: 正态一致性常数（MAD × 1.4826 ≈ 高斯标准差）。
 MAD_SCALE: float = 1.4826
 
-#: A cross-section needs this many non-NaN values before neutralize will fit.
-#: Below it the regression has no degrees of freedom worth trusting, and the
-#: factor is passed through unchanged.
+#: neutralize 单日回归所需的最小有效行数，不足时原样透传。
 MIN_NEUTRALIZE_ROWS: int = 10
 
-#: Below this fraction of a section's own scale, σ is float rounding rather
-#: than dispersion — see :func:`standardize_zscore`.
+#: 截面标准差相对容差，低于该比例视为浮点舍入噪声。
 SIGMA_RTOL: float = 1e-12
 
 
 # ---------------------------------------------------------------------------
-# Series steps — one cross-section in, one cross-section out
+# 序列级单截面处理步骤
 # ---------------------------------------------------------------------------
 
 
 def winsorize_mad(s: pd.Series, n: float = 3.0) -> pd.Series:
-    """Clip *s* to ``median ± n × 1.4826 × MAD``.
-
-    The median/MAD pair is computed from the same section it clips, and both
-    are robust to the very outliers being clipped — unlike a 3σ rule, whose
-    mean/σ come from the contaminated sample and therefore move *towards* the
-    outlier it is trying to tame.
-
-    Operates on **one cross-section**; :meth:`PostProcessor.transform`
-    supplies that by ``groupby(date)``.  Degenerate sections are returned
-    unchanged: an all-NaN section has no median, and a section whose MAD is
-    zero (half or more of the names tied at the median — a sparse factor, a
-    limit-move tape) has a band that is a single point, which ``clip`` would
-    use to collapse every name onto the median.  There is no dispersion to
-    winsorise, so there is nothing to clip.
-
-    *n* must be positive and is rejected before the band is built.  Zero
-    collapses the band to a point and a negative value inverts its bounds —
-    either way ``clip`` silently wipes the section, the same degeneracy the
-    zero-MAD branch above exists to refuse.  This is reachable from
-    :attr:`PostProcessStep.params`, so it raises every time rather than only
-    on the dates whose section happens to have dispersion.
-    """
+    """按 ``median ± n × 1.4826 × MAD`` 对单截面去极值；全 NaN 或 ``MAD == 0`` 截面原样返回，``n <= 0`` 抛出 ``ValueError``。"""
     if not n > 0:
         raise ValueError(f"n must be positive, got {n!r}")
 
@@ -111,15 +67,7 @@ def winsorize_mad(s: pd.Series, n: float = 3.0) -> pd.Series:
 
 
 def fillna_median(s: pd.Series) -> pd.Series:
-    """Fill NaN with the median of *s*.
-
-    The Series-level primitive behind :func:`fillna_cross_section` and the
-    ``fillna`` pipeline step — :class:`PostProcessStep.func` is
-    ``Series → Series``, so the step cannot take the DataFrame form.  The
-    median is the robust centre: a filled value is meant to be "typical for
-    this date", not "pulled by the tail".  A section that is entirely NaN has
-    no median and is returned unchanged.
-    """
+    """用单截面中位数填充 ``NaN``；全 NaN 截面原样返回。"""
     values = s.astype("float64")
     med = values.median()
     if pd.isna(med):
@@ -130,30 +78,12 @@ def fillna_median(s: pd.Series) -> pd.Series:
 def _keep_null_key_rows(
     cleaned: pd.Series, original: pd.Series, keyed: pd.Series
 ) -> pd.Series:
-    """Restore rows whose key is null — ``groupby`` never shows them to a step.
-
-    ``groupby`` drops null-key rows, so ``transform`` returns NaN at those
-    positions and a plain assignment writes NaN over a raw value that was
-    there — silent data loss, and the opposite of :func:`neutralize`, which
-    only writes the rows it fitted.  Put the original back.
-    """
+    """还原分组键为空的原始行值，防止 ``groupby.transform`` 丢弃空键导致覆写为 NaN。"""
     return cleaned.where(keyed.notna(), original)
 
 
 def standardize_zscore(s: pd.Series) -> pd.Series:
-    """Return ``(x - mean) / std`` over one cross-section.
-
-    ``std`` is the sample standard deviation (pandas ``ddof=1``), so a
-    section with real dispersion comes back with mean 0 and std 1 exactly.  A
-    flat or single-row section has none and becomes zeros — dividing by a
-    vanishing σ would turn it into ``inf`` (σ == 0) or, worse, into ±1.
-
-    That worse case is why the comparison is a tolerance and not ``sigma ==
-    0``: a flat ``[0.1, 0.1, 0.1]`` sums to a rounded mean, so its std comes
-    out at the float rounding level (~1e-17) rather than at 0, and the
-    division would hand back all -1.0 instead of the documented zeros — a
-    flat factor carrying a rounding-dependent signal.
-    """
+    """单截面 z-score 标准化 ``(x - mean) / std``；无有效离散度（``std`` 为 NaN 或低于浮点容差）时非缺失值置为 0。"""
     values = s.astype("float64")
     mu = values.mean()
     sigma = values.std()
@@ -163,29 +93,17 @@ def standardize_zscore(s: pd.Series) -> pd.Series:
 
 
 def standardize_rank(s: pd.Series) -> pd.Series:
-    """Rank one cross-section onto ``(0, 1]`` (``pct=True``).
-
-    The skewed-distribution alternative to :func:`standardize_zscore`: ranks
-    are bounded and monotone, so a heavy tail cannot dominate the scale.  NaN
-    stays NaN — a missing value has no rank.
-    """
+    """将单截面映射至 ``(0, 1]`` 百分比秩（保留 NaN），适用于重尾偏态因子。"""
     return s.rank(pct=True)
 
 
 # ---------------------------------------------------------------------------
-# DataFrame steps — need columns beyond the factor itself
+# DataFrame 级处理步骤
 # ---------------------------------------------------------------------------
 
 
 def fillna_cross_section(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    """Fill NaN in *col* with **each date's own** median.
-
-    A convenience wrapper for callers not going through
-    :class:`PostProcessor`.  Returns a copy; *df* is never mutated.  The
-    column is hard-wired to ``date`` — the same one
-    :func:`research.factor_storage` persists and the rest of the chain joins
-    on.
-    """
+    """按 ``date`` 分组对 ``col`` 执行截面中位数填充，返回新副本。"""
     out = df.copy()
     filled = out.groupby("date")[col].transform(fillna_median)
     out[col] = _keep_null_key_rows(filled, out[col], out["date"])
@@ -199,28 +117,11 @@ def neutralize(
     size_col: str = "log_market_cap",
     method: str = "industry_size",
 ) -> pd.DataFrame:
-    """Replace *factor_col* with the residual of a per-date cross-sectional OLS.
+    """按日截面 OLS 回归中性化并将 ``factor_col`` 替换为残差，返回新副本。
 
-    ``factor ~ 1 + industry dummies + log market cap`` (``"industry_size"``,
-    the default) or ``factor ~ 1 + industry dummies`` (``"industry"``).  One
-    regression **per date**: a pooled fit would let other dates' cross-sections
-    set today's betas.  A date with fewer than
-    :data:`MIN_NEUTRALIZE_ROWS` usable rows is passed through unchanged, and so
-    is one whose design matrix is saturated — see the rank guard below.
-
-    A row joins the fit only when everything the regression reads is sound:
-    a finite factor, a known industry, and — when the method uses it — a
-    finite size.  This is one mask, not one per column, because each hole has
-    its own way of ruining the date: a non-finite size reaches ``lstsq`` and
-    aborts the whole call (a clean cross-section dies with the dirty one), and
-    a missing industry is what ``get_dummies`` renders as an all-zero row, i.e.
-    the dropped reference industry — the name is then neutralised against the
-    wrong beta.  Rows the fit did not use keep their input value, so neither
-    hole can smuggle in a residual from a beta that never saw that name.
-
-    Returns a copy; *df* is never mutated.  The column is hard-wired to
-    ``date``, matching :func:`fillna_cross_section`.  A non-unique index is
-    fine — writes are positional within the group.
+    支持 ``"industry_size"``（截距 + 行业哑变量 + 对数市值）与 ``"industry"``。
+    仅因子值、行业与市值（如启用）均有效的行参与拟合，其余行保留原值；
+    有效行数不足 ``MIN_NEUTRALIZE_ROWS`` 或设计矩阵满秩（``rank >= n``）的日期跳过处理。
     """
     if method not in {"industry", "industry_size"}:
         raise ValueError(
@@ -228,9 +129,7 @@ def neutralize(
         )
 
     result = df.copy()
-    # Writes below are addressed by group labels; a caller's duplicate index
-    # would make `loc` raise before a single date is processed.  Run the loop
-    # on a positional index and hand the original labels back at the end.
+    # 使用位置索引执行分组写入，避免调用方存在重复索引时 loc 报错
     original_index = result.index
     result = result.reset_index(drop=True)
 
@@ -256,15 +155,7 @@ def neutralize(
         rhs = np.hstack(parts) if parts else np.empty((len(y), 0))
         x = np.column_stack([np.ones(len(y)), rhs])
 
-        # A saturated design interpolates the cross-section: rank == n means
-        # `lstsq` fits every name exactly, the residuals come out ~0 and the
-        # date's factor is silently wiped to nothing — the same shape of
-        # failure as a zero MAD.  Skip that date; the OLS is unchanged.
-        #
-        # The boundary is rank == n, not n-1.  At rank n-1 there is still one
-        # residual degree of freedom and the OLS removes the industry effect
-        # it should; refusing that date would pass the factor through still
-        # carrying it — the same silent failure, in the other direction.
+        # 满秩插值会导致残差归零，要求至少保留 1 个自由度（rank < n）
         n_fit = int(valid.sum())
         if int(matrix_rank(x[valid])) >= n_fit:
             continue
@@ -279,21 +170,13 @@ def neutralize(
 
 
 # ---------------------------------------------------------------------------
-# Pipeline
+# 管线与预设
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PostProcessStep:
-    """One pipeline stage: a ``Series → Series`` op applied per date group.
-
-    Frozen so a stage that lives in a shared preset cannot be edited in place:
-    ``PIPELINE_RESEARCH[0].func = ...`` would otherwise be a write to what every
-    later reader of that preset copies from.  ``params`` is a ``dict`` and is
-    therefore still open to writes through — the presets hand out a
-    write-refusing mapping (see :class:`_FrozenParams`), while
-    :class:`PostProcessor` gives each instance a plain dict to tune.
-    """
+    """管线单步定义（按日期分组执行的 ``Series → Series`` 变换）；冻结以防共享预设被篡改。"""
 
     name: str
     func: Callable[[pd.Series], pd.Series]
@@ -301,17 +184,10 @@ class PostProcessStep:
 
 
 class PostProcessor:
-    """Configurable clean-up pipeline, applied cross-section by cross-section.
-
-    Each step runs through ``groupby(date_col).transform``, so a step can only
-    ever see its own date's rows.  That is the whole look-ahead defence: the
-    statistics a step computes are today's cross-section, never the sample's.
-    """
+    """可配置因子清洗管线，按 ``date_col`` 逐日截面依次执行各步骤。"""
 
     def __init__(self, steps: list[PostProcessStep] | None = None):
-        # Copy each step along with its `params`: the presets are shared module
-        # constants, so a caller who writes `steps[0].params["n"]` must not be
-        # editing `PIPELINE_RESEARCH` under the next reader.
+        # 深拷贝步骤与参数字典，防止修改实例时污染共享预设常量
         self.steps = [
             PostProcessStep(name=step.name, func=step.func, params=dict(step.params))
             for step in (PIPELINE_RESEARCH if steps is None else steps)
@@ -320,7 +196,7 @@ class PostProcessor:
     def transform(
         self, df: pd.DataFrame, factor_col: str, date_col: str = "date"
     ) -> pd.DataFrame:
-        """Return a copy of *df* with *factor_col* cleaned, date by date."""
+        """按 ``date_col`` 分组依次执行清洗步骤，返回 ``df`` 的新副本。"""
         result = df.copy()
         for step in self.steps:
             cleaned = result.groupby(date_col)[factor_col].transform(
@@ -333,18 +209,9 @@ class PostProcessor:
 
 
 # ---------------------------------------------------------------------------
-# Presets
+# 只读预设常量（禁止原地写入，需通过 list(preset) 或 copy() 派生副本）
 # ---------------------------------------------------------------------------
 
-# A preset write is a write to every later reader of that preset: the constant
-# is shared, and `PostProcessor` copies from it.  Silently accepting
-# `PIPELINE_RESEARCH[0] = x` or `.append(x)` is how one caller's edit becomes
-# another caller's pipeline.  So the presets are not plain lists — every
-# in-place write raises TypeError and points at the copy to make instead.
-# They stay `list` subclasses rather than tuples because
-# `PostProcessor(steps: list[PostProcessStep] | None)` is the pinned signature
-# and `PostProcessor(PIPELINE_RESEARCH)` is the call it is there to accept; a
-# tuple is rejected at exactly that call.
 _PRESET_WRITE_REFUSED = (
     "preset pipelines are constants — derive a copy and edit that "
     "(list(preset); rebuild a PostProcessStep to change its params)"
@@ -352,12 +219,7 @@ _PRESET_WRITE_REFUSED = (
 
 
 class _FrozenParams(dict):
-    """A preset step's ``params`` — readable, not writable.
-
-    ``dict`` rather than ``MappingProxyType`` so the field's ``dict``
-    annotation stays true and :class:`PostProcessor`'s ``dict(step.params)``
-    copy hands instances the plain, tunable dict they are meant to get.
-    """
+    """预设步骤的只读参数字典，禁止原地修改，可通过 ``copy()`` 获取可写副本。"""
 
     def _refuse(self, *args, **kwargs):
         raise TypeError(_PRESET_WRITE_REFUSED)
@@ -366,24 +228,16 @@ class _FrozenParams(dict):
     clear = pop = popitem = setdefault = update = _refuse
 
     def copy(self) -> dict:
-        """A plain, writable ``dict`` — the edit-the-copy escape hatch."""
+        """返回可写普通字典副本。"""
         return dict(self)
 
     def __reduce__(self):
-        # `copy` / `deepcopy` / `pickle` rebuild a dict subclass by writing
-        # into a fresh one through `__setitem__`, which this class refuses —
-        # so the standard paths would fail rather than hand back a copy.
-        # Serialise as a plain dict: a copy is meant to be editable.
+        # 序列化为普通 dict，使 copy/deepcopy/pickle 能够正常重建可写副本
         return (dict, (dict(self),))
 
 
 class _PresetSteps(list):
-    """A ``PIPELINE_*`` preset — a ``list`` of steps that refuses writes.
-
-    See the note above for why this is a ``list`` subclass and not a tuple.
-    :meth:`copy` and ``list(preset)`` both hand back a plain, writable list;
-    that is the supported way to derive a variant.
-    """
+    """只读预设步骤列表（保留 ``list`` 子类以兼容签名），可通过 ``copy()`` 或 ``list(preset)`` 派生副本。"""
 
     def _refuse(self, *args, **kwargs):
         raise TypeError(_PRESET_WRITE_REFUSED)
@@ -392,24 +246,20 @@ class _PresetSteps(list):
     append = clear = extend = insert = pop = remove = reverse = sort = _refuse
 
     def copy(self) -> list:
-        """A plain, writable ``list`` — the edit-the-copy escape hatch."""
+        """返回可写普通列表副本。"""
         return list(self)
 
     def __reduce__(self):
-        # Same gap as `_FrozenParams`: `list.__reduce__` reconstructs through
-        # `append`/`extend`, both refused here, so `copy.copy`, `deepcopy` and
-        # pickling a preset into a worker process would raise instead of
-        # carrying it.  Serialise as a plain list.
+        # 序列化为普通 list，使 copy/deepcopy/pickle 能够正常重建可写副本
         return (list, (list(self),))
 
 
 def _frozen_step(name: str, func: Callable[[pd.Series], pd.Series]) -> PostProcessStep:
-    """One preset stage: a frozen step carrying a write-refusing ``params``."""
+    """构造携带只读参数字典的预设步骤。"""
     return PostProcessStep(name, func, _FrozenParams())
 
 
-#: Research iteration — the three Series steps, no neutralise.  Quick screening
-#: of a raw factor before anyone claims an IC.
+#: 研究初筛预设：去极值 → 填充 → z-score 标准化（不含中性化）。
 PIPELINE_RESEARCH: list[PostProcessStep] = _PresetSteps(
     [
         _frozen_step("winsorize", winsorize_mad),
@@ -418,10 +268,7 @@ PIPELINE_RESEARCH: list[PostProcessStep] = _PresetSteps(
     ]
 )
 
-#: Stock evaluation — the same three steps, then **call :func:`neutralize`
-#: yourself**.  Neutralising needs the ``industry`` / ``log_market_cap``
-#: columns and so cannot be a Series step; on the 个股池 it is mandatory,
-#: because an un-neutralised IC is mostly sector and size in disguise.
+#: 个股评估预设：三步清洗，需在后续显式调用 ``neutralize`` 剔除行业与市值效应。
 PIPELINE_STOCK_EVAL: list[PostProcessStep] = _PresetSteps(
     [
         _frozen_step("winsorize", winsorize_mad),
@@ -430,9 +277,7 @@ PIPELINE_STOCK_EVAL: list[PostProcessStep] = _PresetSteps(
     ]
 )
 
-#: ETF pool — the same three steps, and deliberately **no** neutralise: an ETF
-#: strategy earns sector/style rotation, which is exactly what neutralising
-#: would regress out.
+#: ETF 池预设：三步清洗，不做中性化以保留板块与风格轮动收益。
 PIPELINE_ETF: list[PostProcessStep] = _PresetSteps(
     [
         _frozen_step("winsorize", winsorize_mad),
@@ -441,8 +286,7 @@ PIPELINE_ETF: list[PostProcessStep] = _PresetSteps(
     ]
 )
 
-#: Skewed factors — rank replaces z-score as the standardize step; winsorize
-#: and fillna are unchanged.
+#: 偏态因子预设：去极值 → 填充 → 百分比秩标准化。
 PIPELINE_RANK: list[PostProcessStep] = _PresetSteps(
     [
         _frozen_step("winsorize", winsorize_mad),

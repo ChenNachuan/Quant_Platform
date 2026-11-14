@@ -1,4 +1,4 @@
-"""ALSTM futures strategy workflow."""
+"""期货 ALSTM 两阶段策略工作流。"""
 
 from strategies.futures.alstm.config import STRATEGY_NAME
 

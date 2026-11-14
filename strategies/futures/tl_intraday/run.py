@@ -1,4 +1,4 @@
-"""CLI entry point for the TL intraday report reproduction."""
+"""TL 日内策略研报复现 CLI 入口。"""
 
 from __future__ import annotations
 

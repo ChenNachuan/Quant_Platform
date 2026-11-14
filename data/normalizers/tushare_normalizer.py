@@ -1,19 +1,13 @@
-"""Tushare normalizer — format conversion only (C3).
+"""Tushare 标准化器（仅格式转换与单位换算）。
 
-Maps Tushare Pro API columns to the unified bars_daily schema.
+边界处理：
+- 停牌：``suspend_d`` 标记停牌（``'S'`` -> True，``' '`` -> False），缺失默认 False。
+- 缺失值：原样保留 OHLC 中的 NaN，不做填充。
+- 复权因子：保留 ``adj_factor`` 原值（缺失默认 ``1.0``），不因停牌标志覆写。
 
-Edge mappings (S2):
-- Suspension: ``suspend_d`` marks halted days; absence means active.
-  If the adapter merged a ``suspend`` column it is mapped; otherwise ``False``.
-- Missing values: NaN in OHLC preserved as-is, never fabricated.
-- CA events: ``adj_factor`` from the ``adj_factor`` API is mapped to
-  ``adjfactor``.  When absent (raw daily-only fetch), defaults to 1.0.
-  The §21.3 bug (adjfactor forced to 1 when suspend=1) is avoided: the
-  normalizer never overwrites a source-provided adjfactor based on suspend.
-
-Unit conversion (Tushare raw → storage schema units):
-- ``vol`` is in lots (手) → ``volume`` in shares (股): ×100.
-- ``amount`` is in thousands (千元) → ``amount`` in yuan (元): ×1000.
+单位换算（Tushare 原始 -> 统一存储单位）：
+- ``vol``（手）-> ``volume``（股）：×100。
+- ``amount``（千元）-> ``amount``（元）：×1000。
 """
 
 from __future__ import annotations
@@ -24,7 +18,7 @@ from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
 
-# Tushare pro.daily() / adj_factor() / suspend_d() → unified column names
+# Tushare pro.daily() / adj_factor() / suspend_d() -> 统一列名
 _COLUMN_MAP: dict[str, str] = {
     "ts_code": "ticker",
     "trade_date": "trade_date",
@@ -38,8 +32,7 @@ _COLUMN_MAP: dict[str, str] = {
     "suspend_d": "suspend",
 }
 
-#: When the frame carries both ``suspend_d`` and ``suspend``, coalesce before
-#: rename so we do not get two columns mapped to the same target.
+# 同时存在 suspend_d 与 suspend 时，以 suspend_d 为主并先合并避免重命名冲突
 _SUSPEND_COALESCE_PRIMARY = "suspend_d"
 
 _NUMERIC_COLS = (
@@ -55,25 +48,13 @@ _NUMERIC_COLS = (
 
 
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-    """Format conversion only: column name mapping, type fixes, unit conversion.
-
-    Parameters
-    ----------
-    asset_type : str
-        Must be ``"stock"``.
-    raw_df : pd.DataFrame
-        Raw Tushare frame (``pro.daily`` output, optionally merged with
-        ``adj_factor`` / ``suspend_d``).
-    """
+    """将 Tushare 原始 DataFrame（``stock``）转换为统一 ``bars_daily`` 格式并完成单位换算。"""
     if asset_type != "stock":
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
     df = raw_df.copy()
-    # Fix (optional finding #52): coalesce dual suspend columns before rename.
-    # suspend_d is the authoritative source; suspend is the pre-merged fallback.
     if _SUSPEND_COALESCE_PRIMARY in df.columns and "suspend" in df.columns:
-        # Coerce suspend_d tokens to bool, preserving NaN so the suspend
-        # fallback can fill them (filling NaN→False first would block fallback).
+        # 先保留 NaN 让 fallback 兜底填充，再统一将剩余缺失填为 False
         sd = df["suspend_d"]
         if sd.dtype == object or sd.dtype.name == "string":
             coerced = sd.map({"S": True, " ": False})
@@ -86,42 +67,34 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         df = df.drop(columns=["suspend"])
     df = df.rename(columns=_COLUMN_MAP)
 
-    # Type conversion: dates and numerics
     if "trade_date" in df.columns:
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
     for col in _NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Unit conversion: Tushare vol is lots (手), amount is thousands (千元).
-    # Fix 2: NaN-preserving Int64 cast — int64 raises IntCastingNaNError on NaN.
+    # 单位换算：vol（手->股 ×100，可空 Int64 保留 NaN）、amount（千元->元 ×1000）
     if "volume" in df.columns:
         df["volume"] = (df["volume"] * 100).round().astype("Int64")
     if "amount" in df.columns:
         df["amount"] = df["amount"] * 1000.0
 
-    # Edge: suspension — suspend_d merged by adapter.
-    # Fix 3: suspend_d carries 'S' (suspended) / ' ' (active) strings.
+    # 停牌标记：suspend_d 协议为 'S' 停牌 / ' ' 正常交易
     if "suspend" not in df.columns:
         df["suspend"] = False
     elif df["suspend"].dtype == object or df["suspend"].dtype.name == "string":
-        # Semantic coercion: 'S'→True, ' '→False (suspend_d API contract)
         df["suspend"] = (
             df["suspend"].map({"S": True, " ": False}).fillna(False).astype(bool)
         )
     else:
         df["suspend"] = df["suspend"].fillna(False).astype(bool)
 
-    # Edge: CA events — adj_factor merged by adapter; default 1.0 if absent.
-    # §21.3: never overwrite source adjfactor based on suspend value.
+    # 保持源端 adjfactor 原值，不因停牌标志覆写为 1.0
     if "adjfactor" not in df.columns:
         df["adjfactor"] = 1.0
 
-    # Edge: limit flags not available from this API.
     df["is_limit_up"] = False
     df["is_limit_down"] = False
-
-    # DQC adds real quality_flag later; start clean.
     df["quality_flag"] = 0
 
     return df.reindex(columns=UNIFIED_COLUMNS)

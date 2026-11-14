@@ -1,18 +1,8 @@
-"""Source adapter ABC — upstream abstraction for raw data fetching.
+"""数据源适配器抽象基类 — 封装外部原始数据拉取与通用防护。
 
-One subclass per external data source.  The adapter fetches **raw**
-DataFrames (original column names / original values); format conversion is
-the job of ``normalizers/{source}_normalizer.py`` (QUANT-36 S9-T1).
-
-Rate-limiting, retry with exponential backoff, and timeout are applied
-automatically via :meth:`SourceAdapter.__init_subclass__` — subclasses
-implement :meth:`fetch` without worrying about those guards.
-
-Watermark persistence: ``raw/{source}/.watermarks.json``.  The format is
-subclass-defined (timestamp / offset / page number); the platform stores and
-returns it verbatim, never parses it.
-
-Field authority: ``docs/design/data/source_adapter.md``.
+每个外部数据源实现一个子类并产出原始 DataFrame，格式转换交由 ``normalizers/`` 负责。
+通过 ``SourceAdapter.__init_subclass__`` 自动注入限流、指数退避重试与超时控制；
+水位线以子类自定义格式原样持久化于 ``raw/{source}/.watermarks.json``。
 """
 
 from __future__ import annotations
@@ -31,8 +21,7 @@ from typing import Any, Callable
 import pandas as pd
 from core.config import DATA_ROOT
 
-# requests exceptions are NOT subclasses of the builtin ConnectionError /
-# TimeoutError — akshare/tushare transients live in the requests family (fix 4).
+# requests 异常并非内置 ConnectionError/TimeoutError 子类，需单独纳入重试集合
 try:
     from requests.exceptions import (
         ConnectionError as RequestsConnectionError,
@@ -64,9 +53,7 @@ __all__ = [
     "WATERMARK_FILENAME",
 ]
 
-# ---------------------------------------------------------------------------
-# Guard configuration (C1 — hand-rolled, no tenacity/backoff dependency)
-# ---------------------------------------------------------------------------
+# --- 防护参数配置（手写实现，不引入第三方重试库） ---
 FETCH_TIMEOUT: float = 120.0
 RETRY_MAX_RETRIES: int = 3
 RETRY_BACKOFF_BASE: float = 2.0
@@ -81,15 +68,13 @@ WATERMARK_FILENAME = ".watermarks.json"
 
 
 class FetchTimeoutError(TimeoutError):
-    """Raised when a fetch exceeds ``FETCH_TIMEOUT``."""
+    """单次拉取超过 ``FETCH_TIMEOUT`` 时抛出。"""
 
 
-# ---------------------------------------------------------------------------
-# FetchResult
-# ---------------------------------------------------------------------------
+# --- FetchResult ---
 @dataclass
 class FetchResult:
-    """Raw fetch result — source-native columns and values."""
+    """原始拉取结果，保留数据源原生列与数值。"""
 
     df: pd.DataFrame
     source: str
@@ -99,15 +84,9 @@ class FetchResult:
     watermark: str | None
 
 
-# ---------------------------------------------------------------------------
-# Hand-rolled decorators (~30 lines total per design doc C1)
-# ---------------------------------------------------------------------------
+# --- 限流、重试与超时装饰器 ---
 def _rate_limit(requests_per_second: float) -> Callable:
-    """Throttle calls to *requests_per_second*.
-
-    State (last call monotonic time) lives in the closure so it persists
-    across calls on the same wrapped function.
-    """
+    """按 *requests_per_second* 限制调用频率（闭包内维护上次调用的单调时钟）。"""
     min_interval = 1.0 / requests_per_second if requests_per_second > 0 else 0.0
 
     def decorator(func: Callable) -> Callable:
@@ -133,11 +112,7 @@ def _retry(
     initial_wait: float = 1.0,
     retry_on: tuple[type[BaseException], ...] = RETRY_ON,
 ) -> Callable:
-    """Retry on *retry_on* exceptions with exponential backoff.
-
-    Wait per attempt: ``initial_wait * backoff_base**attempt``.
-    With defaults (1.0, 2.0) this is 1s / 2s / 4s.
-    """
+    """对 *retry_on* 异常执行指数退避重试（默认间隔 1s / 2s / 4s）。"""
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -167,13 +142,7 @@ def _retry(
 
 
 def _timeout(seconds: float) -> Callable:
-    """Enforce a wall-clock timeout (thread-safe, no SIGALRM).
-
-    Uses a single-worker executor so the call runs in a helper thread and
-    the caller gets :class:`FetchTimeoutError` when *seconds* elapse.
-    The helper thread is abandoned on timeout (``shutdown(wait=False)``) —
-    a network call will eventually time out on its own.
-    """
+    """基于单线程执行器的线程安全墙钟超时控制；超时后立即放行并返回 :class:`FetchTimeoutError`。"""
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -196,28 +165,20 @@ def _timeout(seconds: float) -> Callable:
 
 
 def _apply_fetch_guards(fetch_fn: Callable, requests_per_second: float) -> Callable:
-    """Layer retry → timeout → rate-limit around *fetch_fn*.
-
-    Order matches ``source_adapter.md`` (@retry outermost): each retry
-    attempt gets a fresh timeout and a fresh rate-limit gate, so a long
-    backoff cannot eat into the timeout budget and a timeout cannot abort
-    the retry loop.
-    """
-    guarded = _rate_limit(requests_per_second)(fetch_fn)  # innermost
-    guarded = _timeout(FETCH_TIMEOUT)(guarded)  # middle
-    guarded = _retry()(guarded)  # outermost
+    """按由外到内 ``retry -> timeout -> rate_limit`` 顺序包裹 *fetch_fn*，避免退避等待消耗单次超时预算。"""
+    guarded = _rate_limit(requests_per_second)(fetch_fn)  # 最内层限流
+    guarded = _timeout(FETCH_TIMEOUT)(guarded)  # 中间层超时
+    guarded = _retry()(guarded)  # 最外层重试
     return guarded
 
 
-# ---------------------------------------------------------------------------
-# Watermark persistence — raw/{source}/.watermarks.json
-# ---------------------------------------------------------------------------
+# --- 水位线持久化（raw/{source}/.watermarks.json） ---
 def _watermark_path(source: str, data_root: Path) -> Path:
     return data_root / "raw" / source / WATERMARK_FILENAME
 
 
 def read_watermark(source: str, asset_type: str, data_root: Path) -> str | None:
-    """Return the stored watermark for *source* / *asset_type*, or ``None``."""
+    """读取指定 ``source / asset_type`` 的水位线字符串，缺失或损坏时返回 ``None``。"""
     path = _watermark_path(source, data_root)
     if not path.exists():
         return None
@@ -233,7 +194,7 @@ def read_watermark(source: str, asset_type: str, data_root: Path) -> str | None:
 def write_watermark(
     source: str, asset_type: str, watermark: str, data_root: Path
 ) -> None:
-    """Persist *watermark* for *source* / *asset_type* (advisory, idempotent-safe)."""
+    """原子持久化 ``source / asset_type`` 水位线（幂等安全）。"""
     path = _watermark_path(source, data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {}
@@ -248,16 +209,9 @@ def write_watermark(
     tmp.replace(path)
 
 
-# ---------------------------------------------------------------------------
-# SourceAdapter ABC
-# ---------------------------------------------------------------------------
+# --- SourceAdapter 抽象基类 ---
 class SourceAdapter(ABC):
-    """Abstract base for one external data source.
-
-    Subclasses implement :meth:`fetch` and :meth:`list_asset_types`.
-    Rate-limit / retry / timeout guards are injected automatically when a
-    subclass is defined (:meth:`__init_subclass__`).
-    """
+    """外部数据源抽象基类；子类定义时通过 ``__init_subclass__`` 自动注入限流、重试与超时防护。"""
 
     requests_per_second: float = 5.0
 
@@ -273,25 +227,14 @@ class SourceAdapter(ABC):
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        """Fetch raw data for *asset_type* on *trade_date*.
-
-        *watermark* is the value returned by a previous call (or ``None``);
-        its format is subclass-defined.  Return a :class:`FetchResult` whose
-        ``df`` carries the source's original columns and values.
-        """
+        """拉取指定交易日与资产类型的原始数据，返回保留源站列与值的 :class:`FetchResult`。"""
 
     @abstractmethod
     def list_asset_types(self) -> list[str]:
-        """Return the asset types this adapter can fetch."""
+        """返回该适配器支持拉取的资产类型列表。"""
 
     def _latest_trade_date(self) -> date:
-        """Best-known *past* trade date: asset calendar if reachable, else wall clock.
-
-        The calendar is populated with ~30 future trading days (trade_cal
-        contract, calendar_adjustment.md), so MAX alone returns a date that
-        has not happened yet.  Clamped to today so ``health_check`` never
-        probes a session that does not exist.
-        """
+        """获取最近已发生的交易日（优先查交易所日历并截断至今日，防止探测未来交易日；失败则回退今日）。"""
         cal_path = DATA_ROOT / "asset/calendar/sse.parquet"
         if cal_path.exists():
             try:
@@ -312,7 +255,7 @@ class SourceAdapter(ABC):
         return date.today()
 
     def health_check(self) -> bool:
-        """Probe one real fetch to verify the source is reachable."""
+        """执行一次真实探测拉取以验证数据源可用性。"""
         asset_types = self.list_asset_types()
         if not asset_types:
             return False
@@ -324,4 +267,4 @@ class SourceAdapter(ABC):
             return False
 
     def close(self) -> None:
-        """Release connections.  Override for sources with connection pools."""
+        """释放底层连接资源（使用连接池的子类按需覆写）。"""

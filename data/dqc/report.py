@@ -1,44 +1,10 @@
-"""DQC report — dual tables + the ``python -m data.dqc.report`` CLI (S9-T3).
+"""DQC 报告双表读写与 ``python -m data.dqc.report`` CLI。
 
-Field authority: ``docs/design/data/dqc_runtime.md`` §38 (report dual tables,
-CLI) and ``docs/design/data/quarantine_raw.md`` (quarantine query).  What to
-check lives in ``data/dqc/rules/`` (S9-T2), disposition in
-:mod:`data.dqc.severity`, execution in :mod:`data.dqc.engine`.
+双表位置（均位于 ``{data_root}/dqc/``）：
+- ``_dqc_results/month=YYYY-MM/data.parquet``：按业务日期 ``data_date`` 分月追加，每规则每批一行。
+- ``_dqc_batch_summary.parquet``：单文件汇总表，每批一行（``total_rows = rows_dropped + rows_flagged + rows_clean``）。
 
-Dual tables, both under ``{data_root}/dqc/``:
-
-- ``_dqc_results/month=YYYY-MM/data.parquet`` — one row per rule per run,
-  append-only.  **Partition key**: ``month=YYYY-MM`` taken from ``data_date``
-  (the business date under check, not the run date) — queries and the 1-year
-  retention key off business time.
-- ``_dqc_batch_summary.parquet`` — one row per ingest batch, single file.
-
-Aggregation contract for ``_dqc_batch_summary``:
-
-- ``total_rows = rows_dropped + rows_flagged + rows_clean``.  A refused
-  batch's ``rows_dropped`` is ``rows_would_drop`` (the rows that triggered
-  the refusal); the batch itself went to quarantine whole.
-- ``drop_rate`` / ``flag_rate`` are shares of ``total_rows``.
-- ``hard_rules_failed`` / ``soft_rules_failed`` are JSON lists of failing
-  rule ids — the same encoding as ``sample_tickers`` / ``sample_values`` on
-  the detail table (JSON strings, stable across appends).
-- ``batch_status``: ``rejected`` (refused into quarantine),
-  ``accepted_with_warnings`` (a flag-rule escalation alarm or the soft alarm
-  fired), else ``accepted``.  Plain row drops record in ``rows_dropped`` and
-  stay ``accepted`` — dropping is the routine remediation (§37.6 step 4).
-- ``action_taken='reject_batch'`` on the detail table marks every failing
-  rule whose disposition would have dropped rows (or gated the batch) when
-  the batch was refused: the batch moved to quarantine whole, so nothing was
-  dropped individually.  Failing ``flag`` rules keep ``'flag'``.
-
-``reject_reason`` lives in the quarantine ``rejection.json`` (the §38 summary
-header has no such column) and is surfaced by the ``quarantine`` subcommand.
-
-CLI exit codes (all subcommands): 0 — completed normally (list commands
-return 0 even with zero rows); 1 — the data condition failed (``reingest`` /
-``revalidate`` met a batch that would be rejected); 2 — usage or operational
-error.  ``run_time`` is naive UTC.  Retention (detail 1y / summary forever)
-is a lifecycle concern (``data/storage_ops.py`` S4) and is not wired here.
+CLI 退出码：0 正常完成；1 数据校验未通过（``reingest``/``revalidate`` 遇拒收批次）；2 用法或运行错误。
 """
 
 from __future__ import annotations
@@ -139,17 +105,17 @@ _DATETIME_COLUMNS = ("run_date", "run_time", "data_date")
 
 
 def _now() -> datetime:
-    """Naive UTC timestamp — the one clock the report tables share."""
+    """返回朴素 UTC 时间戳。"""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-# ── table locations ───────────────────────────────────────────────────
+# ── 表路径 ───────────────────────────────────────────────────────────────
 
 
 def detail_path(
     data_date: date, data_root: str | os.PathLike[str] = str(DATA_ROOT)
 ) -> Path:
-    """Month-partitioned detail file for *data_date*'s month."""
+    """返回 *data_date* 所属月份的明细表路径。"""
     month = data_date.strftime("%Y-%m")
     return (
         Path(data_root)
@@ -161,11 +127,11 @@ def detail_path(
 
 
 def summary_path(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> Path:
-    """Single-file batch summary table."""
+    """返回批次汇总表路径。"""
     return Path(data_root) / DQC_REPORT_ROOT / f"{SUMMARY_TABLE}.parquet"
 
 
-# ── row builders ──────────────────────────────────────────────────────
+# ── 行构建 ───────────────────────────────────────────────────────────────
 
 
 def build_detail_rows(
@@ -177,7 +143,7 @@ def build_detail_rows(
     batch_rejected: bool = False,
     run_time: datetime | None = None,
 ) -> list[dict]:
-    """One ``_dqc_results`` row per rule per run (§38)."""
+    """构建单批每条规则对应的 ``_dqc_results`` 明细行。"""
     when = run_time or _now()
     rows: list[dict] = []
     for result in list(hard_results) + list(soft_results):
@@ -230,7 +196,7 @@ def build_summary_row(
     elapsed_seconds: float,
     run_time: datetime | None = None,
 ) -> dict:
-    """One ``_dqc_batch_summary`` row (§38); see the module docstring."""
+    """构建单批对应的 ``_dqc_batch_summary`` 汇总行。"""
     if batch_status not in BATCH_STATUSES:
         raise ValueError(
             f"bad batch_status {batch_status!r}; known: {list(BATCH_STATUSES)}"
@@ -255,16 +221,11 @@ def build_summary_row(
     }
 
 
-# ── append + load ─────────────────────────────────────────────────────
+# ── 追加与读取 ───────────────────────────────────────────────────────────
 
 
 def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
-    """Append *rows* to *path*: read-modify-write under ``FileLock``.
-
-    Reuses the ``data.raw`` pattern — ``FileLock`` + ``PARQUET_WRITE_CONFIG``
-    + tmp→fsync→os.replace — because these tables are unregistered (no
-    ``SCHEMA`` entry), so ``write_parquet_atomic`` refuses them.
-    """
+    """在 ``FileLock`` 保护下原子追加行到未注册的报告 Parquet 文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     new_df = pd.DataFrame(rows, columns=columns)
     for col in _DATETIME_COLUMNS:
@@ -304,7 +265,7 @@ def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
 def append_detail(
     rows: list[dict], data_root: str | os.PathLike[str] = str(DATA_ROOT)
 ) -> list[Path]:
-    """Append detail rows to their ``month=YYYY-MM`` partition files."""
+    """按 ``data_date`` 所属月份追加明细行到各月分区文件。"""
     if not rows:
         return []
     by_month: dict[str, list[dict]] = {}
@@ -323,12 +284,12 @@ def append_detail(
 def append_summary(
     row: dict, data_root: str | os.PathLike[str] = str(DATA_ROOT)
 ) -> Path:
-    """Append one batch row to the summary table."""
+    """追加一条汇总记录到汇总表。"""
     return _append_parquet(summary_path(data_root), [row], SUMMARY_COLUMNS)
 
 
 def load_detail(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFrame:
-    """Read every detail partition (empty frame when nothing was written)."""
+    """读取全部明细分区（无数据时返回空表）。"""
     root = Path(data_root) / DQC_REPORT_ROOT / DETAIL_TABLE
     files = sorted(root.glob("month=*/data.parquet"))
     if not files:
@@ -338,7 +299,7 @@ def load_detail(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFr
 
 
 def load_summary(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFrame:
-    """Read the batch summary table (empty frame when nothing was written)."""
+    """读取批次汇总表（无数据时返回空表）。"""
     path = summary_path(data_root)
     if not path.exists():
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
@@ -348,8 +309,7 @@ def load_summary(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataF
 def load_quarantine_batches(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> list[dict]:
-    """Quarantined batches: ``rejection.json`` records ∪ summary ``rejected``
-    rows (the two views can differ after a T+30 quarantine cleanup)."""
+    """合并隔离区 ``rejection.json`` 与汇总表 ``rejected`` 记录（应对过期清理后的差异）。"""
     root = Path(data_root)
     batches: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -395,26 +355,13 @@ def load_quarantine_batches(
     return sorted(batches, key=lambda r: (r["data_date"], r["asset_type"]))
 
 
-# ── reference injection (CLI backfill of the check overrides) ─────────
+# ── 参考数据注入 ─────────────────────────────────────────────────────────
 
 
 def build_reference_overrides(
     data_root: str | os.PathLike[str], asset_type: str, data_date: date
 ) -> dict:
-    """Assemble the check ``overrides`` from the local reference stores.
-
-    ``calendar_dates`` ← ``asset/calendar/sse.parquet``; ``ca_dates`` ←
-    ``asset/reference/corporate_actions.parquet`` ex_date; ``universe`` ←
-    ``asset/reference/industry.parquet`` tickers; ``daily_tickers`` ← the
-    latest ``asset/bars_daily`` partition at or before *data_date*;
-    ``previous_adjfactor`` ← the currently stored landing frame of *asset_type*
-    (T06 re-ingest idempotence); ``today`` is the **batch** date — a
-    historical re-run judges against its own as-of date, not wall clock.
-
-    A store that is absent stays absent: the checks fail closed on missing
-    dependencies (C01/C02/C09/C10/K10/K11), which is the documented
-    behaviour, not a silent pass.
-    """
+    """从本地存储装配检查所需的参考数据 ``overrides``；缺失表保持缺省以触发 fail-closed。"""
     root = Path(data_root)
     overrides: dict[str, Any] = {"today": data_date}
 
@@ -465,13 +412,13 @@ def build_reference_overrides(
     return overrides
 
 
-# ── dashboard (CLI + DuckDB) ──────────────────────────────────────────
+# ── 看板与 CLI 操作 ──────────────────────────────────────────────────────
 
 
 def run_dashboard(
     data_root: str | os.PathLike[str] = str(DATA_ROOT), last: int = 10
 ) -> str:
-    """Status counts, recent batches and top failing rules (DuckDB reads)."""
+    """使用 DuckDB 汇总批次状态计数、近期批次与高频失败规则。"""
     import duckdb
 
     summary = summary_path(data_root)
@@ -513,9 +460,6 @@ def run_dashboard(
     return "\n".join(lines)
 
 
-# ── CLI operations ────────────────────────────────────────────────────
-
-
 def reingest(
     source: str,
     asset_type: str,
@@ -524,13 +468,7 @@ def reingest(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
     overrides: dict | None = None,
 ) -> int:
-    """Re-download one date and run the full ingest (repair path A).
-
-    Saves the raw fetch first (evidence chain), then normalizes and hands the
-    batch to :func:`data.dqc.engine.ingest_with_dqc` — report tables and the
-    overwrite write are its side.  Exit 1 when the batch is rejected (or the
-    source returned nothing).
-    """
+    """重新拉取指定日期数据并完整执行 DQC 入库；无数据或拒收时返回 1。"""
     from data.adapters import get_adapter
     from data.dqc.engine import ingest_with_dqc
     from data.dqc.severity import DQCBatchReject
@@ -571,12 +509,7 @@ def revalidate(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
     overrides: dict | None = None,
 ) -> int:
-    """Re-check local raw under the current rules — report rows only.
-
-    Writes ``_dqc_results`` rows (``rule_version`` stamps the ruleset that
-    judged them) and moves no data: no landing write, no summary row, no
-    quarantine.  Exit 1 when any batch would be rejected.
-    """
+    """按当前规则复核本地 raw 数据并仅写入 ``_dqc_results`` 明细表；存在拒收批次时返回 1。"""
     from data.dqc.engine import evaluate_batch
     from data.normalizers import get_normalizer
     from data.raw import load_raw
@@ -615,7 +548,7 @@ def revalidate(
     return 1 if rejected else 0
 
 
-# ── argparse entry point ──────────────────────────────────────────────
+# ── CLI 入口 ─────────────────────────────────────────────────────────────
 
 
 def _parse_date(text: str) -> date:
@@ -677,7 +610,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry (``python -m data.dqc.report``).  Returns the exit code."""
+    """``python -m data.dqc.report`` CLI 入口，返回退出码。"""
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "quarantine":
@@ -708,7 +641,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 end,
                 data_root=args.data_root,
             )
-    except Exception as exc:  # noqa: BLE001 — operational errors exit 2
+    except Exception as exc:  # noqa: BLE001 — 运行错误统一返回退出码 2
         print(f"error: {exc}", file=sys.stderr)
         return 2
     raise AssertionError(f"unhandled command {args.command!r}")

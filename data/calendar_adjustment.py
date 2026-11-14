@@ -1,37 +1,12 @@
-"""Time/price coordinate layer: trading calendar, night-session attribution,
-continuous contracts and price adjustment.
+"""时间与价格坐标层：交易日历、期货夜盘归属、连续合约与复权计算。
 
-Design authority: ``docs/design/data/calendar_adjustment.md`` (§42–§44).
-
-QUANT-41 lands the four time/price-coordinate pieces across two iterations:
-iteration 1 — :class:`TradingCalendar` (bisect-based trade-date navigation over
-``asset/calendar/{exchange}.parquet``) and :func:`assign_trade_date_futures`
-(futures night-session trade-date attribution); iteration 2 —
-:func:`build_continuous` (volume-dominant continuous contract with
-roll-cumulative adjfactor) and :class:`PriceAccessor` (raw / forward-adjusted /
-returns views).  ``get_minute_adj`` is a design-doc signature item outside both
-iterations' cut and is not landed here.
-
-Conventions pinned for the whole platform (kb snapshot K1–K6):
-
-* Calendar files hold a single column ``trade_date: date``; non-trading days
-  are absent.  A missing file raises :class:`FileNotFoundError` — no silent
-  fallback, no holiday table maintained in code.
-* Timestamps are exchange-local naive (Asia/Shanghai), never UTC.
-* Futures night session: ``hour >= 21`` belongs to the next trade date;
-  ``hour < 3`` continues the previous evening onto the current trade date.
-  A source-provided ``trade_date`` always wins.
-* Adjustment formulas (K4): ``hfq = raw × adj``; ``qfq = raw × adj / adj_latest``.
-  The cumulative ``adjfactor`` is anchored at the series' first date (Tushare
-  convention, base 1.0).  Returns use
-  ``close_T×adj_T / (close_{T-n}×adj_{T-n}) − 1`` — the base cancels, so
-  backtest and live compute the same number.
-* Continuous contracts (K5): daily dominant by **volume** → roll-day close
-  ratio → cumulative ``adjfactor`` → forward-adjusted prices; full daily
-  rebuild, never incremental.  The roll ratio uses **close** prices (the
-  design lists settle-vs-close as open; this is the documented default).
-* Adjusted prices (K6) are derived on read and never persisted — the asset
-  layer stores raw + ``adjfactor`` only, zero backfill.
+核心约定：
+- 日历文件仅含 ``trade_date: date`` 列（缺失非交易日）；文件不存在直接抛 ``FileNotFoundError``，不做静默回退。
+- 时间戳一律为交易所本地 naive 时间（Asia/Shanghai），严禁使用 UTC。
+- 期货夜盘归属：``hour >= 21`` 归入下一交易日；``hour < 3`` 延续至当前交易日；数据源自带 ``trade_date`` 优先。
+- 复权公式：``hfq = raw * adj``，``qfq = raw * adj / adj_latest``（首日基准 1.0）；收益率分子分母消去基准，保证回测与实盘一致。
+- 连续合约：按日 **成交量** 取主力合约，换月日按双边收盘价计算比值并累积 ``adjfactor``，每日全量重建。
+- 复权价格仅在读取时即时计算，永不落盘（零回填）。
 """
 
 from __future__ import annotations
@@ -49,27 +24,15 @@ _DEFAULT_DATA_ROOT = str(DATA_ROOT)
 
 
 def _as_date(d: date) -> date:
-    """Return *d* as a plain ``date`` (``datetime``/``pd.Timestamp`` narrowed).
-
-    ``datetime`` subclasses ``date``, so a Timestamp survives an
-    ``isinstance(x, date)`` guard and then compares unequal to every stored
-    ``date`` — bisect would silently misplace it.  Narrow once here instead.
-    """
+    """将 *d* 规范为纯 ``date``（把 ``datetime``/``pd.Timestamp`` 窄化，避免 ``bisect`` 比较失配）。"""
     return d.date() if isinstance(d, datetime) else d
 
 
 class TradingCalendar:
-    """Trade-date navigation over one exchange's calendar file.
+    """单交易所交易日历导航。
 
-    ``exchange`` is the storage exchange name — the values of
-    :data:`core.asset_rules.EXCHANGE_MAP` (``sse``, ``shfe``, …).  The file
-    is ``{data_root}/asset/calendar/{exchange}.parquet`` per
-    :data:`data.storage_schema.PARTITION_PATHS`; when it is missing the
-    constructor raises :class:`FileNotFoundError` (documented default: no
-    silent fallback).  Days are sorted and deduplicated on load; a duplicated
-    ``trade_date`` row must not inflate ``range()``/``count()``.  ``is_trading_day``
-    is an O(1) set lookup, ``prev``/``next``/``range``/``count`` are O(log n)
-    via :mod:`bisect`.
+    ``exchange`` 为存储层交易所名（如 ``sse``、``shfe``），对应 ``{data_root}/asset/calendar/{exchange}.parquet``；
+    文件缺失时直接抛 ``FileNotFoundError``。加载时自动去重排序，``is_trading_day`` 为 O(1)，其余导航方法为 O(log n)。
     """
 
     def __init__(
@@ -92,46 +55,31 @@ class TradingCalendar:
         self._set: set[date] = set(self._days)
 
     def is_trading_day(self, d: date) -> bool:
-        """True when *d* is a trading day (O(1) set lookup)."""
+        """判断 *d* 是否为交易日（O(1) 集合查询）。"""
         return _as_date(d) in self._set
 
     def prev(self, d: date, n: int = 1) -> date:
-        """The *n*-th trading day strictly before *d*.
-
-        Raises ``IndexError`` when fewer than *n* trading days exist before
-        that point (including *d* earlier than the calendar's first day).
-        """
+        """返回严格早于 *d* 的第 *n* 个交易日；不足 *n* 个或早于日历起点时抛 ``IndexError``。"""
         i = bisect_left(self._days, _as_date(d))
         if i - n < 0:
             raise IndexError(f"prev({d}, {n}) out of range: before calendar start")
         return self._days[i - n]
 
     def next(self, d: date, n: int = 1) -> date:
-        """The *n*-th trading day strictly after *d*.
-
-        Raises ``IndexError`` past the calendar's last day — no wall-clock
-        fallback; the file carries the official future days (trade_cal
-        contract, refreshed monthly).
-        """
+        """返回严格晚于 *d* 的第 *n* 个交易日；超出日历末日时抛 ``IndexError``（不回退系统时钟）。"""
         i = bisect_right(self._days, _as_date(d))
         if i + n - 1 >= len(self._days):
             raise IndexError(f"next({d}, {n}) out of range: past calendar end")
         return self._days[i + n - 1]
 
     def range(self, start: date, end: date) -> list[date]:
-        """Trading days in ``[start, end]``, both ends inclusive.
-
-        Empty when *start* > *end* or when the span holds no trading day.
-        """
+        """返回闭区间 ``[start, end]`` 内的交易日列表。"""
         lo = bisect_left(self._days, _as_date(start))
         hi = bisect_right(self._days, _as_date(end))
         return self._days[lo:hi]
 
     def count(self, start: date, end: date) -> int:
-        """Number of trading days in ``[start, end]`` — ``len(range(...))``.
-
-        Bisect only, no list materialisation; 0 when *start* > *end*.
-        """
+        """返回闭区间 ``[start, end]`` 内的交易日天数（基于二分下标差，不构造列表）。"""
         lo = bisect_left(self._days, _as_date(start))
         hi = bisect_right(self._days, _as_date(end))
         return max(hi - lo, 0)
@@ -142,25 +90,17 @@ def assign_trade_date_futures(
     cal: TradingCalendar,
     source_trade_date: date | None = None,
 ) -> date:
-    """Attribute a futures bar timestamp to its trade date (kb snapshot K3).
+    """按夜盘规则将期货 Bar 时间戳归属到交易日。
 
-    * ``hour >= 21`` — the evening session belongs to the *next* trade date.
-      Friday 21:00 lands on Monday: ``cal.next`` skips the weekend itself.
-    * ``hour < 3`` — the previous evening's session continuing past midnight,
-      attributed to the *current* trade date.  A Saturday-morning bar follows
-      Friday's evening session onto Monday (same fall-through rule).
-    * anything else (day session) — the bar date itself when it is a trading
-      day, else the next one.
-    * *source_trade_date* — a trade date already stamped by the data source is
-      trusted as-is (source wins).
+    ``source_trade_date`` 非空时直接采用；``hour >= 21`` 归入下一交易日（自动跳过周末）；
+    ``hour < 3`` 与日盘共用规则：若当日为交易日则取当日，否则顺延至下一交易日。
     """
     if source_trade_date is not None:
         return _as_date(source_trade_date)
     d = ts.date()
     if ts.hour >= 21:
         return cal.next(d, 1)
-    # hour < 3 and the day session share one rule: the current trade date,
-    # falling forward only when the bar date is not a trading day.
+    # hour < 3 与日盘共用顺延规则：非交易日时顺延至下一交易日
     return d if cal.is_trading_day(d) else cal.next(d, 1)
 
 
@@ -178,46 +118,12 @@ _PASSTHROUGH = (
 
 
 def build_continuous(symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
-    """Continuous dominant-contract series for one symbol (design §42.4, kb K5).
+    """构建单品种主力连续合约序列（每日全量重建，无增量状态）。
 
-    Daily pipeline — full rebuild, no incremental state:
-
-    1. dominant contract per trade date = max **volume** (ties broken by the
-       smallest contract code, deterministic);
-    2. roll dates = dates where the dominant changes; the roll step is
-       ``close_old / close_new`` from **both** contracts' closes on the roll
-       day itself (close-price convention — the design lists settle-vs-close
-       as open; this is the documented default);
-    3. ``adjfactor`` = forward cumulative product of the steps, base 1.0 at the
-       series' first date (Tushare convention), so ``hfq = raw × adj`` (kb K4)
-       is continuous across rolls and anchored at the first real price;
-    4. ``close_adj = close × adjfactor / adjfactor_latest`` — forward-adjusted
-       (qfq, kb K4).  Derived only: the storage layer drops ``close_adj`` and
-       keeps raw + ``adjfactor`` (kb K6, zero backfill).
-
-    Parameters
-    ----------
-    symbol:
-        Variety code (``"RB"``, ``"IF"``, …) kept per the design signature;
-        used in error messages — the per-symbol file is the identity.
-    bars:
-        Per-contract daily rows.  Required columns: ``trade_date``,
-        ``contract``, ``close``, ``volume``; optional passthrough:
-        ``open``/``high``/``low``/``amount``/``open_interest``/``settle``.
-        ``(trade_date, contract)`` must be unique and volume non-null.  On a
-        roll day the old contract's row must be present — its close is the
-        ratio denominator — missing data raises :class:`ValueError`, with no
-        fallback to a stale close.
-
-    Returns one row per trade date, ascending: ``trade_date``,
-    ``dominant_contract``, the input's passthrough columns
-    (``open``/``high``/``low``/``close``/``volume``/``amount``/
-    ``open_interest``/``settle`` — whichever are present), and the derived
-    ``adjfactor`` / ``close_adj``.  The output column set mirrors the input,
-    not ``CONTINUOUS_SCHEMA``: persisting to ``asset/continuous/`` requires
-    the full schema columns and is validated at the storage layer.  On a roll
-    day a non-positive dominant (new) close raises; a non-positive old close
-    degrades the step to 1.0 (§42.4 guard).
+    规则：
+    1. 按日取最大 ``volume`` 为主力合约（成交量相同时取合约代码字典序最小者）。
+    2. 换月日步长 ``close_old / close_new`` 使用当日双边收盘价；旧合约收盘缺失或新合约非正时抛 ``ValueError``，旧合约非正时步长退化为 1.0。
+    3. 累积 ``adjfactor`` 首日基准为 1.0；衍生 ``close_adj`` 为前复权价（落盘时由存储层丢弃，仅保留原始价与 ``adjfactor``）。
     """
     required = [c for c in _REQUIRED_BARS if c not in bars.columns]
     if required:
@@ -229,7 +135,7 @@ def build_continuous(symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"bars[{symbol}] has duplicate (trade_date, contract) rows")
     df["trade_date"] = pd.to_datetime(df["trade_date"])
 
-    # Dominant = max volume per date; ties -> smallest contract code.
+    # 按日取最大成交量为主力；平局取合约代码最小者
     ranked = df.sort_values(
         ["trade_date", "volume", "contract"],
         ascending=[True, False, True],
@@ -263,10 +169,7 @@ def build_continuous(symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
             )
         old_close = float(old_row["close"].iloc[0])
         if old_close > 0:
-            # Design §42.4 computes the roll-day ratio as new/old; the
-            # cumulative adjfactor that K4 defines (hfq = raw × adj, base =
-            # first date) accumulates its inverse so the adjusted series
-            # continues the old contract's level across the roll.
+            # 累积 adjfactor（hfq = raw * adj，首日基准 1.0）累乘 old_close / new_close，使复权序列跨换月平滑衔接
             step.iloc[k] = old_close / new_close
 
     adjfactor = step.cumprod()
@@ -285,27 +188,14 @@ def build_continuous(symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
 
 
 def _series_key(df: pd.DataFrame) -> str | None:
-    """Identity column for per-series adjfactor semantics (§44.4).
-
-    ``ticker`` is the platform identity on daily bars.  A continuous frame
-    carries no ticker column — its roll-cumulative ``adjfactor`` spans the
-    whole symbol — so the whole frame is one series.
-    """
+    """返回用于分组计算 ``adjfactor`` 的序列键（有 ``ticker`` 列时按标的分段，连续合约整表为单一序列）。"""
     return "ticker" if "ticker" in df.columns else None
 
 
 class PriceAccessor:
-    """Raw / forward-adjusted / returns views over a raw daily frame (§44.4).
+    """原始日线帧的视图访问器，支持未复权、前复权与收益率计算（按需读取计算，不落盘）。
 
-    The frame carries price fields plus the cumulative ``adjfactor``; views
-    are derived on read (kb K6 — adjusted prices are never persisted).
-    ``adjfactor_latest`` is read on every call — no cache — so a rewritten
-    adjfactor column changes the derived prices with zero backfill (the
-    documented default for the design's caching open item).
-
-    Rows must be in trade-date order within each series: ``adj_latest`` is the
-    last row's factor per series, matching the design sketch and
-    ``DataAPI``'s ``arg_max(adjfactor, trade_date)`` over ordered storage.
+    要求序列内按 ``trade_date`` 升序排列；每次调用实时读取末端 ``adjfactor`` 作为 ``adj_latest``，确保因子更新零回填。
     """
 
     def __init__(self, daily_df: pd.DataFrame) -> None:
@@ -318,21 +208,15 @@ class PriceAccessor:
         return self._df.groupby(key)["adjfactor"].transform("last")
 
     def raw(self, field: str = "close") -> pd.Series:
-        """Unadjusted *field*, as stored."""
+        """返回原始未复权字段。"""
         return self._df[field]
 
     def forward_adj(self, field: str = "close") -> pd.Series:
-        """Forward-adjusted (qfq): ``raw × adj / adj_latest`` (kb K4)."""
+        """返回前复权（qfq）序列：``raw * adj / adj_latest``。"""
         return self._df[field] * self._df["adjfactor"] / self._adj_latest()
 
     def returns(self, n: int = 1) -> pd.Series:
-        """n-period return ``close_T×adj_T / (close_{T-n}×adj_{T-n}) − 1``.
-
-        Computed on the forward-adjusted close — ``adj_latest`` cancels in
-        the ratio, so the value is base-independent (design §44.5).  The first
-        *n* rows of each series are NaN (the design's listing-bounded NaN
-        question is open; pandas ``pct_change`` semantics, no fill).
-        """
+        """返回 *n* 期收益率 ``close_T*adj_T / (close_{T-n}*adj_{T-n}) - 1``（首 *n* 行为 NaN）。"""
         adj_close = self.forward_adj("close")
         key = _series_key(self._df)
         if key is None:

@@ -1,27 +1,12 @@
-"""alphalens integration and the factor evaluation pipeline (S11-T1).
+"""alphalens 集成与因子评估管道。
 
-The research-side entry point for pre-backtest factor gating (§27).  A factor
-goes through ``FactorPipeline`` — ``compute`` → ``preprocess`` → ``evaluate``
-→ ``register`` — and only a factor that passes the admission gate reaches the
-registry and, later, a strategy.  Downstream strategies never import
-alphalens; they consume registered factors via ``DataAPI.get_factor()``.
+提供研究侧因子准入流程 ``FactorPipeline``（``compute -> preprocess -> evaluate -> register``）：
+- 标量评估结果与尝试记录写入 ``metadata.json``；
+- 时序结果落盘至 ``data_platform/factor_eval/{name}/``；
+- 完整报告输出至 ``research/reports/{name}_{date}.html``。
 
-Landing zones (§27.4, ruling 2026-10-10: eval block lives in ``metadata.json``):
-
-- scalars        → ``metadata.json`` ``eval`` block (+ ``attempts`` /
-  ``attempt_log`` siblings, §27.8)
-- series frames  → ``data_platform/factor_eval/{name}/`` Parquet
-  (``ic_series.parquet`` / ``quantile_returns.parquet`` / ``turnover.parquet``)
-- tearsheet      → ``research/reports/{name}_{date}.html``
-
-Gate (§27.5/§27.9): ``rank_ic_mean > 0.04`` and ``ir > 0.5`` and
-``ic_t_stat > max(2, sqrt(2*ln(N)))`` where N is the per-factor-family attempt
-count including failures (family = name prefix before the first ``_``).
-Exit line (§27.11): ``rank_ic_mean < 0.03`` flags the factor for review — the
-status change itself belongs to governance and is out of scope here.
-
-alphalens (alphalens-reloaded 0.4.6) is imported **inside method bodies
-only** — this module must import cleanly without it installed.
+准入门限：``rank_ic_mean > 0.04``、``ir > 0.5`` 且 ``ic_t_stat > max(2, sqrt(2*ln(N)))``；
+衰减警戒线：``rank_ic_mean < 0.03``。alphalens 仅在方法体内延迟导入。
 """
 
 from __future__ import annotations
@@ -57,36 +42,35 @@ __all__ = [
     "DEFAULT_PERIODS",
 ]
 
-#: Default forward-return horizons in trading days (§27, settled 2026-10-10).
+# 默认前向收益评估周期（交易日）
 DEFAULT_PERIODS: tuple[int, ...] = (1, 5, 10, 20)
 
-#: Admission thresholds (§27.5 / §62.3).
+# 因子准入门限
 GATE_IC_MIN: float = 0.04
 GATE_IR_MIN: float = 0.5
 GATE_T_BASE: float = 2.0
 
-#: Exit line (§27.11): decay below this flags the factor for review.
+# 因子衰减退出警戒阈值
 EXIT_IC_THRESHOLD: float = 0.03
 
-#: Quantile count for the alphalens binning stage (§62 plot n_groups=5).
+# alphalens 分层分位数数量
 _QUANTILES: int = 5
 
-#: Calendar-day padding when loading prices so the tail of the factor window
-#: still gets full-length forward returns instead of being dropped by alphalens.
+# 加载价格时的日历日缓冲天数，避免评估窗口尾部缺少前向收益
 _PRICE_BUFFER_DAYS: int = 45
 
-#: Suspension handling in :meth:`AlphalensAdapter.to_al_prices` (§21.3).
+# 停牌期间收盘价前向填充最大天数
 _FFILL_LIMIT: int = 5
 
 _TEARSHEET_DPI: int = 100
 
 
 def _noop_show(*_args: Any, **_kwargs: Any) -> None:
-    """Stand-in for ``plt.show`` while figures are being captured."""
+    """捕获 tearsheet 图表时用于临时屏蔽 ``plt.show``/``plt.close``。"""
 
 
 # ---------------------------------------------------------------------------
-# Expression evaluation (FactorPipeline.compute)
+# 表达式安全求值
 # ---------------------------------------------------------------------------
 
 _BIN_OPS: dict[type, Callable[[Any, Any], Any]] = {
@@ -121,11 +105,7 @@ _EXPR_FUNCS: dict[str, Callable[..., Any]] = {
 
 
 def _positive_periods(periods: int) -> int:
-    """Guard the shift operators like ``_rolling_apply`` guards windows.
-
-    A negative period shifts the other way — ``delta(close, -1)`` reads the
-    next bar — and ``int()`` would silently truncate a float such as 1.9.
-    """
+    """校验偏移周期必须为正整数，防止负数周期引入未来数据。"""
     if not isinstance(periods, int) or isinstance(periods, bool) or periods < 1:
         raise ValueError(f"periods must be a positive int, got {periods!r}")
     return periods
@@ -171,9 +151,7 @@ def _eval_node(node: ast.AST, columns: dict[str, pd.Series]) -> Any:
 
 
 def _eval_expr(expr: str, columns: dict[str, pd.Series]) -> pd.Series:
-    """Evaluate *expr* over per-column Series; only arithmetic and the
-    whitelisted window functions are allowed.  No lookahead operator exists
-    here on purpose — a factor definition must not read future bars."""
+    """在白名单算子与窗口函数内安全解析并计算因子表达式，禁止前视操作符。"""
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
@@ -185,7 +163,7 @@ def _eval_expr(expr: str, columns: dict[str, pd.Series]) -> pd.Series:
 
 
 def _expr_columns(expr: str) -> tuple[str, ...]:
-    """Column names the *expr* reads — the ``depends_on()`` declaration."""
+    """提取表达式依赖的行情列名。"""
     tree = ast.parse(expr, mode="eval")
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     funcs = {
@@ -196,8 +174,7 @@ def _expr_columns(expr: str) -> tuple[str, ...]:
     return tuple(sorted(names - funcs))
 
 
-#: Metadata columns :func:`research.post_processor.neutralize` reads; they are
-#: consumed by ``preprocess`` and never reach the 3-column factor frame.
+# 中性化所需的元数据列（预处理后剔除，不进入因子存储）
 _NEUTRALIZE_COLS: tuple[str, ...] = ("industry", "log_market_cap")
 
 
@@ -211,7 +188,7 @@ def _value_col(df: pd.DataFrame) -> str:
 
 
 def _factor_column(df: pd.DataFrame) -> str:
-    """Like :func:`_value_col` but tolerates the neutralization metadata."""
+    """提取唯一因子列名（忽略中性化元数据列）。"""
     cols = [c for c in df.columns if c not in ("date", "ticker", *_NEUTRALIZE_COLS)]
     if len(cols) != 1:
         raise ValueError(f"expected exactly one factor column, got {cols!r}")
@@ -219,22 +196,18 @@ def _factor_column(df: pd.DataFrame) -> str:
 
 
 def _quantile_label(q: Any) -> str:
-    """Stable column label for a quantile code: 1 and 1.0 both become ``"1"``.
-
-    The code dtype flips with NaN presence (int64 vs float64), and the label
-    must not flip with it.
-    """
+    """将分位数编码规范化为稳定的整数字符串标签（如 ``1.0 -> "1"``）。"""
     value = float(q)
     return str(int(value)) if value.is_integer() else str(q)
 
 
 # ---------------------------------------------------------------------------
-# Attempt bookkeeping (per-factor-family N, §27.9)
+# 同族因子尝试次数记录
 # ---------------------------------------------------------------------------
 
 
 def factor_family(name: str) -> str:
-    """Factor family of *name* — the prefix before the first ``_``."""
+    """提取因子族名（第一个 ``_`` 前缀）。"""
     return name.split("_", 1)[0] or name
 
 
@@ -250,8 +223,7 @@ def _load_attempts(base_dir: Path, family: str) -> list[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        # A corrupt log must not silently reset N to 1 — that would relax the
-        # admission gate the attempt count exists to tighten.
+        # 尝试日志损坏时禁止静默重置 N，以免放宽准入门限
         raise RuntimeError(
             f"attempt log {path} is unreadable; refusing to reset N"
         ) from exc
@@ -271,7 +243,7 @@ def _record_attempt(base_dir: Path, family: str, entry: dict) -> int:
     tmp.write_text(
         json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    tmp.replace(path)  # atomic: a crash mid-write cannot truncate the log
+    tmp.replace(path)  # 原子替换，防止中途崩溃截断日志
     return len(entries)
 
 
@@ -281,16 +253,11 @@ def _record_attempt(base_dir: Path, family: str, entry: dict) -> int:
 
 
 class AlphalensAdapter:
-    """Format adaptation between platform frames and alphalens — stateless."""
+    """平台数据格式与 alphalens 接口的无状态适配器。"""
 
     @staticmethod
     def to_al_factor(factor_df: pd.DataFrame) -> pd.Series:
-        """Wide ``(date × ticker)`` frame → MultiIndex Series ``(date, asset)``.
-
-        NaN cells are dropped (a missing factor value is not an observation);
-        the result is sorted and named so alphalens sees the ``date`` index
-        level its IC code requires.
-        """
+        """将宽表 ``(date × ticker)`` 转为有序的 ``(date, asset)`` MultiIndex Series（剔除 NaN）。"""
         if not isinstance(factor_df, pd.DataFrame):
             raise TypeError(
                 f"factor_df must be a DataFrame, got {type(factor_df).__name__}"
@@ -307,12 +274,7 @@ class AlphalensAdapter:
 
     @staticmethod
     def to_al_prices(bars_df: pd.DataFrame, price_col: str = "close") -> pd.DataFrame:
-        """Long bars → wide ``(DatetimeIndex × ticker)`` prices.
-
-        Gaps of up to :data:`_FFILL_LIMIT` rows are forward-filled so a short
-        suspension does not poison the ticker's forward returns; longer gaps
-        stay NaN (§21.3).
-        """
+        """将长表行情转为宽表收盘价矩阵，最多前向填充 ``_FFILL_LIMIT`` 个交易日。"""
         required = {"date", "ticker", price_col}
         missing = required - set(bars_df.columns)
         if missing:
@@ -329,14 +291,8 @@ class AlphalensAdapter:
         mean_quant_ret: pd.DataFrame,
         period: str | None = None,
     ) -> dict:
-        """Platform-standard scalars from alphalens outputs.
-
-        The gate period is the first IC column unless *period* is given.  ``ir``
-        is ``mean / std`` (ddof=1) of the daily IC on that period and
-        ``ic_t_stat = ir * sqrt(n)`` with *n* the number of IC observations
-        (§62: ``ic_t = ic_ir * sqrt(n)``).
-        """
-        import alphalens.performance as al_perf  # lazy: not a module dependency
+        """从 alphalens 输出提取标准指标（``rank_ic_mean``、``ir``、``ic_t_stat``、单调性、多空收益差、换手率）。"""
+        import alphalens.performance as al_perf  # 延迟导入，避免模块加载强依赖 alphalens
 
         if ic_series.empty:
             raise ValueError("ic_series is empty")
@@ -350,7 +306,7 @@ class AlphalensAdapter:
         if ic.empty:
             raise ValueError(f"ic_series[{col!r}] has no observations")
         rank_ic_mean = float(ic.mean())
-        ic_std = float(ic.std())  # ddof=1
+        ic_std = float(ic.std())  # 样本标准差（ddof=1）
         if math.isnan(ic_std):
             ir = math.nan
         elif ic_std == 0.0:
@@ -365,9 +321,7 @@ class AlphalensAdapter:
         ic_t_stat = ir * math.sqrt(n_obs)
 
         def _monotonicity(s: pd.Series) -> float:
-            # Spearman rho of quantile level vs mean return.  Both sides are
-            # rebuilt on a common RangeIndex: pandas' corr aligns on index and
-            # the quantile labels would not match s' own values.
+            # 计算分位数与收益的 Spearman 单调性，使用统一 RangeIndex 避免标签对齐错位
             x = pd.Series(range(len(s)), dtype="float64")
             y = pd.Series(s.to_numpy(), dtype="float64")
             return x.corr(y, method="spearman")
@@ -399,8 +353,7 @@ class AlphalensAdapter:
 
     @staticmethod
     def check_gate(metrics: dict, n_attempts: int = 1) -> tuple[bool, dict]:
-        """Admission gate: ``IC > 0.04`` and ``IR > 0.5`` and
-        ``t > max(2, sqrt(2*ln(N)))``.  N=1 degenerates to ``t > 2``."""
+        """校验准入门限：``IC > 0.04``、``IR > 0.5`` 且 ``t > max(2, sqrt(2*ln(N)))``。"""
         if not isinstance(n_attempts, int) or n_attempts < 1:
             raise ValueError(f"n_attempts must be a positive int, got {n_attempts!r}")
         t_threshold = max(GATE_T_BASE, math.sqrt(2.0 * math.log(n_attempts)))
@@ -424,11 +377,7 @@ class AlphalensAdapter:
 
 
 def check_exit(metrics: dict) -> tuple[bool, dict]:
-    """Exit line (§27.11): ``rank_ic_mean < 0.03`` flags the factor.
-
-    The flag only says the factor decayed into the exit zone; marking it
-    ``under_review`` is governance's job, not this module's.
-    """
+    """校验退出警戒线：``rank_ic_mean < 0.03`` 时标记为需复核。"""
     value = float(metrics["rank_ic_mean"])
     flagged = bool(value < EXIT_IC_THRESHOLD)
     return flagged, {
@@ -447,7 +396,7 @@ def check_exit(metrics: dict) -> tuple[bool, dict]:
 
 @dataclass
 class EvalResult:
-    """Everything one evaluation produced (§27.8)."""
+    """单次因子评估的完整产出容器。"""
 
     summary: dict
     gate_passed: bool
@@ -464,7 +413,7 @@ class EvalResult:
 
 
 class _FactorRecord:
-    """Duck-type of ``research.factor_interface.Factor`` for factor_storage."""
+    """适配 ``factor_storage`` 接口的轻量因子元信息对象。"""
 
     def __init__(self, name: str, version: str, depends_on: Sequence[str]) -> None:
         self.name = name
@@ -480,14 +429,7 @@ class _FactorRecord:
 
 
 class FactorPipeline:
-    """``compute`` → ``preprocess`` → ``evaluate`` → ``register``.
-
-    ``data_api`` is anything exposing
-    ``load_bars(symbols, start, end, ...) -> long DataFrame`` (the
-    ``data.data_api`` module or a test double).  ``base_dir`` roots the factor
-    store and the ``factor_eval/`` tree; ``reports_dir`` is the tearsheet
-    landing zone.
-    """
+    """因子研发流水线：``compute -> preprocess -> evaluate -> register``。"""
 
     def __init__(
         self,
@@ -498,13 +440,12 @@ class FactorPipeline:
         self._data_api = data_api
         self._base_dir = Path(base_dir)
         self._reports_dir = Path(reports_dir)
-        #: raw frame paired with the last ``evaluate()`` — what ``register()``
-        #: persists (factor_storage stores raw values, NaN kept, never filled).
+        # 最近一次 evaluate() 对应的原始因子表，供 register() 落盘未填充原值
         self._last_raw: pd.DataFrame | None = None
-        #: raw frame from ``compute()``/``preprocess()``, paired at ``evaluate()``.
+        # 待配对的原始因子表（由 compute/preprocess 写入）
         self._pending_raw: pd.DataFrame | None = None
 
-    # -- stage 1: compute --------------------------------------------------
+    # -- 阶段 1：计算 ---------------------------------------------------------
 
     def compute(
         self,
@@ -514,12 +455,7 @@ class FactorPipeline:
         end: str,
         name: str = "factor",
     ) -> pd.DataFrame:
-        """Evaluate *expr* over daily bars of *universe* in ``[start, end]``.
-
-        Returns the raw long frame ``[date, ticker, name]`` — one row per bar
-        per ticker.  Bars are forward-adjusted closes (qfq, §27.3) so the
-        expression sees comparable historical prices.
-        """
+        """在 ``[start, end]`` 区间内按标的计算前复权行情上的原始因子值 ``[date, ticker, name]``。"""
         symbols = [str(s) for s in universe]
         if not symbols:
             raise ValueError("universe is empty")
@@ -551,18 +487,12 @@ class FactorPipeline:
         self._pending_raw = raw
         return raw
 
-    # -- stage 2: preprocess ----------------------------------------------
+    # -- 阶段 2：预处理 -------------------------------------------------------
 
     def preprocess(
         self, raw: pd.DataFrame, factor_col: str | None = None
     ) -> pd.DataFrame:
-        """MAD winsorise → median fill → z-score (PIPELINE_STOCK_EVAL), then
-        industry/size neutralisation (§60) when ``industry`` and
-        ``log_market_cap`` columns are present.
-
-        Returns the 3-column factor frame ``[date, ticker, factor_col]`` —
-        the neutralization metadata is consumed here, never carried on.
-        """
+        """执行缩尾、中位数填充与 z-score，存在行业/市值列时自动中性化并仅返回 3 列因子表。"""
         col = factor_col or _factor_column(raw)
         processed = PostProcessor(PIPELINE_STOCK_EVAL).transform(
             raw, factor_col=col, date_col="date"
@@ -573,7 +503,7 @@ class FactorPipeline:
         self._pending_raw = raw
         return processed
 
-    # -- stage 3: evaluate -------------------------------------------------
+    # -- 阶段 3：评估 ---------------------------------------------------------
 
     def evaluate(
         self,
@@ -582,15 +512,11 @@ class FactorPipeline:
         name: str | None = None,
         n_attempts: int | None = None,
     ) -> EvalResult:
-        """Run the alphalens evaluation and the admission gate.
+        """运行 alphalens 评估、校验多重检验准入门限并生成 tearsheet HTML。
 
-        When *name* is given the attempt is recorded under its factor family
-        and N counts that family's attempts including this one; otherwise N
-        comes from *n_attempts* (default 1).  The tearsheet is written for
-        pass and fail alike (§27.6); a plotting failure downgrades
-        ``report_path`` to ``None`` with a warning instead of killing the run.
+        传入 *name* 时按因子族累计尝试次数 *N*；绘图失败仅发警告并将 ``report_path`` 置为 ``None``。
         """
-        import alphalens.performance as al_perf  # lazy: not a module dependency
+        import alphalens.performance as al_perf  # 延迟导入 alphalens
         import alphalens.utils as al_utils
 
         if processed.empty:
@@ -599,11 +525,7 @@ class FactorPipeline:
         if name is not None:
             name = _safe_component(name, "factor name")
         eval_name = name or col
-        # Pair the raw frame with this evaluation for register(): the input of
-        # the compute()/preprocess() run that produced *processed*, or *processed*
-        # itself when the caller supplied the factor frame directly.  The
-        # pending raw is kept — a second evaluate() over the same pipeline raw
-        # must not silently re-pair register() to the processed frame.
+        # 绑定原始因子表供后续 register() 使用，重复评估时不覆盖既有原始数据
         self._last_raw = (
             self._pending_raw if self._pending_raw is not None else processed
         )
@@ -630,9 +552,7 @@ class FactorPipeline:
         mean_quant_ret, _ = al_perf.mean_return_by_quantile(factor_data, by_date=False)
 
         quantile_levels = sorted(factor_data["factor_quantile"].dropna().unique())
-        # String column labels, pinned integral ("1", not "1.0"): Parquet
-        # column names must be strings on every engine, and the code dtype
-        # flips with NaN presence (int64 vs float64).
+        # 将分位数标签统一为整数字符串，兼容 Parquet 列名与 NaN 导致的浮点转换
         turnover = pd.DataFrame(
             {
                 _quantile_label(q): al_perf.quantile_turnover(
@@ -683,33 +603,21 @@ class FactorPipeline:
             report_path=report_path,
         )
 
-    # -- stage 4: register -------------------------------------------------
+    # -- 阶段 4：注册落盘 -----------------------------------------------------
 
     def register(self, name: str, expr: str, result: EvalResult) -> None:
-        """Land all three artifact layers for the last evaluated frame.
-
-        Layer 1 writes the ``eval`` block (plus ``attempts`` / ``attempt_log``)
-        into the factor version's ``metadata.json``; layer 2 writes the series
-        Parquets under ``factor_eval/{name}/``; layer 3 is the tearsheet
-        ``evaluate`` already wrote.  Factor values are persisted through
-        ``factor_storage.save_factor_full`` as the **raw** frame — NaN is
-        suspension/missing and is kept, never filled, so consumers applying
-        their own preprocessing do not double-process.
-        """
+        """落盘原始因子值、更新 ``metadata.json`` 评估与尝试记录，并保存评估时序 Parquet 文件。"""
         name = _safe_component(name, "factor name")
         if self._last_raw is None:
             raise RuntimeError(
                 "register() needs a factor frame from this pipeline "
                 "(run compute()/preprocess()/evaluate() first)"
             )
-        # The raw frame may carry the neutralize metadata (preprocess's input
-        # shape); the slice keeps only the factor column.
+        # 剔除可能残留的中性化辅助列，仅保留单因子列
         col = _factor_column(self._last_raw)
         frame = self._last_raw[["date", "ticker", col]].rename(columns={col: name})
 
-        # Semantic version "1.0" is what Factor.version and the factor_storage
-        # readers default to — landing under any other string makes the
-        # registered factor invisible to load_factor()/DataAPI.get_factor().
+        # 固定使用默认版本号 "1.0"，与 factor_storage 读取契约保持一致
         record = _FactorRecord(name, version="1.0", depends_on=_expr_columns(expr))
         factors_dir = self._base_dir / "factors"
         save_factor_full(record, frame, base_dir=str(factors_dir))
@@ -717,8 +625,7 @@ class FactorPipeline:
         family = factor_family(name)
         eval_date = datetime.now(timezone.utc).date().isoformat()
         attempts = _load_attempts(self._base_dir, family)
-        # evaluate() records the attempt only when called with a name; make
-        # sure a registered factor's log is never empty for the eval block.
+        # 补充记录未命名评估的尝试日志，确保 metadata 中的尝试记录非空
         if not any(
             e.get("name") == name and e.get("date") == eval_date for e in attempts
         ):
@@ -753,7 +660,7 @@ class FactorPipeline:
         result.quantile_returns.to_parquet(out_dir / "quantile_returns.parquet")
         result.turnover.to_parquet(out_dir / "turnover.parquet")
 
-    # -- helpers -----------------------------------------------------------
+    # -- 内部辅助方法 ---------------------------------------------------------
 
     def _load_bars(self, symbols: Sequence[str], start: str, end: str) -> pd.DataFrame:
         return self._data_api.load_bars(
@@ -775,7 +682,7 @@ class FactorPipeline:
         eval_name = _safe_component(eval_name, "factor name")
         try:
             figures = self._capture_tearsheet(factor_data)
-        except Exception as exc:  # plotting must not kill the evaluation
+        except Exception as exc:  # 绘图异常不阻断评估主流程
             warnings.warn(f"tearsheet generation failed for {eval_name!r}: {exc}")
             return None
         date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -789,13 +696,7 @@ class FactorPipeline:
 
     @staticmethod
     def _capture_tearsheet(factor_data: pd.DataFrame) -> list[str]:
-        """Run the alphalens full tear sheet and return PNGs as base64.
-
-        ``plt.show`` and ``plt.close`` are suspended for the duration: the
-        tear sheet's ``GridFigure.close`` closes each figure after showing it,
-        and the inline backend closes them on show — either would leave
-        nothing to capture.
-        """
+        """运行 alphalens 完整 tearsheet 并拦截图形关闭操作以导出 base64 PNG 列表。"""
         import matplotlib.pyplot as plt
         from alphalens import tears as al_tears
 

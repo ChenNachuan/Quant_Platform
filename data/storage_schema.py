@@ -1,27 +1,19 @@
-"""Storage schema contract — Pandera DataFrameSchemas for all 52 canonical tables.
+"""存储层 Schema 契约 —— 全部 52 张规范表的 Pandera DataFrameSchema 定义。
 
-Pure schema definitions, no IO (red line 3).  This module defines *what a
-table looks like*; write paths (T2) and read paths (T3) consume these schemas.
+纯结构定义，无任何 IO 操作；写入与读取路径统一引用本模块 Schema。
 
-Canonical layout under ``$QUANT_DATA_ROOT/``:
-- ``asset/``   — 47 A-share tables (calendar + stock + index/board + 7 PIT
-  ``cn_stock_fundamental_*`` + special flows/sentiment + split holder/event
-  tables + tick/L2 + 5 independent ``cn_etf_*`` + 5 OTC/LOF ``cn_fund_*``)
-  and 4 futures tables (``cn_futures_*``).  Former ``ext/`` datasets land
-  directly inside ``asset/``.
-- ``factors/`` — sibling to ``asset/``, per-factor versioned yearly Parquet.
+目录布局（``$QUANT_DATA_ROOT/`` 下）：
+- ``asset/``：47 张 A 股相关表（日历、股票核心与状态、指数/行业/权重、7 张 PIT 基本面表
+  ``cn_stock_fundamental_*``、特色资金流/情绪/筹码、股东与资本事件、逐笔/L2、5 张独立 ``cn_etf_*``、
+  5 张公募基金 ``cn_fund_*``）及 4 张期货表（``cn_futures_*``）。
+- ``factors/``：因子表（1 张，按因子与年份分区的长表）。
 
-Schema evolution: **add-column only**.  To keep pre-addition frames passing
-validation, a new column must set **both** ``nullable=True`` and
-``required=False``.  ``strict=True`` rejects unexpected columns on write.
-
-Implementation decisions (QUANT-12 §5):
-- ``trade_date`` / date columns convert via ``_safe_date_parser`` accepting
-  datetime64 / date / ISO string and rejecting integers & tz-aware inputs.
-- Datetime columns reject tz-aware timestamps (naive Beijing time).
-- Numeric columns use ``coerce=False`` so non-integral floats in integer
-  columns raise instead of silently truncating.
-- Factor DuckDB view names: ``factor_{sanitized}`` via ``FactorViewRegistry``.
+结构与类型约定：
+- Schema 仅允许向后兼容增列（新列须同时设置 ``nullable=True`` 与 ``required=False``），``strict=True`` 拒绝未声明列。
+- PIT 约定：基本面与事件表以 ``ann_date`` / ``report_date``（或 ``visible_from``）标识可见时点，防止未来函数。
+- 日期/时间列通过 ``_safe_date_parser`` / ``_safe_datetime_parser`` 转为无时区北京时间，拒绝整型与带时区输入。
+- 数值列启用 ``coerce=False``，整型列遇非整数浮点直接报错不截断；可空整型/数值列统一使用 ``Column(float, ..., nullable=True)``。
+- 因子 DuckDB 视图名通过 ``FactorViewRegistry`` 规范化为 ``factor_{sanitized}``。
 """
 
 from __future__ import annotations
@@ -44,9 +36,7 @@ from core.asset_rules import (
 )
 from core.types import QualityFlag
 
-# ---------------------------------------------------------------------------
-# quality_flag — int64 bitmask, 5 bits, CLEAN = 0 (§47.15)
-# ---------------------------------------------------------------------------
+# --- quality_flag 位掩码（int64，5 位，CLEAN = 0） ---
 QUALITY_FLAG_BITS: dict[str, int] = {
     "C02_COVERAGE": int(QualityFlag.C02_COVERAGE),
     "C05_NULL_RATE": int(QualityFlag.C05_NULL_RATE),
@@ -55,11 +45,11 @@ QUALITY_FLAG_BITS: dict[str, int] = {
     "K01_OVERNIGHT_GAP": int(QualityFlag.K01_OVERNIGHT_GAP),
 }
 CLEAN: int = int(QualityFlag.CLEAN)
-QUALITY_FLAG_MAX: int = 31  # 5 bits -> value < 32
+QUALITY_FLAG_MAX: int = 31  # 5 个标志位 -> 取值 < 32
 
 
 def _quality_flag_column() -> Column:
-    """Shared quality_flag column: int64 bitmask, 5 bits, not-null."""
+    """公共质量标志列：5 位 int64 位掩码，非空。"""
     return Column(
         int,
         checks=[
@@ -70,9 +60,7 @@ def _quality_flag_column() -> Column:
     )
 
 
-# ---------------------------------------------------------------------------
-# Safe date / datetime coercion
-# ---------------------------------------------------------------------------
+# --- 日期 / 时间安全转换 ---
 _MISSING_LOOKING_TOKENS = frozenset(
     {
         "",
@@ -90,7 +78,7 @@ _MISSING_LOOKING_TOKENS = frozenset(
 
 
 def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
-    """Reject numeric dtypes, tz-aware elements, and missing-looking strings."""
+    """拒绝数值类型、带时区元素及伪缺失字符串。"""
     if series.dtype.kind in "iufb":
         if series.isna().all():
             return
@@ -119,7 +107,7 @@ def _reject_numeric_and_bad_objects(series: pd.Series, kind: str) -> None:
 
 
 def _safe_date_parser(series: pd.Series) -> pd.Series:
-    """Convert to ``datetime.date``, rejecting numeric, tz-aware, and garbage strings."""
+    """转为 ``datetime.date``，拒绝数值、带时区及非法字符串。"""
     _reject_numeric_and_bad_objects(series, "date")
     mask = series.isna()
     result = pd.Series(index=series.index, dtype="object")
@@ -140,7 +128,7 @@ def _safe_date_parser(series: pd.Series) -> pd.Series:
 
 
 def _safe_datetime_parser(series: pd.Series) -> pd.Series:
-    """Convert to naive ``datetime64``, rejecting numeric and tz-aware input."""
+    """转为无时区 ``datetime64``，拒绝数值与带时区输入。"""
     _reject_numeric_and_bad_objects(series, "datetime")
     mask = series.isna()
     result = pd.Series(index=series.index, dtype="datetime64[ns]")
@@ -158,7 +146,7 @@ def _safe_datetime_parser(series: pd.Series) -> pd.Series:
 
 
 def _date_column(nullable: bool = False) -> Column:
-    """Date column with safe coercion (rejects int / tz-aware)."""
+    """带安全转换器的日期列（拒绝整型与带时区输入）。"""
     return Column(
         pa.Date,
         coerce=False,
@@ -168,7 +156,7 @@ def _date_column(nullable: bool = False) -> Column:
 
 
 def _datetime_column(nullable: bool = False) -> Column:
-    """Datetime column with safe coercion (rejects int / tz-aware)."""
+    """带安全转换器的时间戳列（拒绝整型与带时区输入）。"""
     return Column(
         pa.DateTime,
         coerce=False,
@@ -177,9 +165,7 @@ def _datetime_column(nullable: bool = False) -> Column:
     )
 
 
-# ---------------------------------------------------------------------------
-# Shared checks
-# ---------------------------------------------------------------------------
+# --- 公共校验规则 ---
 _equity_ticker_check = Check(
     validate_equity_ticker,
     element_wise=True,
@@ -229,7 +215,7 @@ _bs_flag_check = Check.isin(["B", "S", "N", "A"], name="bs_flag")
 
 
 def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSchema:
-    """Build a table schema with standard coerce=False / strict=True / unique."""
+    """构建统一配置的 DataFrameSchema（coerce=False / strict=True / unique）。"""
     return DataFrameSchema(
         columns,
         coerce=False,
@@ -239,9 +225,7 @@ def _table(columns: dict, unique: list | None = None, **kwargs) -> DataFrameSche
     )
 
 
-# ---------------------------------------------------------------------------
-# Legacy <-> Canonical alias resolution
-# ---------------------------------------------------------------------------
+# --- 旧表名与规范表名别名映射 ---
 LEGACY_TO_CANONICAL: dict[str, str] = {
     "bars_daily": "cn_stock_bars_daily",
     "bars_minute": "cn_stock_bars_minute",
@@ -264,16 +248,12 @@ TABLE_ALIASES: dict[str, str] = {
 
 
 def resolve_table_name(name: str) -> str:
-    """Resolve legacy short table names (e.g. ``bars_daily``) to canonical."""
+    """将旧版短表名（如 ``bars_daily``）解析为规范表名。"""
     return LEGACY_TO_CANONICAL.get(name, name)
 
 
 class _AliasedDict(dict):
-    """Dict storing only canonical keys while transparently resolving legacy names.
-
-    ``len(d)``, ``iter(d)``, ``set(d)`` yield canonical keys only; ``d[legacy]``,
-    ``legacy in d``, ``d.get(legacy)`` resolve via ``LEGACY_TO_CANONICAL``.
-    """
+    """仅存储规范表名键、同时透明兼容旧短表名查询（``in`` / ``[]`` / ``get``）的字典。"""
 
     def __contains__(self, key: object) -> bool:
         if super().__contains__(key):
@@ -295,17 +275,13 @@ class _AliasedDict(dict):
         return default
 
 
-# ===========================================================================
-# 1. Calendar (1 table)
-# ===========================================================================
+# --- 1. 交易日历 (1 张) ---
 CALENDAR_SCHEMA = _table(
     {"trade_date": _date_column()},
     unique=["trade_date"],
 )
 
-# ===========================================================================
-# 2. A-share Stock Core & Status (6 tables)
-# ===========================================================================
+# --- 2. A 股核心行情与状态 (6 张) ---
 CN_STOCK_BASIC_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
@@ -410,9 +386,7 @@ CORPORATE_ACTIONS_SCHEMA = _table(
     unique=["ticker", "ex_date", "event_type"],
 )
 
-# ===========================================================================
-# 3. Stock Index / Industry / Concept (4 tables)
-# ===========================================================================
+# --- 3. 指数 / 行业 / 成分权重 (4 张) ---
 CN_STOCK_INDEX_BASIC_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_index_ticker_check, nullable=False),
@@ -470,9 +444,7 @@ CN_STOCK_INDEX_WEIGHTS_SCHEMA = _table(
     unique=["index_code", "ticker", "trade_date"],
 )
 
-# ===========================================================================
-# 4. Stock Fundamental PIT Tables (7 tables — unified cn_stock_fundamental_*)
-# ===========================================================================
+# --- 4. 股票基本面 PIT 表 (7 张，统一前缀 cn_stock_fundamental_*) ---
 CN_STOCK_FUNDAMENTAL_INCOME_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
@@ -626,9 +598,7 @@ CN_STOCK_FUNDAMENTAL_CONSENSUS_SCHEMA = _table(
     unique=["ticker", "trade_date"],
 )
 
-# ===========================================================================
-# 5. Stock Special Flows / Sentiment / Chips (9 tables, formerly ext/)
-# ===========================================================================
+# --- 5. 资金流 / 情绪 / 筹码 (9 张) ---
 CN_STOCK_AUCTION_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
@@ -785,9 +755,7 @@ CN_STOCK_CHIPS_PERF_SCHEMA = _table(
     unique=["ticker", "trade_date"],
 )
 
-# ===========================================================================
-# 6. Stock Holders & Capital Events — #29 Split Tables (8 tables)
-# ===========================================================================
+# --- 6. 股东与资本运作事件 (8 张) ---
 CN_STOCK_HOLDER_NUM_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
@@ -913,9 +881,7 @@ CN_STOCK_RESEARCH_VISITS_SCHEMA = _table(
     unique=["ticker", "surv_date", "org_name"],
 )
 
-# ===========================================================================
-# 7. Stock Tick & L2 (2 tables)
-# ===========================================================================
+# --- 7. 股票逐笔与 L2 盘口 (2 张) ---
 CN_STOCK_TICK_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_stock_ticker_check, nullable=False),
@@ -962,9 +928,7 @@ CN_STOCK_TICK_L2_SCHEMA = _table(
     unique=["ticker", "trade_date", "seq"],
 )
 
-# ===========================================================================
-# 8. Independent ETF Domain (5 tables, cn_etf_pcf excluded)
-# ===========================================================================
+# --- 8. 独立 ETF 域 (5 张，不含 cn_etf_pcf) ---
 CN_ETF_BASIC_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_etf_ticker_check, nullable=False),
@@ -1049,9 +1013,7 @@ CN_ETF_TICK_SCHEMA = _table(
     unique=["ticker", "trade_date", "seq"],
 )
 
-# ===========================================================================
-# 9. OTC & Listed Public Mutual Funds (5 tables)
-# ===========================================================================
+# --- 9. 场外与上市公募基金 (5 张) ---
 CN_FUND_BASIC_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_fund_ticker_check, nullable=False),
@@ -1135,9 +1097,7 @@ CN_FUND_PORTFOLIO_SCHEMA = _table(
     unique=["ticker", "end_date", "symbol"],
 )
 
-# ===========================================================================
-# 10. Futures (4 tables, preserved) & Factors (1 table, sibling dir)
-# ===========================================================================
+# --- 10. 期货 (4 张) 与因子 (1 张) ---
 BARS_DAILY_FUTURES_SCHEMA = _table(
     {
         "ticker": Column(str, checks=_futures_ticker_check, nullable=False),
@@ -1227,7 +1187,7 @@ _FACTOR_RESERVED_COLUMNS = frozenset({"ticker", "date"})
 
 
 def factor_schema(value_column: str = "value") -> DataFrameSchema:
-    """Schema for one factor's long-format value table (``ticker, date, {name}``)."""
+    """单因子长表 Schema（``ticker, date, {name}``）。"""
     if value_column in _FACTOR_RESERVED_COLUMNS:
         raise ValueError(
             f"value_column {value_column!r} collides with a fixed column name; "
@@ -1245,26 +1205,24 @@ def factor_schema(value_column: str = "value") -> DataFrameSchema:
 
 FACTOR_SCHEMA = factor_schema()
 
-# ===========================================================================
-# Canonical Registries — 52 tables (47 A-share + 4 futures + 1 factor)
-# ===========================================================================
+# --- 规范表注册表 —— 共 52 张表 (47 张 A 股相关 + 4 张期货 + 1 张因子) ---
 PARTITION_PATHS: dict[str, str] = _AliasedDict(
     {
-        # Calendar (1)
+        # 交易日历 (1)
         "cn_calendar": "asset/cn_calendar/{exchange}.parquet",
-        # Stock Core & Status (6)
+        # 股票核心行情与状态 (6)
         "cn_stock_basic": "asset/cn_stock_basic/stock_basic.parquet",
         "cn_stock_bars_daily": "asset/cn_stock_bars_daily/{date}.parquet",
         "cn_stock_bars_minute": "asset/cn_stock_bars_minute/{date}.parquet",
         "cn_stock_fundamental": "asset/cn_stock_fundamental/{month}.parquet",
         "cn_stock_daily_status": "asset/cn_stock_daily_status/{month}.parquet",
         "cn_stock_corporate_actions": "asset/cn_stock_corporate_actions/corporate_actions.parquet",
-        # Stock Index / Industry / Concept (4)
+        # 指数 / 行业 / 成分权重 (4)
         "cn_stock_index_basic": "asset/cn_stock_index_basic/index_basic.parquet",
         "cn_stock_index_bars_daily": "asset/cn_stock_index_bars_daily/{month}.parquet",
         "cn_stock_industry": "asset/cn_stock_industry/industry.parquet",
         "cn_stock_index_weights": "asset/cn_stock_index_weights/{year}.parquet",
-        # Stock Fundamental PIT (7)
+        # 股票基本面 PIT (7)
         "cn_stock_fundamental_income": "asset/cn_stock_fundamental_income/{year}.parquet",
         "cn_stock_fundamental_balance": "asset/cn_stock_fundamental_balance/{year}.parquet",
         "cn_stock_fundamental_cashflow": "asset/cn_stock_fundamental_cashflow/{year}.parquet",
@@ -1272,7 +1230,7 @@ PARTITION_PATHS: dict[str, str] = _AliasedDict(
         "cn_stock_fundamental_segment": "asset/cn_stock_fundamental_segment/{year}.parquet",
         "cn_stock_fundamental_earnings": "asset/cn_stock_fundamental_earnings/{year}.parquet",
         "cn_stock_fundamental_consensus": "asset/cn_stock_fundamental_consensus/{month}.parquet",
-        # Stock Special Flows / Sentiment / Chips (9)
+        # 资金流 / 情绪 / 筹码 (9)
         "cn_stock_auction": "asset/cn_stock_auction/{month}.parquet",
         "cn_stock_moneyflow": "asset/cn_stock_moneyflow/{month}.parquet",
         "cn_stock_hsgt_market_flow": "asset/cn_stock_hsgt_market_flow/market_flow.parquet",
@@ -1282,7 +1240,7 @@ PARTITION_PATHS: dict[str, str] = _AliasedDict(
         "cn_stock_lhb_seats": "asset/cn_stock_lhb_seats/{month}.parquet",
         "cn_stock_limit_pool": "asset/cn_stock_limit_pool/{month}.parquet",
         "cn_stock_chips_perf": "asset/cn_stock_chips_perf/{month}.parquet",
-        # Stock Holders & Capital Events (8)
+        # 股东与资本运作事件 (8)
         "cn_stock_holder_num": "asset/cn_stock_holder_num/holder_num.parquet",
         "cn_stock_top_holders": "asset/cn_stock_top_holders/{year}.parquet",
         "cn_stock_restricted_release": "asset/cn_stock_restricted_release/{year}.parquet",
@@ -1291,22 +1249,22 @@ PARTITION_PATHS: dict[str, str] = _AliasedDict(
         "cn_stock_holder_trade": "asset/cn_stock_holder_trade/{year}.parquet",
         "cn_stock_pledge": "asset/cn_stock_pledge/{year}.parquet",
         "cn_stock_research_visits": "asset/cn_stock_research_visits/{year}.parquet",
-        # Stock Tick & L2 (2)
+        # 股票逐笔与 L2 盘口 (2)
         "cn_stock_tick": "asset/cn_stock_tick/{date}.parquet",
         "cn_stock_tick_l2": "asset/cn_stock_tick_l2/{date}.parquet",
-        # Independent ETF Domain (5)
+        # 独立 ETF 域 (5)
         "cn_etf_basic": "asset/cn_etf_basic/etf_basic.parquet",
         "cn_etf_bars_daily": "asset/cn_etf_bars_daily/{date}.parquet",
         "cn_etf_bars_minute": "asset/cn_etf_bars_minute/{date}.parquet",
         "cn_etf_fundamental": "asset/cn_etf_fundamental/{month}.parquet",
         "cn_etf_tick": "asset/cn_etf_tick/{date}.parquet",
-        # OTC & Listed Mutual Funds (5)
+        # 场外与上市公募基金 (5)
         "cn_fund_basic": "asset/cn_fund_basic/fund_basic.parquet",
         "cn_fund_managers": "asset/cn_fund_managers/managers.parquet",
         "cn_fund_nav": "asset/cn_fund_nav/{month}.parquet",
         "cn_fund_dividend": "asset/cn_fund_dividend/dividend.parquet",
         "cn_fund_portfolio": "asset/cn_fund_portfolio/{year}.parquet",
-        # Futures (4) & Factors (1)
+        # 期货 (4) 与因子 (1)
         "cn_futures_bars_daily": "asset/cn_futures_bars_daily/{date}.parquet",
         "cn_futures_tick_l2": "asset/cn_futures_tick_l2/{date}.parquet",
         "cn_futures_contract_specs": "asset/cn_futures_contract_specs/contract_specs.parquet",
@@ -1433,14 +1391,12 @@ A_SHARE_TABLES: frozenset[str] = frozenset(
     k for k in SCHEMA if not k.startswith("cn_futures_") and k != "factor"
 )
 
-# ---------------------------------------------------------------------------
-# Factor DuckDB view naming (QUANT-12 §5 decision)
-# ---------------------------------------------------------------------------
+# --- 因子 DuckDB 视图命名 ---
 _non_alnum = re.compile(r"[^0-9a-zA-Z_]")
 
 
 def factor_view_name(factor_name: str) -> str:
-    """Return the DuckDB view name for *factor_name*."""
+    """返回因子对应的 DuckDB 视图名称。"""
     sanitized = _non_alnum.sub("_", factor_name)
     if sanitized and sanitized[0].isdigit():
         sanitized = f"_{sanitized}"
@@ -1448,13 +1404,13 @@ def factor_view_name(factor_name: str) -> str:
 
 
 class FactorViewRegistry:
-    """Collision-safe registry mapping factor names to DuckDB view names."""
+    """防冲突的因子名与 DuckDB 视图名注册表。"""
 
     def __init__(self) -> None:
         self._views: dict[str, str] = {}
 
     def register(self, factor_name: str) -> str:
-        """Register *factor_name* and return its view name."""
+        """注册因子名称并返回对应的视图名称。"""
         view = factor_view_name(factor_name)
         existing = self._views.get(view)
         if existing is not None and existing != factor_name:

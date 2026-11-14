@@ -1,23 +1,10 @@
-"""Tonghuashun (Fuyao / StraightFlush) source adapter — REST API raw fetcher.
+"""同花顺（扶摇 / StraightFlush）数据源适配器。
 
-Wraps the Fuyao Financial Data API (``https://fuyao.aicubes.cn``).  Key
-protocol and contract rules from ``docs/data_source/StrightFlush/``:
-
-* Auth header: ``X-api-key`` sourced from explicit ``token``, env vars
-  (``STRIGHT_FLUSH_TOKEN``, ``STRAIGHT_FLUSH_TOKEN``,
-  ``HITHINK_FINANCE_API_KEY``), or lazily from ``config/.env`` via
-  :func:`core.config.load_secrets`.
-* Response envelope: ``{"code": 0, "message": ..., "request_id": ..., "data": ...}``.
-  HTTP 429 / 5xx and business error codes ``4001`` / ``5001`` / ``5002`` /
-  ``5003`` raise retryable :class:`requests.exceptions.HTTPError` so
-  :class:`SourceAdapter` retries with exponential backoff.
-* Raw contract for A-share daily bars: explicitly sets ``adjust="none"``
-  (the API defaults to ``"forward"``) so raw prices are unadjusted and
-  idempotent.
-* Batch endpoint limit: ``/api/*/historical-batch`` allows at most **10**
-  ``thscodes`` per call.
-* Timezone: ``start`` / ``end`` query parameters are ``Asia/Shanghai`` Unix
-  millisecond timestamps.
+协议与契约要点：
+* 鉴权头 ``X-api-key`` 按显式 ``token`` → 环境变量 → ``config/.env`` 顺序解析。
+* HTTP 429 / 5xx 及业务码 ``4001/5001/5002/5003`` 触发可重试异常。
+* A 股日线显式传入 ``adjust="none"``（接口默认前复权），保证拉取未复权原始价。
+* ``/api/*/historical-batch`` 单次最多传 10 个 ``thscode``，时间参数为 ``Asia/Shanghai`` 毫秒时间戳。
 """
 
 from __future__ import annotations
@@ -41,7 +28,7 @@ __all__ = ["StraightFlushAdapter"]
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _DEFAULT_BASE_URL = "https://fuyao.aicubes.cn"
-_BATCH_SIZE = 10  # Fuyao historical-batch cap before deduplication (doc 01 §4)
+_BATCH_SIZE = 10  # historical-batch 接口单次最多 10 个代码
 _TICKER_LIST_PAGE_LIMIT = 10_000
 
 _TOKEN_ENV_KEYS = (
@@ -105,7 +92,7 @@ def _dedup_preserve_order(codes: list[str]) -> list[str]:
 
 
 class StraightFlushAdapter(SourceAdapter):
-    """Fetch source-raw market data via Tonghuashun Fuyao HTTP API."""
+    """通过同花顺扶摇 HTTP API 拉取原始行情数据。"""
 
     requests_per_second = 5.0
 
@@ -248,7 +235,7 @@ class StraightFlushAdapter(SourceAdapter):
                     thscodes,
                     start_ms,
                     end_ms,
-                    adjust="none",  # raw contract: unadjusted (doc 03 §2)
+                    adjust="none",  # 原始未复权价格
                 )
             elif asset_type == "etf":
                 df = self._fetch_batch_bars(
@@ -278,7 +265,7 @@ class StraightFlushAdapter(SourceAdapter):
                     start_ms,
                     end_ms,
                 )
-            else:  # pragma: no cover — guarded above
+            else:  # pragma: no cover
                 raise ValueError(f"unsupported asset_type: {asset_type!r}")
 
         return FetchResult(
@@ -364,7 +351,7 @@ class StraightFlushAdapter(SourceAdapter):
         return pd.DataFrame(items)
 
     def health_check(self) -> bool:
-        """Probe lightweight ticker-list metadata endpoint to verify auth & reachability."""
+        """通过轻量级代码列表接口探测鉴权与连通性。"""
         try:
             payload = self._request_json(
                 "/api/meta/tickers/list",

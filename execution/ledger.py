@@ -1,12 +1,6 @@
-"""Ledger: order state machine, cash-flow settlement, and event journal.
+"""账本模块：订单状态机、资金流结算、持仓记账与追加写事件日志。
 
-Design authority: ``docs/design/execution/ledger.md`` (§23, §29.8).
-Field-level dataclasses live in :mod:`core.types`; this module provides the
-behavioural layer — transitions, settlement, and the append-only journal.
-
-Red lines honoured:
-- No event-driven kernel; for-loop is the time model.
-- Backtest and live share one code path.
+回测与实盘共用同一套状态流转、资金结算与日级 Parquet 日志逻辑。
 """
 
 from __future__ import annotations
@@ -28,7 +22,7 @@ from core.types import (
 
 logger = logging.getLogger(__name__)
 
-# ── Order state machine (6 states) ────────────────────────────────────────────
+# --- 订单状态机（6 态） ---
 
 LEGAL_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.CREATED: frozenset({OrderStatus.SUBMITTED}),
@@ -52,14 +46,11 @@ TERMINAL_STATES: frozenset[OrderStatus] = frozenset({
 
 
 class IllegalTransition(ValueError):
-    """Raised when an order attempts an illegal status transition."""
+    """订单尝试非法状态迁移时抛出。"""
 
 
 def transition(order: Order, new_status: OrderStatus, *, reason: str = "") -> None:
-    """Apply a status transition to *order* in-place.
-
-    Raises :class:`IllegalTransition` on an illegal edge or a terminal exit.
-    """
+    """原地推进订单状态，非法迁移或终态再迁移抛出 :class:`IllegalTransition`。"""
     allowed = LEGAL_TRANSITIONS.get(order.status, frozenset())
     if new_status not in allowed:
         raise IllegalTransition(
@@ -73,14 +64,11 @@ def transition(order: Order, new_status: OrderStatus, *, reason: str = "") -> No
         order.reject_reason = reason
 
 
-# ── Cash-flow settlement ─────────────────────────────────────────────────────
+# --- 资金流结算 ---
 
 
 def freeze_cash(order: Order, account: Account, price: float | None = None) -> None:
-    """Reserve cash for a BUY order before submission.
-
-    *price* defaults to ``ref_price``; for LIMIT orders it should be the limit.
-    """
+    """下单前为买单冻结资金（未指定价格时取限价或参考价）。"""
     if order.direction != Direction.BUY:
         return
     ref = price if price is not None else (order.limit_price or order.ref_price)
@@ -96,16 +84,11 @@ def freeze_cash(order: Order, account: Account, price: float | None = None) -> N
 
 
 def settle_fill(order: Order, account: Account, trade: Trade) -> None:
-    """Settle one fill: BUY spends from frozen first, shortfall from cash.
+    """结算单笔成交：买单优先扣减冻结资金，不足部分从可用现金补足。
 
-    Frozen-cash invariant: each fill converts frozen to spent exactly once.
-    Remaining frozen is refunded by :func:`release_frozen` at terminal state.
-
-    Commission may exceed the frozen base amount (price * qty).  The excess is
-    taken from available cash so frozen never goes negative.  All validation
-    happens before any mutation — frozen survives a raise.
-
-    Raises ValueError on terminal-state orders — no fills after close.
+    不变量：所有校验先于状态变更，异常时冻结余额保持不变；终态订单禁止再成交。
+    佣金超出初始冻结金额的部分从可用现金扣除，保证冻结余额永不为负；
+    剩余冻结资金在订单进入终态时由 :func:`release_frozen` 退还。
     """
     if order.status in TERMINAL_STATES:
         raise ValueError(
@@ -119,33 +102,27 @@ def settle_fill(order: Order, account: Account, trade: Trade) -> None:
         from_frozen = min(total_cost, order.frozen_cash)
         from_cash = total_cost - from_frozen
 
-        # Validate before mutating — frozen must survive a raise.
+        # 先校验后变更，防止异常时破坏冻结资金
         if from_cash > 1e-9 and account.cash < from_cash - 1e-6:
             raise ValueError(
                 f"{order.order_id}: insufficient cash for settlement "
                 f"(need {from_cash:.2f}, have {account.cash:.2f})"
             )
 
-        # All checks passed — mutate atomically.
+        # 校验通过后执行原子更新
         order.frozen_cash -= from_frozen
         account.frozen_cash -= from_frozen
         if from_cash > 1e-9:
             account.cash -= from_cash
-    else:  # SELL
+    else:  # 卖出
         account.cash += trade.fill_price * trade.filled_qty - trade.commission
 
-    # Track cumulative commission.
     account.total_commission += trade.commission
-    # Update order fill progress.
     order.filled_qty += trade.filled_qty
 
 
 def release_frozen(order: Order, account: Account) -> None:
-    """Return remaining frozen cash at terminal state. Never overdraws.
-
-    Must only be called when *order* is in a terminal state
-    (FILLED / CANCELLED / REJECTED).
-    """
+    """订单进入终态（FILLED / CANCELLED / REJECTED）后退还剩余冻结资金。"""
     if order.status not in TERMINAL_STATES:
         raise ValueError(
             f"{order.order_id}: release_frozen requires terminal state, "
@@ -161,10 +138,9 @@ def release_frozen(order: Order, account: Account) -> None:
     order.frozen_cash = 0.0
 
 
-# ── Journal (append-only daily Parquet) ──────────────────────────────────────
+# --- 事件日志（每日追加写 Parquet） ---
 
-#: Event types that are persisted to Parquet (BAR excluded — market data has
-#: its own table; ACCOUNT_UPDATE is day-end snapshot only).
+#: 需持久化至 Parquet 的事件类型（排除 BAR 行情与仅日终快照的 ACCOUNT_UPDATE）
 PERSIST_TYPES: frozenset[EventType] = frozenset({
     EventType.SESSION_START,
     EventType.SESSION_END,
@@ -182,16 +158,7 @@ PERSIST_TYPES: frozenset[EventType] = frozenset({
 
 
 class Journal:
-    """Append-only event journal backed by daily Parquet files.
-
-    Usage::
-
-        j = Journal("./journal")
-        j.log(entry)
-        j.flush()          # force write buffer to disk
-
-    Files are named ``{YYYY-MM-DD}.parquet`` under *root_dir*.
-    """
+    """基于每日 ``{YYYY-MM-DD}.parquet`` 的追加写事件日志。"""
 
     FLUSH_SIZE = 256
 
@@ -202,7 +169,7 @@ class Journal:
         self._flush_size = flush_size or self.FLUSH_SIZE
 
     def log(self, entry: JournalEntry) -> None:
-        """Buffer *entry* if its type is persisted; flush when buffer is full."""
+        """缓存需持久化的事件，达到批量阈值时自动刷盘。"""
         if entry.event_type not in PERSIST_TYPES:
             return
         self._buffer.append(self._entry_to_row(entry))
@@ -210,12 +177,12 @@ class Journal:
             self.flush()
 
     def flush(self) -> None:
-        """Write buffered rows to their daily Parquet files (append semantics)."""
+        """将缓冲事件按日期分组追加写入对应 Parquet 文件。"""
         if not self._buffer:
             return
         import pandas as pd
 
-        # Group by date so each day's file is self-contained.
+        # 按日期分组，保证每日日志文件自包含
         by_date: dict[str, list[dict]] = {}
         for row in self._buffer:
             d = row["_date"]
@@ -236,7 +203,7 @@ class Journal:
         self._buffer.clear()
 
     def read_day(self, day: str | date):
-        """Read one day's journal as a DataFrame (empty if no file)."""
+        """读取指定日期的日志 DataFrame，文件不存在时返回空表。"""
         import pandas as pd
 
         day_str = str(day)
@@ -262,13 +229,13 @@ class Journal:
 
 
 def _safe_json(obj) -> str:
-    """Best-effort JSON serialisation for Parquet payload column."""
+    """尽力将 payload 序列化为 JSON 字符串。"""
     import json
 
     def _default(o):
         if isinstance(o, datetime):
             return o.isoformat()
-        if hasattr(o, "value"):  # Enum
+        if hasattr(o, "value"):  # 枚举类型
             return o.value
         if hasattr(o, "__dict__"):
             return {k: v for k, v in o.__dict__.items() if not k.startswith("_")}
@@ -277,16 +244,14 @@ def _safe_json(obj) -> str:
     return json.dumps(obj, default=_default, ensure_ascii=False)
 
 
-# ── Ledger: in-memory account + position bookkeeping ─────────────────────────
+# --- 内存账本：账户与持仓记账 ---
 
 
 class SimAccount:
-    """Convenience wrapper: account + positions with independently tracked NAV.
+    """模拟账户账本：独立追踪净值（NAV）与持仓。
 
-    ``nav`` is a running ledger balance updated by operation deltas
-    (settlement fees, mark-to-market P&L), not derived from component sums.
-    The identity ``cash + frozen + Σ market_value == nav`` is therefore a
-    real cross-check — it fails if settlement corrupts any pool.
+    ``nav`` 随费用与盯市盈亏增量独立更新，而非由组件求和派生，
+    因此恒等式 ``cash + frozen + Σ market_value == nav`` 可用于交叉校验结算一致性。
     """
 
     def __init__(self, cash: float, account_id: str = "sim"):
@@ -296,7 +261,7 @@ class SimAccount:
             cash=cash,
         )
         self._positions: dict[str, Position] = {}  # ticker -> Position
-        self._nav = cash  # independently tracked running balance
+        self._nav = cash  # 独立追踪的运行净值
 
     @property
     def cash(self) -> float:
@@ -312,7 +277,7 @@ class SimAccount:
 
     @property
     def nav(self) -> float:
-        """Independently tracked NAV — not derived from cash + market_value."""
+        """独立追踪的账本净值（非 cash + market_value 派生）。"""
         return self._nav
 
     @property
@@ -324,7 +289,7 @@ class SimAccount:
         return dict(self._positions)
 
     def mark_to_market(self, market_value: float) -> None:
-        """Set a synthetic single-position market value.  Adjusts tracked NAV."""
+        """更新合成持仓市值并同步调整追踪净值。"""
         if "__synthetic__" not in self._positions:
             self._positions["__synthetic__"] = Position(
                 portfolio_id="sim",
@@ -340,7 +305,7 @@ class SimAccount:
         self, ticker: str, quantity: int, avg_cost: float,
         market_value: float = 0.0,
     ) -> None:
-        """Create or update a position entry.  Adjusts tracked NAV by Δmv."""
+        """创建或更新持仓，并按市值变化量同步调整追踪净值。"""
         old_mv = self._positions[ticker].market_value if ticker in self._positions else 0.0
         self._positions[ticker] = Position(
             portfolio_id=self._account.account_id,
@@ -352,12 +317,7 @@ class SimAccount:
         self._nav += market_value - old_mv
 
     def settle_fill(self, order: Order, trade: Trade) -> None:
-        """Settle a fill: cash-flow + position bookkeeping.
-
-        Position market_value moves at *mark price* (the implied price from the
-        existing position), not at fill price.  The price difference between
-        fill and mark is booked to tracked NAV as realized P&L.
-        """
+        """结算成交并更新持仓：按现有持仓隐含盯市价增减市值，成交价差计入已实现盈亏。"""
         settle_fill(order, self._account, trade)
         self._nav -= trade.commission
 
@@ -375,12 +335,11 @@ class SimAccount:
                 total_cost = pos.avg_cost * pos.quantity + fill_value
                 pos.quantity = total_qty
                 pos.avg_cost = total_cost / total_qty if total_qty else 0.0
-                # New shares enter at mark price, not cost basis.
+                # 新增股数按原盯市价入账，成交价与盯市价差额计入即时盈亏
                 pos.market_value += mark_price * trade.filled_qty
-                # Instant P&L: bought below/above mark.
                 self._nav += (mark_price - trade.fill_price) * trade.filled_qty
             else:
-                # New position — initial mark = fill price (no instant P&L).
+                # 新建仓位：初始盯市价等于成交价，无即时盈亏
                 self._positions[ticker] = Position(
                     portfolio_id=trade.portfolio_id,
                     ticker=ticker,
@@ -388,28 +347,27 @@ class SimAccount:
                     avg_cost=trade.fill_price,
                     market_value=fill_value,
                 )
-        else:  # SELL
+        else:  # 卖出
             if ticker in self._positions:
                 pos = self._positions[ticker]
                 mark_price = (
                     pos.market_value / pos.quantity if pos.quantity > 0
                     else trade.fill_price
                 )
-                # Proportional market-value reduction at mark price.
+                # 按盯市价等比例扣减市值，成交价差计入已实现盈亏
                 pos.market_value -= mark_price * trade.filled_qty
                 pos.quantity -= trade.filled_qty
-                # Realized P&L: sold above/below mark.
                 self._nav += (trade.fill_price - mark_price) * trade.filled_qty
                 if pos.quantity <= 0:
-                    # Absorb floating-point residue before close.
+                    # 清仓前吸收浮点残差
                     self._nav -= pos.market_value
                     del self._positions[ticker]
 
     def release_frozen(self, order: Order) -> None:
-        """Release remaining frozen cash.  No NAV change (internal transfer)."""
+        """释放订单剩余冻结资金（内部划转，不改变净值）。"""
         release_frozen(order, self._account)
 
     def check_identity(self, atol: float = 1e-6) -> bool:
-        """Return True if ``cash + frozen + Σ market_value == nav``."""
+        """校验账本恒等式 ``cash + frozen + Σ market_value == nav`` 是否成立。"""
         computed = self._account.cash + self._account.frozen_cash + self.market_value
         return abs(computed - self._nav) < atol

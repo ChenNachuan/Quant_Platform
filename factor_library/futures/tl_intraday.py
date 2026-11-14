@@ -10,7 +10,7 @@ def compute_adx(
     bars: pd.DataFrame,
     period: int = 14,
 ) -> pd.DataFrame:
-    """Compute the report's rolling-ATR, exponentially smoothed DMI/ADX."""
+    """计算研报定义的滚动 ATR 与指数平滑 DMI/ADX。"""
     high = bars["high"].astype(float)
     low = bars["low"].astype(float)
     close = bars["close"].astype(float)
@@ -28,9 +28,7 @@ def compute_adx(
         ],
         axis=1,
     ).max(axis=1)
-    # The report explicitly uses a 14-minute rolling average for ATR and an
-    # exponentially weighted average for directional movement and DX.  This
-    # differs from Wilder's 1 / period smoothing used by many TA libraries.
+    # 按研报口径：ATR 取滚动均值，动向值与 DX 取指数加权均值（区别于 Wilder 1/period 平滑）
     atr = true_range.rolling(period, min_periods=period).mean()
     plus_smoothed = plus_dm.ewm(span=period, adjust=False, min_periods=period).mean()
     minus_smoothed = minus_dm.ewm(span=period, adjust=False, min_periods=period).mean()
@@ -57,7 +55,7 @@ def compute_macd_turning_points(
     signal: int = 9,
     rising_minutes: int = 3,
 ) -> pd.DataFrame:
-    """Compute DIF/DEA/BAR and the two momentum turning points in the report."""
+    """计算 MACD (DIF/DEA/BAR) 及研报定义的两个动量拐点（柱线翻色与柱高见顶回落）。"""
     close = close.astype(float)
     dif = (
         close.ewm(span=fast, adjust=False, min_periods=fast).mean()
@@ -87,7 +85,7 @@ def compute_macd_turning_points(
 
 
 def compute_daily_efficiency_ratio(bars: pd.DataFrame) -> pd.Series:
-    """Kaufman efficiency ratio computed from each day's minute close path."""
+    """基于每日分钟收盘价路径计算 Kaufman 效率系数（净位移 / 总路径长度）。"""
     dates = pd.Index(pd.to_datetime(bars.index).date, name="date")
 
     def _one_day(close: pd.Series) -> float:

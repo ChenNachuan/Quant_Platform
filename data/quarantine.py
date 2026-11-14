@@ -1,13 +1,9 @@
-"""Quarantine — rejected batches with repair paths (S5).
+"""隔离区管理 — 持久化被 DQC 拦截的批次并提供修复路径。
 
-``quarantine/{asset_type}/{date}.parquet`` + ``.rejection.json`` — rejected
-batches are saved (not dropped) for T+30 auto-cleanup.
-
-Repair paths (S5, no DQC in this module):
-- **A** (source broken): fix upstream, ``fetch(force=True)`` re-downloads.
-- **B** (rules too strict): ``load_quarantine`` → ``recheck`` with a
-  caller-supplied validator.  DQC rules/engine are S9-T2/S9-T3.
-- **C** (don't fix): T+30 auto-clean via ``cleanup_quarantine``.
+存储格式：``quarantine/{asset_type}/{date}.parquet`` 与 ``.rejection.json``，供 T+30 自动清理或人工修复：
+- 路径 A（上游源修复）：修复源站后强制重拉；
+- 路径 B（规则过严）：``load_quarantine`` 读出后由调用方传入校验器执行 ``recheck``；
+- 路径 C（放弃修复）：通过 ``cleanup_quarantine`` 按生命周期策略过期清理。
 """
 
 from __future__ import annotations
@@ -44,7 +40,7 @@ def quarantine_path(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """Return the quarantine parquet path."""
+    """返回隔离区 Parquet 文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
     return Path(data_root) / QUARANTINE_ROOT / asset_type / f"{date_str}.parquet"
 
@@ -54,7 +50,7 @@ def rejection_path(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """Return the rejection metadata JSON path."""
+    """返回拦截元数据 JSON 文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
     return Path(data_root) / QUARANTINE_ROOT / asset_type / f"{date_str}.rejection.json"
 
@@ -66,15 +62,14 @@ def save_quarantine(
     rejection_meta: dict[str, Any],
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> tuple[Path, Path]:
-    """Save a rejected batch to quarantine (parquet + rejection metadata).
+    """原子写入被拦截批次的数据帧与拦截元数据。
 
     Parameters
     ----------
     df : pd.DataFrame
-        Normalized DataFrame (the one that DQC rejected).
+        经标准化后被 DQC 拦截的数据帧。
     rejection_meta : dict
-        Must carry: data_date, asset_type, reject_time, batch_status,
-        total_rows, rows_would_drop, drop_rate, hard_rules_triggered[].
+        须包含 data_date、asset_type、reject_time、batch_status、total_rows、rows_would_drop、drop_rate、hard_rules_triggered。
     """
     target = quarantine_path(asset_type, trade_date, data_root)
     meta_path = rejection_path(asset_type, trade_date, data_root)
@@ -84,7 +79,7 @@ def save_quarantine(
     meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
     with FileLock(target):
         try:
-            # parquet: tmp → fsync → replace
+            # 数据文件原子写：tmp -> fsync -> replace
             df.to_parquet(tmp, **PARQUET_WRITE_CONFIG)
             fd = os.open(tmp, os.O_RDONLY)
             try:
@@ -93,7 +88,7 @@ def save_quarantine(
                 os.close(fd)
             os.replace(tmp, target)
 
-            # metadata: tmp → fsync → replace (same lock)
+            # 元数据文件原子写：同锁内 tmp -> fsync -> replace
             meta_tmp.write_text(
                 json.dumps(rejection_meta, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
@@ -105,7 +100,7 @@ def save_quarantine(
                 os.close(fd)
             os.replace(meta_tmp, meta_path)
 
-            # dir fsync — persist both renames
+            # 目录 fsync 确保持久化重命名
             fd = os.open(target.parent, os.O_RDONLY)
             try:
                 os.fsync(fd)
@@ -127,11 +122,7 @@ def load_quarantine(
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
-    """Load a quarantined batch. Returns ``(df, rejection_meta)`` or ``None``.
-
-    Repair path B: the caller passes the returned df to :func:`recheck`
-    with a new validator.
-    """
+    """读取隔离区批次，返回 ``(df, rejection_meta)``，不存在时返回 ``None``。"""
     target = quarantine_path(asset_type, trade_date, data_root)
     meta_path = rejection_path(asset_type, trade_date, data_root)
     if not target.exists():
@@ -152,15 +143,7 @@ def recheck(
     asset_type: str,
     trade_date: date,
 ) -> dict[str, Any]:
-    """Re-validate a quarantined batch with a caller-supplied *validator*.
-
-    Repair path B.  The *validator* is a callable ``(df) -> dict`` returning
-    a verdict dict (e.g. ``{"passed": bool, "reasons": [...]}``).  DQC
-    rules/engine are S9-T2/S9-T3 — this is the entry point only.
-
-    Returns the validator's verdict dict.  Does NOT write to asset/ or
-    delete from quarantine — the caller decides based on the verdict.
-    """
+    """使用调用方提供的 *validator* 重检隔离区批次，仅返回判定结果字典，不主动写资产层或删隔离文件。"""
     verdict = validator(df)
     logger.info("recheck %s/%s: %s", asset_type, trade_date, verdict)
     return verdict
@@ -173,15 +156,7 @@ def cleanup_quarantine(
     today: date | None = None,
     config_path: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
-    """Delete expired quarantine files (S4: 30d from lifecycle.yaml).
-
-    Thin wrapper over ``storage_ops.cleanup_expired`` — no days literal in
-    Python.  Covers repair path C (T+30 auto-clean).
-
-    Scope: passes ``subdir=quarantine`` so ``cleanup_expired`` only walks and
-    deletes within this subtree while keeping policy-relative paths rooted at
-    *data_root* (finding 1: scoping the deletion, not the returned list).
-    """
+    """清理过期隔离区文件（依据 ``lifecycle.yaml`` 策略，通过 ``subdir=quarantine`` 限定清理子树）。"""
     q_root = Path(data_root) / QUARANTINE_ROOT
     if not q_root.exists():
         return []

@@ -1,4 +1,4 @@
-"""Signal assembly and end-to-end backtest for the TL report reproduction."""
+"""TL 研报复现的信号构建与端到端回测。"""
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ def _previous_day_close_quantiles(
 
 
 def build_adx_target(bars: pd.DataFrame, config: TLIntradayConfig) -> pd.Series:
+    """构建 ADX 趋势策略目标仓位（上穿开仓、下穿或触及前日极端分位/尾盘平仓）。"""
     indicator = compute_adx(
         bars, period=config.minute_window(config.adx_period_minutes)
     )
@@ -86,6 +87,7 @@ def build_momentum_target(
     bars: pd.DataFrame,
     config: TLIntradayConfig,
 ) -> pd.Series:
+    """构建 MACD 动量拐点策略目标仓位（首拐点建仓、同向后续拐点逐次减仓、翻色或尾盘平仓）。"""
     indicator = compute_macd_turning_points(
         bars["close"],
         fast=config.minute_window(config.macd_fast_minutes),
@@ -132,6 +134,7 @@ def adx_stop_dates(
     base_result: IntradayBacktestResult,
     config: TLIntradayConfig,
 ) -> tuple[set, float]:
+    """根据样本内日收益分位阈值计算 ADX 策略停机日期。"""
     returns = base_result.daily_returns
     in_sample = returns.loc[: config.in_sample_end]
     threshold = float(in_sample.quantile(config.adx_stop_quantile))
@@ -149,6 +152,7 @@ def momentum_stop_dates(
     bars: pd.DataFrame,
     config: TLIntradayConfig,
 ) -> tuple[set, float, pd.DataFrame]:
+    """根据滞后移动平均效率系数（ER）分位阈值计算动量策略停机日期。"""
     daily_er = compute_daily_efficiency_ratio(bars)
     er_mean = daily_er.rolling(
         config.er_mean_days, min_periods=config.er_mean_days
@@ -165,6 +169,7 @@ def run_report_strategies(
     bars: pd.DataFrame,
     config: TLIntradayConfig,
 ) -> dict[str, object]:
+    """运行 ADX、MACD 动量及停机过滤后的等权组合策略回测。"""
     adx_target = build_adx_target(bars, config)
     momentum_target = build_momentum_target(bars, config)
     common_kwargs = {
