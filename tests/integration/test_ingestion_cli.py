@@ -670,6 +670,91 @@ class TestAmazingPullAndAdapters:
         )
         assert wm["cn_stock_bars_daily"] == "2025-03-04"
 
+    def test_amazing_pull_calendar_integer_dates_and_default_cache_under_raw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("USER", "demo_user")
+        monkeypatch.setenv("PASSWORD", "demo_secret")
+        monkeypatch.setenv("HOST", "127.0.0.1")
+        monkeypatch.setenv("PORT", "8000")
+
+        class IntCalendarBaseData:
+            def get_calendar(self):
+                return [19901219, 20261112, 20261113, "2026-11-16", 20261117.0]
+
+        class DummyMarketData:
+            def __init__(self, _cal):
+                pass
+
+        class DummyInfoData:
+            pass
+
+        fake_ad = types.ModuleType("AmazingData")
+        fake_ad.constant = SimpleNamespace(
+            Period=SimpleNamespace(day=SimpleNamespace(value="day"))
+        )
+        fake_ad.login = MagicMock()
+        fake_ad.logout = MagicMock()
+        fake_ad.BaseData = IntCalendarBaseData
+        fake_ad.MarketData = DummyMarketData
+        fake_ad.InfoData = DummyInfoData
+        monkeypatch.setitem(sys.modules, "AmazingData", fake_ad)
+
+        rc = amazing_pull.main(
+            [
+                "--tables",
+                "cn_calendar",
+                "--date",
+                "2026-11-13",
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        cal_out = (
+            tmp_path / "raw" / "amazingdata" / "cn_calendar" / "2026-11-13.parquet"
+        )
+        assert cal_out.exists()
+        df = pd.read_parquet(cal_out)
+        assert list(pd.to_datetime(df["trade_date"]).dt.date) == [date(2026, 11, 13)]
+        assert (tmp_path / "raw" / "amazingdata" / "_cache").is_dir()
+        assert not (tmp_path / "amazingdata_cache").exists()
+
+        # _pull_calendar 直接兼容整型 / 浮点 / ISO 字符串
+        win = amazing_pull._pull_calendar(
+            IntCalendarBaseData(), date(2026, 11, 12), date(2026, 11, 17)
+        )
+        assert list(win["trade_date"]) == [
+            date(2026, 11, 12),
+            date(2026, 11, 13),
+            date(2026, 11, 16),
+            date(2026, 11, 17),
+        ]
+
+    def test_amazingdata_normalizer_supports_etf_and_int_calendar(self):
+        from data.normalizers.amazingdata_normalizer import normalize
+
+        etf_raw = pd.DataFrame(
+            {
+                "code": ["510300.SH"],
+                "kline_time": ["2026-11-13"],
+                "open": [4.0],
+                "high": [4.1],
+                "low": [3.9],
+                "close": [4.05],
+                "volume": [1000],
+                "amount": [4050.0],
+            }
+        )
+        etf_norm = normalize("etf", etf_raw)
+        assert len(etf_norm) == 1
+        assert etf_norm["ticker"].iloc[0] == "510300.SH"
+
+        cal_norm = normalize(
+            "calendar", pd.DataFrame({"cal_date": [20261113, "20261116"]})
+        )
+        assert list(cal_norm["trade_date"]) == [date(2026, 11, 13), date(2026, 11, 16)]
+
     def test_tushare_enrichment_and_canonical_reference_overrides(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

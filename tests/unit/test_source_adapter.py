@@ -363,7 +363,7 @@ class TestTushareAdapter:
 class TestAmazingdataAdapter:
     def test_list_asset_types(self):
         a = AmazingdataAdapter()
-        assert a.list_asset_types() == ["stock", "option"]
+        assert a.list_asset_types() == ["stock", "etf", "calendar", "option"]
 
     def test_requests_per_second(self):
         assert AmazingdataAdapter.requests_per_second == 2.0
@@ -418,6 +418,105 @@ class TestAmazingdataAdapter:
         a = AmazingdataAdapter()
         with pytest.raises(ValueError, match="unsupported"):
             a.fetch("crypto", date(2026, 1, 5))
+
+    def test_default_local_path_under_raw_amazingdata_cache(self, tmp_path: Path):
+        a = AmazingdataAdapter(data_root=tmp_path)
+        assert a._local_path == f"{tmp_path / 'raw' / 'amazingdata' / '_cache'}/"
+
+    def test_auto_mode_uses_docker_bridge_when_sdk_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from data.raw import raw_path
+
+        a = AmazingdataAdapter(data_root=tmp_path)
+        monkeypatch.setattr(a, "_can_import_sdk", lambda: False)
+        captured: dict[str, object] = {}
+        target_day = date(2026, 11, 13)
+
+        def fake_run(
+            cmd, *, cwd=None, capture_output=None, text=None, timeout=None, check=None
+        ):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = cwd
+            out = raw_path("amazingdata", "cn_etf_bars_daily", target_day, tmp_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                {
+                    "code": ["510300.SH"],
+                    "kline_time": ["2026-11-13"],
+                    "open": [4.0],
+                    "high": [4.1],
+                    "low": [3.9],
+                    "close": [4.05],
+                    "volume": [1000],
+                    "amount": [4050.0],
+                }
+            ).to_parquet(out, index=False)
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="AmazingData login ok\n", stderr=""
+            )
+
+        monkeypatch.setattr(
+            "data.adapters.amazingdata_adapter.subprocess.run", fake_run
+        )
+        result = a.fetch("etf", target_day)
+
+        cmd = captured["cmd"]
+        assert cmd[:2] == ["docker", "compose"]
+        assert "run" in cmd and "--rm" in cmd
+        assert "amazingdata" in cmd
+        assert "/scripts/ingestion/amazing_pull.py" in cmd
+        assert (
+            "--tables" in cmd and cmd[cmd.index("--tables") + 1] == "cn_etf_bars_daily"
+        )
+        assert "--date" in cmd and cmd[cmd.index("--date") + 1] == "2026-11-13"
+        assert "-v" in cmd
+        assert cmd[cmd.index("-v") + 1] == f"{tmp_path.resolve()}:/data"
+        assert result.source == "amazingdata"
+        assert result.asset_type == "etf"
+        assert result.row_count == 1
+        assert result.df["code"].iloc[0] == "510300.SH"
+
+    def test_docker_bridge_omits_volume_override_when_using_default_data_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import core.config as core_config
+
+        monkeypatch.setattr(core_config, "DATA_ROOT", tmp_path)
+        a = AmazingdataAdapter(mode="docker")
+        captured: dict[str, object] = {}
+        target_day = date(2026, 11, 13)
+
+        def fake_run(cmd, **_kwargs):
+            captured["cmd"] = list(cmd)
+            out = (
+                tmp_path / "raw" / "amazingdata" / "cn_calendar" / "2026-11-13.parquet"
+            )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                {"cal_date": [20261113], "trade_date": [target_day]}
+            ).to_parquet(out, index=False)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(
+            "data.adapters.amazingdata_adapter.subprocess.run", fake_run
+        )
+        res = a.fetch("calendar", target_day)
+        assert "-v" not in captured["cmd"]
+        assert res.row_count == 1
+
+    def test_docker_bridge_raises_on_nonzero_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        a = AmazingdataAdapter(data_root=tmp_path, mode="docker")
+        monkeypatch.setattr(
+            "data.adapters.amazingdata_adapter.subprocess.run",
+            lambda cmd, **_kw: subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="boom"
+            ),
+        )
+        with pytest.raises(RuntimeError, match="exit=1"):
+            a.fetch("stock", date(2026, 11, 13))
 
 
 # ---------------------------------------------------------------------------

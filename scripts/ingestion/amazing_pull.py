@@ -3,6 +3,7 @@
 容器镜像仅预装标准库、``pandas``、``pyarrow`` 与 ``AmazingData`` SDK，无宿主机 ``.venv``、
 ``pandera`` 或 ``duckdb``，因此本脚本严格保持零项目内部依赖；
 拉取的原始数据按宿主机规范布局原子写入 ``{data_root}/raw/amazingdata/{table}/{YYYY-MM-DD}.parquet``，
+SDK 本地缓存默认写入 ``{data_root}/raw/amazingdata/_cache``，
 并同步更新 ``{data_root}/raw/amazingdata/.watermarks.json``，供宿主机通过
 ``fetch_daily.py --from-raw --source amazingdata`` 或交叉校验直接消费。
 """
@@ -96,6 +97,11 @@ def raw_target_path(data_root: Path, table: str, day: date) -> Path:
     )
 
 
+def default_cache_path(data_root: Path) -> Path:
+    """返回 AmazingData SDK 本地缓存默认目录（统一归口至 ``raw/amazingdata/_cache``）。"""
+    return data_root / "raw" / "amazingdata" / "_cache"
+
+
 def atomic_write_parquet(df: pd.DataFrame, path: Path) -> Path:
     """原子写入原始 Parquet（``tmp -> fsync -> os.replace``，无外部依赖）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +190,13 @@ def _normalize_kline_result(result: Any) -> pd.DataFrame:
 def _pull_calendar(base_data: Any, start: date, end: date) -> pd.DataFrame:
     all_days = base_data.get_calendar()
     frame = pd.DataFrame({"cal_date": list(all_days)})
-    frame["trade_date"] = pd.to_datetime(frame["cal_date"], errors="coerce").dt.date
+    # SDK 实测返回 8 位整型 YYYYMMDD（如 20261113），先转字符串再解析避免按纳秒时间戳处理
+    cleaned = (
+        frame["cal_date"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    )
+    frame["trade_date"] = pd.to_datetime(
+        cleaned, format="mixed", errors="coerce"
+    ).dt.date
     frame = frame.dropna(subset=["trade_date"])
     window = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
     return window.sort_values("trade_date").reset_index(drop=True)
@@ -346,8 +358,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--local-path",
-        default="/data/amazingdata_cache",
-        help="AmazingData SDK 本地缓存目录字符串（默认 /data/amazingdata_cache）",
+        default=None,
+        help="AmazingData SDK 本地缓存目录字符串（默认 <data-root>/raw/amazingdata/_cache）",
     )
     parser.add_argument(
         "--force",
@@ -386,8 +398,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else None
     )
     data_root = Path(args.data_root)
-    local_path_str = str(args.local_path)
+    local_path_str = (
+        str(args.local_path)
+        if args.local_path is not None
+        else str(default_cache_path(data_root))
+    )
     Path(local_path_str).mkdir(parents=True, exist_ok=True)
+    if not local_path_str.endswith(("/", os.sep)):
+        local_path_str += os.sep
 
     try:
         username, password, host, port = _read_credentials()
