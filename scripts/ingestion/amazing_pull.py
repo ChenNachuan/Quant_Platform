@@ -35,6 +35,9 @@ TABLE_ALIASES: dict[str, str] = {
     "etf": "cn_etf_bars_daily",
     "etf_bars_daily": "cn_etf_bars_daily",
     "cn_etf_bars_daily": "cn_etf_bars_daily",
+    "index": "cn_stock_index_bars_daily",
+    "stock_index_bars_daily": "cn_stock_index_bars_daily",
+    "cn_stock_index_bars_daily": "cn_stock_index_bars_daily",
     "option": "option_basic",
     "option_basic": "option_basic",
 }
@@ -43,6 +46,7 @@ SUPPORTED_TABLES = (
     "cn_calendar",
     "cn_stock_bars_daily",
     "cn_etf_bars_daily",
+    "cn_stock_index_bars_daily",
     "option_basic",
 )
 
@@ -475,6 +479,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 if df.empty:
                     raise RuntimeError(f"cn_etf_bars_daily 在 {start}..{end} 无返回行")
+                _save_daily_slices(
+                    df,
+                    table=table,
+                    start=start,
+                    end=end,
+                    data_root=data_root,
+                    force=args.force,
+                )
+            elif table == "cn_stock_index_bars_daily":
+                df = _pull_kline_range(
+                    ad,
+                    base_data,
+                    market_data,
+                    security_type="EXTRA_INDEX_A",
+                    start=start,
+                    end=end,
+                    local_path=local_path_str,
+                    tickers=tickers,
+                )
+                if df.empty:
+                    raise RuntimeError(
+                        f"cn_stock_index_bars_daily 在 {start}..{end} 无返回行"
+                    )
                 _save_daily_slices(
                     df,
                     table=table,

@@ -19,7 +19,11 @@ from data.normalizers.straightflush_normalizer import (
     normalize as normalize_straightflush,
 )
 from data.raw import load_raw, save_raw
-from data.storage_schema import BARS_DAILY_SCHEMA
+from data.storage_ops import normalize_missing_floats
+from data.storage_schema import (
+    BARS_DAILY_SCHEMA,
+    CN_STOCK_INDEX_BARS_DAILY_SCHEMA,
+)
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -111,6 +115,82 @@ class TestStraightFlushNormalizer:
     def test_rejects_unsupported_asset_type(self):
         with pytest.raises(ValueError, match="unsupported asset_type"):
             normalize_straightflush("futures", pd.DataFrame())
+
+    def test_casts_integer_amount_to_float64_for_index_schema(self):
+        date_ms = int(datetime(2026, 1, 5, 0, 0, tzinfo=_SHANGHAI).timestamp() * 1000)
+        raw = pd.DataFrame(
+            {
+                "thscode": ["000300.SH", "399001.SZ"],
+                "date_ms": [date_ms, date_ms],
+                "open_price": [4000, 10900],
+                "high_price": [4020, 11000],
+                "low_price": [3990, 10850],
+                "close_price": [4016, 10968],
+                "volume": [17934199800, 55925521000],
+                "turnover": [460245657530, 885054040000],  # 整型成交额
+            }
+        )
+        out = normalize_straightflush("index", raw)
+        assert out["amount"].dtype == np.float64
+        assert out["open"].dtype == np.float64
+        schema = CN_STOCK_INDEX_BARS_DAILY_SCHEMA
+        proj = out[[c for c in schema.columns if c in out.columns]].copy()
+        for col_name, cs in schema.columns.items():
+            if col_name not in proj.columns and cs.nullable:
+                proj[col_name] = None
+        schema.validate(normalize_missing_floats(proj, "cn_stock_index_bars_daily"))
+
+    def test_normalizes_sse_csi_index_suffix_to_sh_while_preserving_pure_csi(self):
+        date_ms = int(datetime(2026, 11, 13, 0, 0, tzinfo=_SHANGHAI).timestamp() * 1000)
+        raw = pd.DataFrame(
+            {
+                "thscode": ["000510.CSI", "000860.CSI", "932000.CSI"],
+                "date_ms": [date_ms, date_ms, date_ms],
+                "open_price": [4907.23, 1142.15, 1000.0],
+                "high_price": [4913.55, 1148.20, 1010.0],
+                "low_price": [4827.96, 1134.12, 990.0],
+                "close_price": [4842.51, 1137.45, 1005.0],
+                "volume": [22980251000, 4899016300, 1000000],
+                "turnover": [594562340000.0, 87961076000.0, 20000000.0],
+            }
+        )
+        out = normalize_straightflush("index", raw)
+        assert out["ticker"].tolist() == ["000510.SH", "000860.SH", "932000.CSI"]
+
+        # 若输入已同时包含 000510.SH，不得把 000510.CSI 碰撞成重复键
+        dup_raw = pd.concat([raw.iloc[[0]], raw.iloc[[0]].assign(thscode="000510.SH")])
+        dup_out = normalize_straightflush("index", dup_raw)
+        assert dup_out["ticker"].tolist() == ["000510.CSI", "000510.SH"]
+
+
+class TestAmazingdataIndexNormalizer:
+    def test_scales_sh_index_volume_lots_to_shares_and_passes_schema(self):
+        from data.normalizers.amazingdata_normalizer import (
+            normalize as normalize_amazingdata,
+        )
+
+        raw = pd.DataFrame(
+            {
+                "code": ["000300.SH", "399001.SZ", "899050.BJ"],
+                "kline_time": ["2026-11-13", "2026-11-13", "2026-11-13"],
+                "open": [4000.0, 10900.0, 870.0],
+                "high": [4020.0, 11000.0, 880.0],
+                "low": [3990.0, 10850.0, 865.0],
+                "close": [4016.29, 10968.79, 876.33],
+                "volume": [179341998, 17725061993, 611233743],
+                "amount": [460245657530, 453925229230, 11557578700],
+            }
+        )
+        out = normalize_amazingdata("index", raw)
+        assert out["volume"].tolist() == [17934199800, 17725061993, 611233743]
+        assert str(out["volume"].dtype) == "Int64"
+        assert out["amount"].dtype == np.float64
+        schema = CN_STOCK_INDEX_BARS_DAILY_SCHEMA
+        proj = out[[c for c in schema.columns if c in out.columns]].copy()
+        for col_name, cs in schema.columns.items():
+            if col_name not in proj.columns and cs.nullable:
+                proj[col_name] = None
+        schema.validate(normalize_missing_floats(proj, "cn_stock_index_bars_daily"))
 
 
 class TestAdapterRawNormalizeRoundTrip:

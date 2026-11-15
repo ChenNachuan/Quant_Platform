@@ -270,6 +270,49 @@ class TestOneSidedNaNSemantics:
         assert result.matched_rows == 3
         assert result.mismatch_rate == 0.0
 
+    def test_zero_volume_ohlc_nan_vs_close_fill_is_exempt_when_close_matches(self):
+        primary = _bars_frame(n=2)
+        secondary = _bars_frame(n=2)
+        # 000001：零成交，主源 OHL 为 NaN，备源用 close 填充且收盘价一致 -> 豁免
+        primary.loc[0, ["open", "high", "low", "volume", "amount"]] = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            0,
+            0.0,
+        ]
+        c0 = float(primary.at[0, "close"])
+        secondary.loc[0, ["open", "high", "low", "close", "volume", "amount"]] = [
+            c0,
+            c0,
+            c0,
+            c0,
+            0,
+            0.0,
+        ]
+        res = cross_source_check(primary, secondary, "cn_etf_bars_daily")
+        assert res.mismatched_fields == {}
+
+        # 反例1：有成交（volume > 0）时单边缺少 open 仍报不一致
+        nz_a = primary.copy()
+        nz_b = secondary.copy()
+        nz_a.at[0, "volume"] = 100
+        nz_b.at[0, "volume"] = 100
+        res_nz = cross_source_check(nz_a, nz_b, "cn_etf_bars_daily")
+        assert "open" in res_nz.mismatched_fields
+
+        # 反例2：零成交但备源填充的 open != close 仍报不一致
+        bad_fill_b = secondary.copy()
+        bad_fill_b.at[0, "open"] = c0 + 0.5
+        res_bad_fill = cross_source_check(primary, bad_fill_b, "cn_etf_bars_daily")
+        assert "open" in res_bad_fill.mismatched_fields
+
+        # 反例3：零成交但双源 close 不一致，OHLC 也不豁免
+        bad_close_b = secondary.copy()
+        bad_close_b.at[0, "close"] = c0 + 0.5
+        res_bad_close = cross_source_check(primary, bad_close_b, "cn_etf_bars_daily")
+        assert {"open", "high", "low", "close"} <= set(res_bad_close.mismatched_fields)
+
 
 # ---------------------------------------------------------------------------
 # AC3 — fallback backfill: source_tag in Parquet metadata, not data column
@@ -597,3 +640,72 @@ class TestMonthlyPartitionWrite:
         d2_rows = stored[pd.to_datetime(stored["trade_date"]).dt.date == d2]
         assert d1_rows["pe_ttm"].tolist() == pytest.approx([25.0, 25.0])
         assert d2_rows["pe_ttm"].tolist() == pytest.approx([21.0, 21.0])
+
+
+class TestCalendarCrossCheck:
+    def test_calendar_matches_within_overlap_window(self):
+        primary = pd.DataFrame(
+            {
+                "trade_date": [
+                    date(2026, 11, 11),
+                    date(2026, 11, 12),
+                    date(2026, 11, 13),
+                ]
+            }
+        )
+        secondary = pd.DataFrame({"trade_date": [date(2026, 11, 13)]})
+        res = cross_source_check(
+            primary,
+            secondary,
+            "cn_calendar",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert res.matched_rows == 1
+        assert res.total_rows == 1
+        assert res.missing_in_primary == 0
+        assert res.missing_in_secondary == 0
+        assert res.mismatched_fields == {}
+        assert respond(res) == "silent"
+
+    def test_calendar_disagreement_inside_overlap_triggers_warning_or_error(self):
+        primary = pd.DataFrame(
+            {"trade_date": [date(2026, 11, 11), date(2026, 11, 12), date(2026, 11, 13)]}
+        )
+        secondary = pd.DataFrame(
+            {"trade_date": [date(2026, 11, 11), date(2026, 11, 13)]}
+        )
+        res = cross_source_check(
+            primary,
+            secondary,
+            "calendar",
+            date(2026, 11, 13),
+            secondary_source="amazingdata",
+        )
+        assert res.matched_rows == 2
+        assert res.total_rows == 3
+        assert res.missing_in_secondary == 1
+        assert "trade_date" in res.mismatched_fields
+        assert res.mismatched_fields["trade_date"].sample_tickers == ["2026-11-12"]
+        assert respond(res) == "ERROR"
+
+    def test_calendar_disjoint_or_missing_column_handled(self):
+        primary = pd.DataFrame({"trade_date": [date(2026, 11, 12)]})
+        secondary = pd.DataFrame({"trade_date": [date(2026, 11, 13)]})
+        res = cross_source_check(
+            primary,
+            secondary,
+            "cn_calendar",
+            date(2026, 11, 13),
+            secondary_source="amazingdata",
+        )
+        assert res.matched_rows == 0
+        assert res.total_rows == 2
+        assert respond(res) == "WARNING"
+
+        with pytest.raises(ValueError, match="trade_date"):
+            cross_source_check(
+                pd.DataFrame({"ticker": ["000001.SZ"]}),
+                secondary,
+                "cn_calendar",
+            )

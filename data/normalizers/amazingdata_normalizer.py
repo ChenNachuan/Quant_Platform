@@ -4,6 +4,8 @@
 - 停牌：保留源数据 ``suspend`` 标志；严禁因 ``suspend==True`` 而覆写源端提供的 ``adjfactor``。
 - 缺失值：原样保留 OHLC 中的 NaN，不做填充。
 - 复权因子：优先采用 ``NAV_ADJ_FACTOR`` 并原样保留；若无复权字段则默认 ``1.0``。
+- 指数成交量：AmazingData ``EXTRA_INDEX_A`` 日线对上交所（``.SH``）指数按手回报，
+  需 ``* 100`` 转为股；深交所（``.SZ``）/北交所（``.BJ``）按股回报保持原值，最终统一转为可空 ``Int64``。
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ import pandas as pd
 from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
+
+_SUPPORTED_ASSET_TYPES = frozenset({"stock", "etf", "index", "option", "calendar"})
 
 # AmazingData kline / fund_nav -> 统一列名
 _COLUMN_MAP: dict[str, str] = {
@@ -40,10 +44,14 @@ _NUMERIC_COLS = (
     "turnover",
 )
 
+_FLOAT_COLS = frozenset(
+    {"open", "high", "low", "close", "amount", "adjfactor", "turnover"}
+)
+
 
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-    """将 AmazingData 原始 DataFrame（``stock``、``etf``、``option`` 或 ``calendar``）转换为统一格式。"""
-    if asset_type not in ("stock", "etf", "option", "calendar"):
+    """将 AmazingData 原始 DataFrame（``stock``、``etf``、``index``、``option`` 或 ``calendar``）转换为统一格式。"""
+    if asset_type not in _SUPPORTED_ASSET_TYPES:
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
     if asset_type == "calendar":
         if raw_df.empty:
@@ -78,6 +86,16 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     for col in _NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+            if col in _FLOAT_COLS:
+                df[col] = df[col].astype("float64")
+
+    if asset_type == "index" and "volume" in df.columns and "ticker" in df.columns:
+        sh_mask = df["ticker"].astype(str).str.endswith(".SH")
+        if sh_mask.any():
+            df.loc[sh_mask, "volume"] = df.loc[sh_mask, "volume"] * 100
+
+    if "volume" in df.columns:
+        df["volume"] = df["volume"].round().astype("Int64")
 
     if "suspend" not in df.columns:
         df["suspend"] = False

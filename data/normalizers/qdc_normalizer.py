@@ -55,6 +55,10 @@ _NUMERIC_COLS = (
     "turnover",
 )
 
+_FLOAT_COLS = frozenset(
+    {"open", "high", "low", "close", "amount", "adjfactor", "turnover"}
+)
+
 
 def _normalize_qdc_ticker(value: str) -> str:
     val = str(value).strip()
@@ -135,6 +139,8 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     for col in _NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+            if col in _FLOAT_COLS:
+                df[col] = df[col].astype("float64")
 
     if "volume" in df.columns:
         df["volume"] = df["volume"].round().astype("Int64")

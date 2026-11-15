@@ -811,3 +811,147 @@ class TestAmazingPullAndAdapters:
         assert captured[0][0] == sys.executable
         assert captured[0][1].endswith("scripts/ingestion/fetch_daily.py")
         assert captured[0][2:] == ["--tables", "cn_stock_bars_daily"]
+
+    def test_etf_sparse_null_ohlc_drops_without_fallback_and_high_null_falls_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        date_ms = 1794528000000  # 2026-11-13 Asia/Shanghai
+        n = 10
+        sf_sparse = pd.DataFrame(
+            {
+                "thscode": [f"5100{i:02d}.SH" for i in range(n)],
+                "date_ms": [date_ms] * n,
+                "open_price": [float("nan")] + [2.5] * (n - 1),
+                "high_price": [float("nan")] + [2.6] * (n - 1),
+                "low_price": [float("nan")] + [2.4] * (n - 1),
+                "close_price": [2.44] + [2.55] * (n - 1),
+                "volume": [0] + [100000] * (n - 1),
+                "turnover": [0] + [255000] * (n - 1),  # 整型成交额同时验证转 float64
+            }
+        )
+        qdc_adj = pd.DataFrame(
+            {
+                "symbol": [f"5100{i:02d}.XSHG" for i in range(n)],
+                "ts": [date_ms] * n,
+                "open": [2.44] + [2.5] * (n - 1),
+                "high": [2.44] + [2.6] * (n - 1),
+                "low": [2.44] + [2.4] * (n - 1),
+                "close": [2.44] + [2.55] * (n - 1),
+                "volume": [0] + [100000] * (n - 1),
+                "amount": [0.0] + [255000.0] * (n - 1),
+                "adjfactor": [1.0] * n,
+            }
+        )
+        save_raw(
+            sf_sparse,
+            "straightflush",
+            "cn_etf_bars_daily",
+            date(2026, 11, 13),
+            tmp_path,
+        )
+        save_raw(qdc_adj, "qdc", "cn_etf_bars_daily", date(2026, 11, 13), tmp_path)
+
+        outcome = ingest_table(
+            "cn_etf_bars_daily",
+            date(2026, 11, 13),
+            from_raw=True,
+            cross_check=False,
+            data_root=tmp_path,
+        )
+        assert outcome.status == "success"
+        assert outcome.source == "straightflush"
+        assert outcome.fallback_from is None
+        assert outcome.row_count == 9
+        meta = pq.read_schema(outcome.asset_path).metadata
+        assert meta[b"source_tag"] == b"straightflush"
+
+        # 超过 20%（3/10 = 30%）时应拒收并回退至备源 qdc:backfill
+        sf_corrupt = sf_sparse.copy()
+        sf_corrupt.loc[:2, "open_price"] = float("nan")
+        save_raw(
+            sf_corrupt,
+            "straightflush",
+            "cn_etf_bars_daily",
+            date(2026, 11, 13),
+            tmp_path,
+        )
+        fb = ingest_table(
+            "cn_etf_bars_daily",
+            date(2026, 11, 13),
+            from_raw=True,
+            force=True,
+            cross_check=False,
+            data_root=tmp_path,
+        )
+        assert fb.status == "success"
+        assert fb.source == "qdc"
+        assert fb.fallback_from == "straightflush"
+        assert pq.read_schema(fb.asset_path).metadata[b"source_tag"] == b"qdc:backfill"
+
+    def test_amazing_pull_supports_index_table(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("USER", "demo_user")
+        monkeypatch.setenv("PASSWORD", "demo_secret")
+        monkeypatch.setenv("HOST", "127.0.0.1")
+        monkeypatch.setenv("PORT", "8000")
+
+        seen_sec_types: list[str] = []
+
+        class IndexBaseData:
+            def get_calendar(self):
+                return [20261113]
+
+            def get_code_list(self, security_type=None):
+                seen_sec_types.append(str(security_type))
+                return ["000300.SH"]
+
+        class IndexMarketData:
+            def __init__(self, _cal):
+                pass
+
+            def query_kline(self, code_list, **_kwargs):
+                return {
+                    code_list[0]: pd.DataFrame(
+                        {
+                            "kline_time": ["2026-11-13"],
+                            "open": [4000.0],
+                            "high": [4020.0],
+                            "low": [3990.0],
+                            "close": [4016.29],
+                            "volume": [179341998],
+                            "amount": [460245657530.9],
+                        }
+                    )
+                }
+
+        fake_ad = types.ModuleType("AmazingData")
+        fake_ad.constant = SimpleNamespace(
+            Period=SimpleNamespace(day=SimpleNamespace(value="day"))
+        )
+        fake_ad.login = MagicMock()
+        fake_ad.logout = MagicMock()
+        fake_ad.BaseData = IndexBaseData
+        fake_ad.MarketData = IndexMarketData
+        fake_ad.InfoData = lambda: object()
+        monkeypatch.setitem(sys.modules, "AmazingData", fake_ad)
+
+        rc = amazing_pull.main(
+            [
+                "--tables",
+                "cn_stock_index_bars_daily",
+                "--date",
+                "2026-11-13",
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        assert seen_sec_types == ["EXTRA_INDEX_A"]
+        assert (
+            tmp_path
+            / "raw"
+            / "amazingdata"
+            / "cn_stock_index_bars_daily"
+            / "2026-11-13.parquet"
+        ).exists()

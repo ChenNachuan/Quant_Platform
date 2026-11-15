@@ -2,14 +2,18 @@
 
 映射规则：
 * ``thscode`` -> ``ticker``（裸代码按前缀补全交易所后缀）。
+* 指数后缀对齐：对 ``000xxx.CSI``（上交所同步发布的中证指数，如 ``000510.CSI``、``000860.CSI``）
+  在不与既有 ``.SH`` 代码冲突的前提下统一映射为 ``.SH``，对齐 QDC 与 AmazingData。
 * ``date_ms``（``Asia/Shanghai`` 毫秒时间戳）-> ``trade_date``（``datetime.date``）。
 * ``volume`` 原生单位即为股，转为可空 ``Int64``。
 * 字段辨析：扶摇 ``PriceBarItem.turnover`` 实际为成交额（元），应映射为 ``amount``；
   快照字段 ``turnover_ratio_pct`` 才是换手率，映射为 ``turnover``。
-* 复权因子：适配器已显式设置 ``adjust="none"``，缺失时默认 ``1.0``，不因停牌覆写。
+* 复权因子：适配器已显式设置 ``adjust=\"none\"``，缺失时默认 ``1.0``，不因停牌覆写。
 """
 
 from __future__ import annotations
+
+import re
 
 import pandas as pd
 
@@ -43,6 +47,12 @@ _NUMERIC_COLS = (
     "adjfactor",
     "turnover",
 )
+
+_FLOAT_COLS = frozenset(
+    {"open", "high", "low", "close", "amount", "adjfactor", "turnover"}
+)
+
+_SSE_CSI_INDEX_RE = re.compile(r"^(000\d{3})\.CSI$")
 
 
 def _qualify_ticker(code: str) -> str:
@@ -115,6 +125,16 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
 
     if "ticker" in df.columns and len(df) > 0:
         df["ticker"] = df["ticker"].astype(str).map(_qualify_ticker)
+        if asset_type == "index":
+            existing_tickers = set(df["ticker"])
+            df["ticker"] = df["ticker"].map(
+                lambda t: (
+                    f"{m.group(1)}.SH"
+                    if (m := _SSE_CSI_INDEX_RE.match(t))
+                    and f"{m.group(1)}.SH" not in existing_tickers
+                    else t
+                )
+            )
 
     if "trade_date" in df.columns and len(df) > 0:
         non_null = df["trade_date"].dropna()
@@ -124,6 +144,8 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     for col in _NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+            if col in _FLOAT_COLS:
+                df[col] = df[col].astype("float64")
 
     if "volume" in df.columns:
         df["volume"] = df["volume"].round().astype("Int64")

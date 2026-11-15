@@ -1,4 +1,4 @@
-"""AmazingData 数据源适配器（A 股、ETF、交易日历与期权行情）。
+"""AmazingData 数据源适配器（A 股、ETF、指数、交易日历与期权行情）。
 
 支持两种执行模式：
 1. 容器内 / Linux x64 原生 SDK 模式（本地已安装 ``AmazingData`` 与 ``tgw`` 时）。
@@ -43,6 +43,7 @@ _ASSET_TO_TABLE: dict[str, str] = {
     "calendar": "cn_calendar",
     "stock": "cn_stock_bars_daily",
     "etf": "cn_etf_bars_daily",
+    "index": "cn_stock_index_bars_daily",
     "option": "option_basic",
 }
 
@@ -52,7 +53,7 @@ class AmazingdataAdapter(SourceAdapter):
 
     requests_per_second = 2.0  # 受限于并发连接数
 
-    _ASSET_TYPES = ["stock", "etf", "calendar", "option"]
+    _ASSET_TYPES = ["stock", "etf", "index", "calendar", "option"]
 
     def __init__(
         self,
@@ -133,7 +134,7 @@ class AmazingdataAdapter(SourceAdapter):
             df = self._fetch_stock(ad, date_str)
         elif asset_type == "option":
             df = self._fetch_option(ad, date_str)
-        elif asset_type in ("etf", "calendar"):
+        elif asset_type in ("etf", "index", "calendar"):
             raise ValueError(
                 f"direct SDK fetch for {asset_type!r} requires docker bridge mode"
             )

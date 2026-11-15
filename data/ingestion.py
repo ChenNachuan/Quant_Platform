@@ -611,6 +611,14 @@ def cross_source_check(
     ``df_a`` 为主源数据，``df_b`` 为备源数据；按 ``[ticker, trade_date]``（无日期列时按 ``[ticker]``）外连接。
     依 :data:`NUMERIC_FIELDS` 与五级容差表逐列比较，超出容差或单边缺失判为不一致（双边均空视为一致）。
     """
+    if resolve_table_name(asset_type) == "cn_calendar":
+        return _cross_check_calendar(
+            df_a,
+            df_b,
+            asset_type=asset_type,
+            trade_date=trade_date,
+            secondary_source=secondary_source,
+        )
     if "ticker" not in df_a.columns or "ticker" not in df_b.columns:
         raise ValueError("both frames need a 'ticker' join column")
     fields = NUMERIC_FIELDS.get(asset_type)
@@ -633,6 +641,25 @@ def cross_source_check(
     both = merged[merged["_merge"] == "both"]
     matched_rows = int(len(both))
 
+    _ohlc_nullable_when_zero_vol = frozenset({"open", "high", "low"})
+    zero_vol_close_ok: pd.Series | None = None
+    cls_a: pd.Series | None = None
+    cls_b: pd.Series | None = None
+    if {"volume_a", "volume_b", "close_a", "close_b"} <= set(both.columns):
+        vol_a = pd.to_numeric(both["volume_a"], errors="coerce")
+        vol_b = pd.to_numeric(both["volume_b"], errors="coerce")
+        cls_a = pd.to_numeric(both["close_a"], errors="coerce").astype("float64")
+        cls_b = pd.to_numeric(both["close_b"], errors="coerce").astype("float64")
+        close_tol, close_mode = tolerance_for("close", tolerances)
+        close_diff = (cls_a - cls_b).abs()
+        if close_mode == "absolute":
+            close_ok = close_diff <= close_tol
+        else:
+            close_ok = (close_diff / cls_a.abs().clip(lower=1e-9)) <= close_tol
+        zero_vol_close_ok = (
+            (vol_a == 0) & (vol_b == 0) & cls_a.notna() & cls_b.notna() & close_ok
+        )
+
     mismatched: dict[str, MismatchDetail] = {}
     for field in fields:
         col_a, col_b = f"{field}_a", f"{field}_b"
@@ -650,7 +677,28 @@ def cross_source_check(
         else:
             base = a.abs().clip(lower=1e-9)
             bad = valid & ((diff / base) > tol)
-        bad = bad | one_missing
+        if (
+            field in _ohlc_nullable_when_zero_vol
+            and zero_vol_close_ok is not None
+            and cls_a is not None
+            and cls_b is not None
+        ):
+            if mode == "absolute":
+                a_is_close = a.notna() & ((a - cls_a).abs() <= tol)
+                b_is_close = b.notna() & ((b - cls_b).abs() <= tol)
+            else:
+                a_is_close = a.notna() & (
+                    ((a - cls_a).abs() / cls_a.abs().clip(lower=1e-9)) <= tol
+                )
+                b_is_close = b.notna() & (
+                    ((b - cls_b).abs() / cls_b.abs().clip(lower=1e-9)) <= tol
+                )
+            exempt_zero_vol = (
+                one_missing & zero_vol_close_ok & (a_is_close | b_is_close)
+            )
+            bad = bad | (one_missing & ~exempt_zero_vol)
+        else:
+            bad = bad | one_missing
         count = int(bad.sum())
         if not count:
             continue
@@ -674,6 +722,81 @@ def cross_source_check(
         mismatched_fields=mismatched,
         missing_in_primary=int((merged["_merge"] == "right_only").sum()),
         missing_in_secondary=int((merged["_merge"] == "left_only").sum()),
+    )
+
+
+def _normalize_calendar_dates(df: pd.DataFrame) -> set[date]:
+    if "trade_date" not in df.columns:
+        raise ValueError("both frames need a 'trade_date' join column")
+    if df.empty:
+        return set()
+    parsed = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.dropna()
+    return set(parsed.tolist())
+
+
+def _cross_check_calendar(
+    df_a: pd.DataFrame,
+    df_b: pd.DataFrame,
+    *,
+    asset_type: str = "cn_calendar",
+    trade_date: str | date | None = None,
+    secondary_source: str | None = None,
+) -> CrossCheckResult:
+    """在双源交易日历的日期重叠窗口内逐日比对 ``trade_date`` 集合。"""
+    dates_a = _normalize_calendar_dates(df_a)
+    dates_b = _normalize_calendar_dates(df_b)
+
+    mismatched: dict[str, MismatchDetail] = {}
+    if not dates_a or not dates_b:
+        union_all = dates_a | dates_b
+        matched_rows = 0
+        total_rows = len(union_all)
+        missing_in_primary = len(dates_b)
+        missing_in_secondary = len(dates_a)
+        fallback_date: Any = max(union_all) if union_all else ""
+    else:
+        win_start = max(min(dates_a), min(dates_b))
+        win_end = min(max(dates_a), max(dates_b))
+        if win_start > win_end:
+            matched_rows = 0
+            total_rows = len(dates_a | dates_b)
+            missing_in_primary = len(dates_b)
+            missing_in_secondary = len(dates_a)
+            fallback_date = win_end
+        else:
+            win_a = {d for d in dates_a if win_start <= d <= win_end}
+            win_b = {d for d in dates_b if win_start <= d <= win_end}
+            both_win = win_a & win_b
+            union_win = win_a | win_b
+            only_a = sorted(win_a - win_b)
+            only_b = sorted(win_b - win_a)
+            disagreed = sorted(only_a + only_b)
+            matched_rows = len(both_win)
+            total_rows = len(union_win)
+            missing_in_primary = len(only_b)
+            missing_in_secondary = len(only_a)
+            if disagreed:
+                mismatched["trade_date"] = MismatchDetail(
+                    field="trade_date",
+                    mismatch_count=len(disagreed),
+                    mismatch_rate=(len(disagreed) / total_rows) if total_rows else 0.0,
+                    max_abs_diff=float(len(disagreed)),
+                    sample_tickers=[d.isoformat() for d in disagreed[:5]],
+                )
+            fallback_date = max(union_win) if union_win else win_end
+
+    return CrossCheckResult(
+        asset_type=asset_type,
+        trade_date=_as_date_str(
+            trade_date if trade_date is not None else fallback_date
+        ),
+        primary_source=_primary_source_or(df_a, asset_type),
+        secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
+        total_rows=total_rows,
+        matched_rows=matched_rows,
+        mismatched_fields=mismatched,
+        missing_in_primary=missing_in_primary,
+        missing_in_secondary=missing_in_secondary,
     )
 
 
@@ -1298,7 +1421,7 @@ def ingest_table(
     """
     from data.dqc.engine import ingest_with_dqc
     from data.dqc.report import build_reference_overrides
-    from data.dqc.severity import DQCBatchReject
+    from data.dqc.severity import SEVERITY_CONFIGS, DQCBatchReject
     from data.normalizers import get_normalizer
     from data.source_adapter import write_watermark
 
@@ -1366,9 +1489,49 @@ def ingest_table(
                 for col_name, col_schema in schema.columns.items():
                     if col_name not in projected.columns and col_schema.nullable:
                         projected[col_name] = None
-                validated = schema.validate(
-                    normalize_missing_floats(projected, canonical)
-                )
+                normalized_proj = normalize_missing_floats(projected, canonical)
+                if canonical.endswith(("_bars_daily", "_bars_minute")) and len(
+                    normalized_proj
+                ):
+                    critical_cols = [
+                        c
+                        for c in ("open", "high", "low", "close", "volume", "amount")
+                        if c in normalized_proj.columns
+                        and not schema.columns[c].nullable
+                    ]
+                    if critical_cols:
+                        null_mask = normalized_proj[critical_cols].isna().any(axis=1)
+                        if null_mask.any():
+                            drop_count = int(null_mask.sum())
+                            drop_rate = drop_count / len(normalized_proj)
+                            max_drop_rate = (
+                                SEVERITY_CONFIGS["C04"].escalation_threshold or 0.20
+                            )
+                            if drop_rate > max_drop_rate:
+                                raise DQCBatchReject(
+                                    f"batch {trade_date.isoformat()} {canonical} "
+                                    f"rejected: null OHLCV rate {drop_rate:.4f} > "
+                                    f"{max_drop_rate}",
+                                    detail={
+                                        "table": canonical,
+                                        "trade_date": trade_date.isoformat(),
+                                        "drop_count": drop_count,
+                                        "total_rows": int(len(normalized_proj)),
+                                        "drop_rate": round(drop_rate, 6),
+                                    },
+                                )
+                            logger.warning(
+                                "dropping %d/%d rows with null OHLCV in %s %s "
+                                "(rate=%.4f <= %.2f)",
+                                drop_count,
+                                len(normalized_proj),
+                                canonical,
+                                trade_date,
+                                drop_rate,
+                                max_drop_rate,
+                            )
+                            normalized_proj = normalized_proj.loc[~null_mask].copy()
+                validated = schema.validate(normalized_proj)
                 if is_monthly_partition(canonical):
                     upsert_parquet_atomic(
                         validated,

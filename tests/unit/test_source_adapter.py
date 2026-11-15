@@ -363,7 +363,7 @@ class TestTushareAdapter:
 class TestAmazingdataAdapter:
     def test_list_asset_types(self):
         a = AmazingdataAdapter()
-        assert a.list_asset_types() == ["stock", "etf", "calendar", "option"]
+        assert a.list_asset_types() == ["stock", "etf", "index", "calendar", "option"]
 
     def test_requests_per_second(self):
         assert AmazingdataAdapter.requests_per_second == 2.0
@@ -517,6 +517,41 @@ class TestAmazingdataAdapter:
         )
         with pytest.raises(RuntimeError, match="exit=1"):
             a.fetch("stock", date(2026, 11, 13))
+
+    def test_docker_bridge_supports_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from data.raw import raw_path
+
+        a = AmazingdataAdapter(data_root=tmp_path, mode="docker")
+        captured: dict[str, object] = {}
+        target_day = date(2026, 11, 13)
+
+        def fake_run(cmd, **_kwargs):
+            captured["cmd"] = list(cmd)
+            out = raw_path(
+                "amazingdata", "cn_stock_index_bars_daily", target_day, tmp_path
+            )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                {
+                    "code": ["000300.SH"],
+                    "kline_time": ["2026-11-13"],
+                    "close": [4016.29],
+                    "volume": [179341998],
+                    "amount": [460245657530.9],
+                }
+            ).to_parquet(out, index=False)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(
+            "data.adapters.amazingdata_adapter.subprocess.run", fake_run
+        )
+        res = a.fetch("index", target_day)
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("--tables") + 1] == "cn_stock_index_bars_daily"
+        assert res.asset_type == "index"
+        assert res.row_count == 1
 
 
 # ---------------------------------------------------------------------------
