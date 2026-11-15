@@ -36,8 +36,12 @@
 
 - **路径**：`asset/cn_etf_bars_daily/{date}.parquet`（按日）
 - **family**：`etf` · **主键**：`[ticker, trade_date]`
-- **数据源优先级**：`tushare` → `qdc` → `amazingdata` → `straightflush`（`field_override: adjfactor=tushare`）
+- **数据源优先级**：`straightflush` → `qdc` → `amazingdata`（`field_override: adjfactor=qdc`）
+- **多源交叉校验**：**已配置并实测验证**（`2026-11-13` 截面 `straightflush` vs `amazingdata` 1655 只 `silent`，`straightflush` vs `qdc` 1719 只 `WARNING 0.17%`）
 - **交叉比对数值列**：`open`, `high`, `low`, `close`, `volume`, `amount`, `adjfactor`, `turnover`
+- **细节与已知问题**：
+  - **零成交 ETF 的 OHLC 空值策略差异**：同花顺对当日零成交 ETF（如 `510090.SH`、`511820.SH`、`511980.SH`）返回 `open/high/low = NaN`，QDC 填为 `close`，AmazingData 不含这些行。Normalizer 严禁自动填充 `NaN`：入库阶段由 [`ingest_table`](../../../../data/ingestion.py#L1453-L1494) 在稀疏缺失率 `<= 0.20` 时告警过滤并保留主源；交叉校验由 [`cross_source_check`](../../../../data/ingestion.py#L644-L702) 在双源 `volume==0`、`close` 一致且非空侧等于 `close` 时豁免 `open/high/low` 单边缺失告警。
+  - **QDC 整百股截断 `WARNING`（保留告警）**：QDC `cn_etf_1d` 上游来自 `tdx_mootdx`，对小成交量货币/债券 ETF（如 `511670.SH`、`511830.SH`、`511920.SH`）按整百股取整丢弃尾数（如 `403 → 400`），相对误差达 `0.74%` 超出 `volume` 容差 `0.1%`；因属源端不可逆精度损失，不放宽全局容差，保留 `0.17%` `WARNING` 提示备源精度差异。
 
 | 列名 | 类型 | 可空 | 约束 / 说明 |
 |---|---|---:|---|

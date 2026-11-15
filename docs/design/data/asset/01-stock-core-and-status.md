@@ -9,7 +9,11 @@
 - **路径**：`asset/cn_calendar/{exchange}.parquet`（按交易所：`sse`, `szse`, `bse`, `cffex`, `shfe`, `dce`, `czce`, `ine`, `gfex`）
 - **family**：`reference`（旧别名：`calendar`）
 - **主键**：`[trade_date]`
-- **数据源优先级**：`tushare` → `qdc` → `straightflush` → `amazingdata`（不参与多源数值交叉比对）
+- **数据源优先级**：`straightflush` → `qdc` → `amazingdata`
+- **多源交叉校验**：**已配置并实测验证**（`cross_source_check` 按双源重叠日期窗口逐日比对 `trade_date` 集合，见 [`_cross_check_calendar`](../../../../data/ingestion.py#L697-L760)）
+- **细节与已知问题**：
+  - **QDC 跳过**：`QdcAdapter` 当前不提供交易日历表，交叉校验与入库时自动跳过 QDC。
+  - **AmazingData 日期解析与容器拉取**：`get_calendar()` 返回 8 位整型 `YYYYMMDD`（如 `20261113`），`amazing_pull.py` 与 `amazingdata_normalizer` 均先转为字符串清洗再解析，避免被 `pd.to_datetime` 按纳秒时间戳误判；macOS 下通过 Docker 挂载 `scripts/ingestion/amazing_pull.py` 实时落盘 `raw/amazingdata/` 后回读。
 
 | 列名 | 类型 | 可空 | 约束 / 说明 |
 |---|---|---:|---|
@@ -43,8 +47,12 @@
 - **路径**：`asset/cn_stock_bars_daily/{date}.parquet`（按日）
 - **family**：`stock`（旧别名：`bars_daily`）
 - **主键**：`[ticker, trade_date]`
-- **数据源优先级**：`tushare` → `qdc` → `amazingdata` → `straightflush`（`field_override: adjfactor=tushare`）
+- **数据源优先级**：`straightflush` → `qdc` → `amazingdata`（`field_override: adjfactor=qdc`）
+- **多源交叉校验**：**已配置并实测验证**（`2026-11-13` 截面 `straightflush` vs `qdc` 5571 只、`straightflush` vs `amazingdata` 5216 只均 `silent`，不一致率 `0.00%`）
 - **交叉比对数值列**：`open`, `high`, `low`, `close`, `volume`, `amount`, `adjfactor`, `turnover`
+- **细节与已知问题**：
+  - **`adjfactor` 强制覆盖**：由 `field_override: adjfactor=qdc`（QDC `cn_adj_factor` 全历史无限频）在主源标准化后注入，避免 Tushare 频控及单一源停牌写死 `1.0` 风险。
+  - **整数成交额兼容**：三源 Normalizer 对价格/成交额/换手率统一显式转 `float64`，防止全整数批次触发 Pandera 类型错误。
 
 | 列名 | 类型 | 可空 | 约束 / 说明 |
 |---|---|---:|---|

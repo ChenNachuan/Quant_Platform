@@ -90,3 +90,12 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 - field_override 里的字段从指定源取值替换(如 adjfactor只信tushare)
 - 新增数据源=Adapter + Normalizer + source_priority.yaml加一行
 - source_priority.yaml存放于 config/(git追踪)
+
+### 已打通多源校验的表与实测边界（2026-11-13）
+
+| 规范表 | 优先级（[source_priority.yaml](../../../config/source_priority.yaml)） | 多源校验状态 | 细节与已知问题 |
+|---|---|---|---|
+| [`cn_calendar`](asset/01-stock-core-and-status.md#1-cn_calendar交易日历) | `straightflush` → `qdc` → `amazingdata` | 已配置（`silent`，仅比 `trade_date` 交集窗口） | QDC 不支持日历跳过；AmazingData 返回整型 `YYYYMMDD` 需先转字符串解析，macOS 走 Docker 挂载拉取 |
+| [`cn_stock_bars_daily`](asset/01-stock-core-and-status.md#3-cn_stock_bars_daily股票日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（SF vs QDC / AD 均 `silent`） | `field_override: adjfactor=qdc`；Normalizer 显式强制浮点列转 `float64` |
+| [`cn_etf_bars_daily`](asset/06-etf-and-fund.md#2-cn_etf_bars_dailyetf-独立日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（AD `silent`；QDC `WARNING 0.17%`） | SF 零成交 `NaN` 由入库过滤（`<= 20%`）且交叉校验在 `volume==0` 等收盘时豁免；保留 QDC `tdx_mootdx` 小额 ETF 整百截断 `WARNING` |
+| [`cn_stock_index_bars_daily`](asset/02-stock-index-and-board.md#2-cn_stock_index_bars_daily指数与板块日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（QDC `WARNING 0.36%`；AD `ERROR 2.89%`） | SF `000xxx.CSI` 对齐 `.SH`；AD `.SH` 指数手→股 `*100`；保留 QDC `000012`/`000022` 100 倍单位差异与 AD 16 只偏差监控 |

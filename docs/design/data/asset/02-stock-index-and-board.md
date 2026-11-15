@@ -30,8 +30,14 @@
 - **路径**：`asset/cn_stock_index_bars_daily/{month}.parquet`（按自然月）
 - **family**：`stock`
 - **主键**：`[ticker, trade_date]`
-- **数据源优先级**：`tushare` → `qdc` → `amazingdata` → `straightflush`
+- **数据源优先级**：`straightflush` → `qdc` → `amazingdata`
+- **多源交叉校验**：**已配置并实测验证**（`2026-11-13` 截面 `matched=554`；`straightflush` vs `qdc` 为 `WARNING 0.36%`，`straightflush` vs `amazingdata` 为 `ERROR 2.89%`）
 - **交叉比对数值列**：`open`, `high`, `low`, `close`, `volume`, `amount`, `pe`, `pb`, `turnover`, `total_market_cap`, `float_market_cap`
+- **细节与已知问题**：
+  - **中证 `.CSI` 后缀统一**：同花顺对上交所同步发布的 `000xxx.CSI` 指数（如 `000510.CSI`、`000860.CSI`）在 [`straightflush_normalizer`](../../../../data/normalizers/straightflush_normalizer.py#L128-L137) 中在不与既有 `.SH` 碰撞的前提下统一映射为 `.SH`，与 QDC/AmazingData 对齐（`932000.CSI` 等纯中证指数保持 `.CSI`）；同花顺另含约 850 只 `.TI` 同花顺概念/行业独有指数。
+  - **AmazingData 上证手/股差异**：AmazingData `EXTRA_INDEX_A` 对 `.SH` 指数 `volume` 按手回报（已在 [`amazingdata_normalizer`](../../../../data/normalizers/amazingdata_normalizer.py#L92-L96) 对 `.SH` 自动 `* 100` 转股，`.SZ`/`.BJ` 保持股）；整数型 `turnover`/`amount` 统一转 `float64`。
+  - **QDC 已知 `WARNING`（保留告警）**：QDC `sse_native_recovered` 仅对 `000012.SH`（国债指数）、`000022.SH`（企债指数）的 `volume` 存在整 100 倍偏小（两只 `close`/`amount` 与其余债券指数如 `000061.SH` 均一致），保留作为上游单位异常提示。
+  - **AmazingData 已知 `ERROR`（验证优先级）**：约 `2.9%`（16 只，含 `399001.SZ`/`399002.SZ`/`399006.SZ` 及部分 `.SH` 债券/全收益指数）在 AmazingData 出现 `volume`/`amount`/`close` 偏差（而同花顺与 QDC 彼此一致），从实证确认 `straightflush → qdc → amazingdata` 的优先级配置合理。
 
 | 列名 | 类型 | 可空 | 约束 / 说明 |
 |---|---|---:|---|
