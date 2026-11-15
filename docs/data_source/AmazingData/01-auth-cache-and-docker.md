@@ -73,7 +73,7 @@ download_info.download_hist_code_list(calendar)  # 下载 20130101 以来全部�
 
 ```bash
 # 必须在项目根目录执行（不要重建镜像，也不要修改 ~/AmazingData/docker/docker-compose.yml）
-docker-compose run --rm amazingdata python3 /scripts/data_fetcher/fetch_stock_daily.py
+docker-compose run --rm amazingdata python3 /scripts/ingestion/amazing_pull.py --tables cn_stock_bars_daily
 ```
 
 ---

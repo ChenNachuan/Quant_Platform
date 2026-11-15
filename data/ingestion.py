@@ -11,12 +11,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Sequence
 
 import pandas as pd
 import pyarrow as pa
@@ -30,10 +32,15 @@ from data.storage_ops import (
     FileLock,
     check_capacity,
     is_monthly_partition,
+    normalize_missing_floats,
     partition_path,
+    upsert_parquet_atomic,
+    write_parquet_atomic,
 )
 from data.storage_schema import (
     CANONICAL_TO_LEGACY,
+    PARTITION_PATHS,
+    SCHEMA,
     _AliasedDict,
     resolve_table_name,
 )
@@ -59,6 +66,14 @@ __all__ = [
     "write_asset",
     "raw_exists",
     "should_cross_check",
+    "TABLE_TO_ADAPTER_ASSET",
+    "TABLE_TO_DQC_GROUP",
+    "IngestOutcome",
+    "cross_check_path",
+    "save_cross_check_result",
+    "run_cross_check_for_date",
+    "ingest_table",
+    "run_ingestion",
 ]
 
 logger = logging.getLogger(__name__)
@@ -623,7 +638,8 @@ def cross_source_check(
         col_a, col_b = f"{field}_a", f"{field}_b"
         if col_a not in both.columns or col_b not in both.columns:
             continue  # 仅比较双源均提供的字段
-        a, b = both[col_a], both[col_b]
+        a = pd.to_numeric(both[col_a], errors="coerce").astype("float64")
+        b = pd.to_numeric(both[col_b], errors="coerce").astype("float64")
         na, nb = a.isna(), b.isna()
         valid = ~(na | nb)
         one_missing = na ^ nb
@@ -677,10 +693,13 @@ def _as_date_str(value: Any) -> str:
 
 
 def _primary_source_or(df_a: pd.DataFrame, asset_type: str) -> str:
+    explicit = df_a.attrs.get("source")
+    if explicit:
+        return str(explicit)
     try:
         return get_primary_source(asset_type)
     except (KeyError, ValueError):
-        return str(df_a.attrs.get("source", "primary"))
+        return "primary"
 
 
 # --- 分级响应 ---
@@ -874,3 +893,614 @@ def should_cross_check(
         raw_exists(backup, asset_type, trade_date, data_root=data_root)
         for backup in backups
     )
+
+
+# --- 规范表映射与单表/批量入库编排 ---
+TABLE_TO_ADAPTER_ASSET: dict[str, str] = _AliasedDict(
+    {
+        "cn_calendar": "calendar",
+        "cn_stock_bars_daily": "stock",
+        "cn_etf_bars_daily": "etf",
+        "cn_stock_index_bars_daily": "index",
+        "cn_futures_bars_daily": "futures",
+        "option_basic": "option",
+    }
+)
+
+TABLE_TO_DQC_GROUP: dict[str, str] = _AliasedDict(
+    {
+        "cn_stock_bars_daily": "bars_daily",
+        "cn_stock_bars_minute": "bars_minute",
+        "cn_stock_fundamental": "fundamental",
+        "factor": "factor",
+    }
+)
+
+
+@dataclass
+class IngestOutcome:
+    """单表单日入库执行结果。"""
+
+    table: str
+    trade_date: date
+    source: str | None
+    status: Literal["success", "skipped", "failed"]
+    row_count: int = 0
+    asset_path: Path | None = None
+    fallback_from: str | None = None
+    cross_check_levels: dict[str, ResponseLevel] | None = None
+    error: str | None = None
+
+
+def _resolve_asset_target_path(
+    canonical: str,
+    trade_date: date,
+    data_root: str | os.PathLike[str],
+) -> Path:
+    template = PARTITION_PATHS.get(canonical)
+    if template is None:
+        raise KeyError(f"unknown storage table {canonical!r}")
+    if "{date}" in template or "{month}" in template:
+        return partition_path(canonical, trade_date, data_root)
+    if "{year}" in template:
+        return Path(data_root) / template.format(year=trade_date.strftime("%Y"))
+    if "{exchange}" in template:
+        return Path(data_root) / template.format(exchange="SSE")
+    if "{symbol}" in template:
+        raise ValueError(
+            f"table {canonical!r} uses symbol partition; pass target_path explicitly"
+        )
+    return Path(data_root) / template
+
+
+def _already_ingested(
+    canonical: str,
+    trade_date: date,
+    primary_source: str,
+    data_root: str | os.PathLike[str],
+) -> Path | None:
+    """若该日数据已落地则返回目标路径，否则返回 ``None``。"""
+    template = PARTITION_PATHS.get(canonical, "")
+    target = _resolve_asset_target_path(canonical, trade_date, data_root)
+    if "{date}" in template:
+        return target if target.exists() else None
+    if "{month}" in template:
+        if not target.exists():
+            return None
+        try:
+            existing = pd.read_parquet(target, columns=["trade_date"])
+        except Exception:  # noqa: BLE001
+            return None
+        if existing.empty or "trade_date" not in existing.columns:
+            return None
+        dates = set(
+            pd.to_datetime(existing["trade_date"], errors="coerce").dt.date.dropna()
+        )
+        return target if trade_date in dates else None
+    from data.source_adapter import read_watermark
+
+    wm = read_watermark(primary_source, canonical, Path(data_root))
+    if target.exists() and wm in (
+        trade_date.strftime("%Y-%m-%d"),
+        trade_date.strftime("%Y%m%d"),
+    ):
+        return target
+    return None
+
+
+def _resolve_adapter_asset(adapter: Any, canonical: str) -> str:
+    supported = list(adapter.list_asset_types())
+    if canonical in supported:
+        return canonical
+    legacy = CANONICAL_TO_LEGACY.get(canonical)
+    if legacy and legacy in supported:
+        return legacy
+    mapped = TABLE_TO_ADAPTER_ASSET.get(canonical)
+    if mapped and mapped in supported:
+        return mapped
+    raise ValueError(
+        f"{type(adapter).__name__} does not support table {canonical!r} "
+        f"(supported: {supported})"
+    )
+
+
+def _resolve_normalizer_asset(canonical: str) -> str:
+    return TABLE_TO_ADAPTER_ASSET.get(canonical, canonical)
+
+
+def _load_raw_any(
+    source: str,
+    canonical: str,
+    trade_date: date,
+    data_root: str | os.PathLike[str],
+) -> pd.DataFrame | None:
+    from data.raw import load_raw
+
+    candidates: list[str] = [canonical]
+    legacy = CANONICAL_TO_LEGACY.get(canonical)
+    if legacy and legacy not in candidates:
+        candidates.append(legacy)
+    mapped = TABLE_TO_ADAPTER_ASSET.get(canonical)
+    if mapped and mapped not in candidates:
+        candidates.append(mapped)
+    for key in candidates:
+        df = load_raw(source, key, trade_date, data_root)
+        if df is not None:
+            return df
+    return None
+
+
+def _obtain_raw(
+    source: str,
+    canonical: str,
+    trade_date: date,
+    *,
+    data_root: str | os.PathLike[str],
+    from_raw: bool,
+) -> tuple[pd.DataFrame, str | None]:
+    """获取原始批次，并在外部拉取场景下先于 DQC 落地 raw/。"""
+    if from_raw:
+        raw_df = _load_raw_any(source, canonical, trade_date, data_root)
+        if raw_df is None or raw_df.empty:
+            raise FileNotFoundError(
+                f"missing raw batch for source={source!r}, table={canonical!r}, "
+                f"date={trade_date.isoformat()}"
+            )
+        return raw_df, trade_date.strftime("%Y-%m-%d")
+
+    from data.adapters import get_adapter
+    from data.raw import save_raw
+    from data.source_adapter import read_watermark
+
+    adapter = get_adapter(source)
+    try:
+        asset_arg = _resolve_adapter_asset(adapter, canonical)
+        wm = read_watermark(source, canonical, Path(data_root))
+        fetched = adapter.fetch(asset_arg, trade_date, watermark=wm)
+    finally:
+        adapter.close()
+
+    if fetched.df is None or fetched.df.empty:
+        raise RuntimeError(
+            f"source {source!r} returned empty dataframe for {canonical} {trade_date}"
+        )
+    # 证据链不变量：必须在进入 DQC 前落地 raw 层
+    save_raw(fetched.df, source, canonical, trade_date, data_root)
+    return fetched.df, fetched.watermark
+
+
+def _apply_field_overrides(
+    df: pd.DataFrame,
+    primary_src: str,
+    canonical: str,
+    trade_date: date,
+    *,
+    data_root: str | os.PathLike[str],
+    from_raw: bool,
+) -> pd.DataFrame:
+    """按 ``field_override`` 配置从指定源替换特定列。"""
+    overrides_map = get_field_overrides(canonical)
+    by_source: dict[str, list[str]] = {}
+    for field, ov_src in overrides_map.items():
+        if ov_src != primary_src:
+            by_source.setdefault(ov_src, []).append(field)
+    if not by_source:
+        return df
+
+    from data.normalizers import get_normalizer
+
+    out = df.copy()
+    norm_asset = _resolve_normalizer_asset(canonical)
+    for ov_src, fields in by_source.items():
+        ov_raw, _ = _obtain_raw(
+            ov_src, canonical, trade_date, data_root=data_root, from_raw=from_raw
+        )
+        ov_norm = get_normalizer(ov_src)(norm_asset, ov_raw)
+        join_keys = [
+            c
+            for c in ("ticker", "trade_date")
+            if c in out.columns and c in ov_norm.columns
+        ]
+        valid_fields = [f for f in fields if f in ov_norm.columns]
+        if not join_keys or not valid_fields:
+            continue
+        ov_sub = ov_norm[join_keys + valid_fields].drop_duplicates(join_keys)
+        merged = out.merge(ov_sub, on=join_keys, how="left", suffixes=("", "_ov"))
+        for field in valid_fields:
+            ov_col = f"{field}_ov"
+            if ov_col in merged.columns:
+                merged[field] = merged[ov_col].combine_first(merged[field])
+                merged = merged.drop(columns=[ov_col])
+        out = merged
+    return out
+
+
+def cross_check_path(
+    asset_type: str,
+    trade_date: str | date,
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+) -> Path:
+    """返回交叉校验结果 JSON 路径：``{data_root}/cross_check/{table}/{date}.json``。"""
+    canonical = resolve_table_name(asset_type)
+    return (
+        Path(data_root)
+        / "cross_check"
+        / canonical
+        / f"{_as_date_str(trade_date)[:10]}.json"
+    )
+
+
+def save_cross_check_result(
+    result: CrossCheckResult,
+    level: ResponseLevel,
+    *,
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+) -> Path:
+    """将交叉校验结果原子落盘至 ``cross_check/{table}/{date}.json``（同日多备源追加更新）。"""
+    path = cross_check_path(result.asset_type, result.trade_date, data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    comparisons = (
+        dict(existing.get("comparisons") or {})
+        if existing.get("primary_source") == result.primary_source
+        else {}
+    )
+    comparisons[result.secondary_source] = {
+        "primary_source": result.primary_source,
+        "secondary_source": result.secondary_source,
+        "level": level,
+        "total_rows": result.total_rows,
+        "matched_rows": result.matched_rows,
+        "missing_in_primary": result.missing_in_primary,
+        "missing_in_secondary": result.missing_in_secondary,
+        "mismatch_rate": result.mismatch_rate,
+        "mismatched_fields": {
+            field: {
+                "mismatch_count": d.mismatch_count,
+                "mismatch_rate": d.mismatch_rate,
+                "max_abs_diff": d.max_abs_diff,
+                "sample_tickers": list(d.sample_tickers),
+            }
+            for field, d in result.mismatched_fields.items()
+        },
+    }
+    payload = {
+        "asset_type": resolve_table_name(result.asset_type),
+        "trade_date": result.trade_date,
+        "primary_source": result.primary_source,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "comparisons": comparisons,
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def run_cross_check_for_date(
+    table: str,
+    trade_date: date,
+    *,
+    primary_df: pd.DataFrame | None = None,
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    fetch_missing_raw: bool = False,
+) -> dict[str, ResponseLevel]:
+    """对指定 ``(table, trade_date)`` 执行主备源交叉校验并落盘结果。"""
+    from data.normalizers import get_normalizer
+
+    canonical = resolve_table_name(table)
+    priority = get_source_priority(canonical)
+    if len(priority) < 2:
+        return {}
+    primary_src, backups = priority[0], priority[1:]
+    norm_asset = _resolve_normalizer_asset(canonical)
+
+    def _obtain_for_cross_check(src: str) -> pd.DataFrame:
+        try:
+            raw, _ = _obtain_raw(
+                src, canonical, trade_date, data_root=data_root, from_raw=True
+            )
+        except FileNotFoundError:
+            if not fetch_missing_raw:
+                raise
+            raw, _ = _obtain_raw(
+                src, canonical, trade_date, data_root=data_root, from_raw=False
+            )
+        return get_normalizer(src)(norm_asset, raw)
+
+    unavailable_errors: tuple[type[Exception], ...] = (
+        (FileNotFoundError, ValueError, ModuleNotFoundError, RuntimeError, OSError)
+        if fetch_missing_raw
+        else (FileNotFoundError,)
+    )
+
+    effective_primary = primary_src
+    if primary_df is None:
+        try:
+            primary_df = _obtain_for_cross_check(primary_src)
+        except unavailable_errors as exc:
+            # 若主源无 raw 或不支持该表（回补场景），以优先列表中首个可用源作比对基准
+            fallback_df = None
+            for candidate in backups:
+                try:
+                    fallback_df = _obtain_for_cross_check(candidate)
+                    effective_primary = candidate
+                    backups = [b for b in backups if b != candidate]
+                    break
+                except unavailable_errors:
+                    continue
+            if fallback_df is None:
+                raise
+            logger.warning(
+                "primary source %r unavailable for cross-check %s %s (%s); using %s",
+                primary_src,
+                canonical,
+                trade_date,
+                exc,
+                effective_primary,
+            )
+            primary_df = fallback_df
+    primary_df = primary_df.copy()
+    primary_df.attrs["source"] = effective_primary
+
+    levels: dict[str, ResponseLevel] = {}
+    for backup in backups:
+        try:
+            backup_df = _obtain_for_cross_check(backup)
+        except unavailable_errors as exc:
+            logger.warning(
+                "backup source %r skipped in cross-check %s %s: %s",
+                backup,
+                canonical,
+                trade_date,
+                exc,
+            )
+            continue
+        backup_df.attrs["source"] = backup
+        res = cross_source_check(
+            primary_df,
+            backup_df,
+            canonical,
+            trade_date,
+            secondary_source=backup,
+        )
+        level = respond(res)
+        save_cross_check_result(res, level, data_root=data_root)
+        levels[backup] = level
+    return levels
+
+
+def ingest_table(
+    table: str,
+    trade_date: date,
+    *,
+    source: str | None = None,
+    force: bool = False,
+    from_raw: bool = False,
+    cross_check: bool = True,
+    overrides: dict[str, Any] | None = None,
+    skip_dqc: bool = False,
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+) -> IngestOutcome:
+    """执行单表、单交易日的完整接入流水线（拉取 -> 落地 raw -> 标准化 -> DQC -> 写 asset -> 水位线 -> 交叉校验）。
+
+    默认按 ``source_priority.yaml`` 主源拉取并在主源失败或 DQC 拒收时自动切换备源（写 ``{backup}:backfill`` 血缘）；
+    显式指定 *source* 时仅尝试该源。
+    """
+    from data.dqc.engine import ingest_with_dqc
+    from data.dqc.report import build_reference_overrides
+    from data.dqc.severity import DQCBatchReject
+    from data.normalizers import get_normalizer
+    from data.source_adapter import write_watermark
+
+    canonical = resolve_table_name(table)
+    if canonical not in SCHEMA:
+        raise KeyError(f"unknown table {table!r}")
+
+    priority = get_source_priority(canonical)
+    primary_src = priority[0]
+    candidates = [source] if source is not None else list(priority)
+
+    if not force:
+        existing = _already_ingested(canonical, trade_date, candidates[0], data_root)
+        if existing is not None:
+            return IngestOutcome(
+                table=canonical,
+                trade_date=trade_date,
+                source=candidates[0],
+                status="skipped",
+                asset_path=existing,
+            )
+
+    last_error: Exception | None = None
+    fallback_from: str | None = None
+    norm_asset = _resolve_normalizer_asset(canonical)
+
+    for idx, src in enumerate(candidates):
+        is_primary = src == primary_src
+        source_tag = src if is_primary else backfill_source_tag(src)
+        try:
+            raw_df, wm = _obtain_raw(
+                src, canonical, trade_date, data_root=data_root, from_raw=from_raw
+            )
+            norm_df = get_normalizer(src)(norm_asset, raw_df)
+            if is_primary:
+                norm_df = _apply_field_overrides(
+                    norm_df,
+                    src,
+                    canonical,
+                    trade_date,
+                    data_root=data_root,
+                    from_raw=from_raw,
+                )
+
+            dqc_group = TABLE_TO_DQC_GROUP.get(canonical)
+            target = _resolve_asset_target_path(canonical, trade_date, data_root)
+            if not skip_dqc and dqc_group is not None:
+                ref = build_reference_overrides(data_root, canonical, trade_date)
+                if overrides:
+                    ref.update(overrides)
+                df_clean = ingest_with_dqc(
+                    norm_df,
+                    trade_date,
+                    dqc_group,
+                    table=canonical,
+                    overrides=ref,
+                    data_root=data_root,
+                    source_tag=source_tag,
+                )
+            else:
+                schema = SCHEMA[canonical]
+                projected = norm_df[
+                    [c for c in schema.columns if c in norm_df.columns]
+                ].copy()
+                for col_name, col_schema in schema.columns.items():
+                    if col_name not in projected.columns and col_schema.nullable:
+                        projected[col_name] = None
+                validated = schema.validate(
+                    normalize_missing_floats(projected, canonical)
+                )
+                if is_monthly_partition(canonical):
+                    upsert_parquet_atomic(
+                        validated,
+                        target,
+                        table=canonical,
+                        partition_dates=[trade_date],
+                        source_tag=source_tag,
+                    )
+                else:
+                    if canonical == "cn_calendar" and target.exists():
+                        existing_cal = pd.read_parquet(target, columns=["trade_date"])
+                        merged_cal = (
+                            pd.concat([existing_cal, validated], ignore_index=True)
+                            .drop_duplicates(subset=["trade_date"])
+                            .sort_values("trade_date")
+                            .reset_index(drop=True)
+                        )
+                        validated = schema.validate(merged_cal)
+                    write_parquet_atomic(
+                        validated,
+                        target,
+                        table=canonical,
+                        source_tag=source_tag,
+                    )
+                df_clean = validated
+
+            write_watermark(
+                src,
+                canonical,
+                wm or trade_date.strftime("%Y-%m-%d"),
+                Path(data_root),
+            )
+
+            levels: dict[str, ResponseLevel] | None = None
+            if cross_check and should_cross_check(
+                src, canonical, trade_date, data_root=data_root
+            ):
+                levels = run_cross_check_for_date(
+                    canonical,
+                    trade_date,
+                    primary_df=df_clean,
+                    data_root=data_root,
+                )
+
+            if not is_primary:
+                logger.warning(
+                    "fallback backfill landed %s %s via %s (source_tag=%s)",
+                    canonical,
+                    trade_date,
+                    src,
+                    source_tag,
+                )
+            return IngestOutcome(
+                table=canonical,
+                trade_date=trade_date,
+                source=src,
+                status="success",
+                row_count=len(df_clean),
+                asset_path=target,
+                fallback_from=fallback_from,
+                cross_check_levels=levels,
+            )
+        except (DQCBatchReject, Exception) as exc:  # noqa: BLE001
+            last_error = exc
+            if idx == 0 and len(candidates) > 1:
+                fallback_from = src
+                logger.warning(
+                    "primary source %r failed for %s %s (%s); trying backup sources",
+                    src,
+                    canonical,
+                    trade_date,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "source %r failed for %s %s: %s",
+                    src,
+                    canonical,
+                    trade_date,
+                    exc,
+                )
+
+    assert last_error is not None
+    raise last_error
+
+
+def run_ingestion(
+    tables: Sequence[str],
+    dates: Sequence[date],
+    *,
+    source: str | None = None,
+    force: bool = False,
+    from_raw: bool = False,
+    cross_check: bool = True,
+    overrides: dict[str, Any] | None = None,
+    skip_dqc: bool = False,
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    fail_fast: bool = False,
+    sleep_seconds: float = 0.0,
+) -> list[IngestOutcome]:
+    """按 ``(dates, tables)`` 顺序批量执行入库并汇总每个批次的结果。"""
+    outcomes: list[IngestOutcome] = []
+    first = True
+    for trade_date in dates:
+        for table in tables:
+            if not first and sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            first = False
+            canonical = resolve_table_name(table)
+            try:
+                outcome = ingest_table(
+                    canonical,
+                    trade_date,
+                    source=source,
+                    force=force,
+                    from_raw=from_raw,
+                    cross_check=cross_check,
+                    overrides=overrides,
+                    skip_dqc=skip_dqc,
+                    data_root=data_root,
+                )
+                outcomes.append(outcome)
+            except Exception as exc:  # noqa: BLE001
+                if fail_fast:
+                    raise
+                outcomes.append(
+                    IngestOutcome(
+                        table=canonical,
+                        trade_date=trade_date,
+                        source=source,
+                        status="failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+    return outcomes

@@ -22,6 +22,7 @@ Quant/
 │ 
 ├── scripts/                # 面向用户/调度器的可执行入口
 │   ├── bootstrap/
+│   ├── ingestion/          # 日常入库、区间回补、交叉校验与容器拉取脚本
 │   └── data_processing/
 │ 
 ├── research/               # 因子接口/运行时/存储、信号、评价、治理、ML 信号

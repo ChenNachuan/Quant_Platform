@@ -235,7 +235,18 @@ class SourceAdapter(ABC):
 
     def _latest_trade_date(self) -> date:
         """获取最近已发生的交易日（优先查交易所日历并截断至今日，防止探测未来交易日；失败则回退今日）。"""
-        cal_path = DATA_ROOT / "asset/calendar/sse.parquet"
+        cal_path = next(
+            (
+                p
+                for p in (
+                    DATA_ROOT / "asset/cn_calendar/SSE.parquet",
+                    DATA_ROOT / "asset/cn_calendar/sse.parquet",
+                    DATA_ROOT / "asset/calendar/sse.parquet",
+                )
+                if p.exists()
+            ),
+            DATA_ROOT / "asset/cn_calendar/SSE.parquet",
+        )
         if cal_path.exists():
             try:
                 import duckdb

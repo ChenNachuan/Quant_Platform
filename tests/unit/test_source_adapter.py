@@ -1304,6 +1304,7 @@ class TestRegressionFix6HealthCheck:
         assert self._probe_adapter([])._latest_trade_date() == max_date
 
     def test_latest_trade_date_falls_back_to_wall_clock(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("data.source_adapter.DATA_ROOT", tmp_path)
         monkeypatch.chdir(tmp_path)  # no calendar file here
         assert self._probe_adapter([])._latest_trade_date() == date.today()
 

@@ -221,6 +221,24 @@ def partition_path(
     )
 
 
+def _write_frame_to_tmp(
+    df: pd.DataFrame, tmp: Path, kwargs: dict[str, Any], source_tag: str | None
+) -> None:
+    """将 DataFrame 写入临时 Parquet；指定 *source_tag* 时附加血缘键值元数据。"""
+    if source_tag is None:
+        df.to_parquet(tmp, **kwargs)
+        return
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    meta = dict(table.schema.metadata or {})
+    meta[b"source_tag"] = str(source_tag).encode("utf-8")
+    meta[b"ingest_time"] = datetime.now().isoformat(timespec="seconds").encode("utf-8")
+    table = table.replace_schema_metadata(meta)
+    pq.write_table(table, tmp, compression=kwargs.get("compression", "zstd"))
+
+
 # --- 原子写入（lock -> tmp -> rename） ---
 def write_parquet_atomic(
     df: pd.DataFrame,
@@ -229,6 +247,7 @@ def write_parquet_atomic(
     table: str,
     value_column: str | None = None,
     check_disk: bool = True,
+    source_tag: str | None = None,
     **parquet_kwargs: Any,
 ) -> None:
     """经 Schema 校验后将 *df* 原子写入 *path*。
@@ -258,7 +277,7 @@ def write_parquet_atomic(
     with FileLock(target):
         try:
             kwargs = {**PARQUET_WRITE_CONFIG, **parquet_kwargs}
-            validated.to_parquet(tmp, **kwargs)
+            _write_frame_to_tmp(validated, tmp, kwargs, source_tag)
             # 先刷盘 tmp 数据再执行 os.replace，确保断电等场景下的持久性
             fd = os.open(tmp, os.O_RDONLY)
             try:
@@ -297,6 +316,7 @@ def upsert_parquet_atomic(
     partition_dates: Sequence[date | datetime | str] | None = None,
     value_column: str | None = None,
     check_disk: bool = True,
+    source_tag: str | None = None,
     **parquet_kwargs: Any,
 ) -> None:
     """在 ``FileLock`` 保护下将 *df* 原子合并写入多日分区文件（如 ``{month}.parquet``）。
@@ -357,7 +377,7 @@ def upsert_parquet_atomic(
 
         try:
             kwargs = {**PARQUET_WRITE_CONFIG, **parquet_kwargs}
-            to_write.to_parquet(tmp, **kwargs)
+            _write_frame_to_tmp(to_write, tmp, kwargs, source_tag)
             fd = os.open(tmp, os.O_RDONLY)
             try:
                 os.fsync(fd)

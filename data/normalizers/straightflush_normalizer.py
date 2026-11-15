@@ -18,7 +18,7 @@ from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
 
-_SUPPORTED_ASSET_TYPES = frozenset({"stock", "etf", "index"})
+_SUPPORTED_ASSET_TYPES = frozenset({"stock", "etf", "index", "calendar"})
 
 _COLUMN_MAP: dict[str, str] = {
     "thscode": "ticker",
@@ -56,10 +56,41 @@ def _qualify_ticker(code: str) -> str:
     return f"{val}.{exchange}"
 
 
+def _normalize_calendar(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """将同花顺交易日历原始表转为 ``cn_calendar`` 规范结构（单列 ``trade_date``）。"""
+    if raw_df.empty:
+        return pd.DataFrame({"trade_date": pd.Series(dtype="object")})
+    df = raw_df.copy()
+    if "trade_date" in df.columns:
+        dates = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+    elif "date" in df.columns:
+        dates = pd.to_datetime(
+            df["date"].astype(str), format="mixed", errors="coerce"
+        ).dt.date
+    elif "date_ms" in df.columns:
+        dates = (
+            pd.to_datetime(
+                pd.to_numeric(df["date_ms"], errors="coerce"), unit="ms", utc=True
+            )
+            .dt.tz_convert("Asia/Shanghai")
+            .dt.date
+        )
+    else:
+        raise ValueError("calendar raw_df missing 'trade_date', 'date', or 'date_ms'")
+    out = pd.DataFrame({"trade_date": dates}).dropna(subset=["trade_date"])
+    return (
+        out.drop_duplicates(subset=["trade_date"])
+        .sort_values("trade_date")
+        .reset_index(drop=True)
+    )
+
+
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将扶摇原始列名与 ``date_ms`` 转换为统一 ``bars_daily`` 格式。"""
     if asset_type not in _SUPPORTED_ASSET_TYPES:
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
+    if asset_type == "calendar":
+        return _normalize_calendar(raw_df)
 
     df = raw_df.copy()
 

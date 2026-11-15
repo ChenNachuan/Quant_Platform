@@ -1,125 +1,127 @@
 # 多数据源仲裁配置表（覆盖 51 张规范资产表，设计见 docs/design/data/ingestion.md 与 storage_schema.md）。
 #
+# 全局优先级：straightflush -> qdc -> amazingdata；
+# tushare 因当前积分/频次受限，仅保留在三源存在缺口且低积分可用的表末位作独有/补充源。
 # priority[0] 为唯一写入资产层的主数据源，其余仅用于交叉校验与缺口回补（严禁混写）；
 # field_override 指定单字段强制数据源（须在对应表的 priority 列表中）；切换主源须经提交评审。
 #
-# 当前活跃适配器（data/adapters/__init__.py）：tushare | qdc | amazingdata | straightflush
+# 当前活跃适配器（data/adapters/__init__.py）：straightflush | qdc | amazingdata | tushare
 # （akshare 仅保留用于历史测试与兜底，已退出默认优先级列表）
 
 # --- 1. 交易日历 (1) ---
 cn_calendar:
-  priority: [tushare, qdc, straightflush, amazingdata]
+  priority: [straightflush, qdc, amazingdata]
 
 # --- 2. A 股基础信息与行情状态 (6) ---
 cn_stock_basic:
-  priority: [tushare, amazingdata, straightflush]
+  priority: [straightflush, amazingdata, tushare]  # QDC 无独立全市场基础表；tushare stock_basic 可补充 market/list_status/is_hs
 
 cn_stock_bars_daily:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
   field_override:
-    adjfactor: tushare      # 复权因子基准与拆股精度以 tushare 为准
+    adjfactor: qdc          # QDC cn_adj_factor 覆盖全历史且无限频（Tushare adj_factor 限 1次/小时）
 
 cn_stock_bars_minute:
-  priority: [qdc, tushare, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_fundamental:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc]
   field_override:
-    pe_ttm: tushare         # PE_TTM 口径以 tushare 为准
+    pe_ttm: qdc             # 日频历史估值以 QDC cn_valuation_1d 为准（SF 仅提供最新快照）
 
 cn_stock_daily_status:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_corporate_actions:
-  priority: [tushare, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]
 
 # --- 3. 股票指数 / 行业 / 概念 (4) ---
 cn_stock_index_basic:
-  priority: [tushare, qdc, straightflush, amazingdata]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_index_bars_daily:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_industry:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_index_weights:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 # --- 4. 个股基本面 PIT 财务数据 (7) ---
 cn_stock_fundamental_income:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_fundamental_balance:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_fundamental_cashflow:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_fundamental_indicator:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc]
 
 cn_stock_fundamental_segment:
-  priority: [tushare, qdc]
+  priority: [qdc]
 
 cn_stock_fundamental_earnings:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_fundamental_consensus:
-  priority: [qdc, tushare]   # QDC cn_estimates 提供 PIT 日频一致预期
+  priority: [qdc]           # QDC cn_estimates 提供 PIT 日频一致预期
 
 # --- 5. 资金流 / 情绪 / 筹码特征 (9) ---
 cn_stock_auction:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc]
 
 cn_stock_moneyflow:
-  priority: [tushare, qdc]
+  priority: [qdc]
 
 cn_stock_hsgt_market_flow:
-  priority: [tushare, qdc]
+  priority: [qdc]
 
 cn_stock_hsgt_hold:
-  priority: [tushare, qdc]
+  priority: [qdc]
 
 cn_stock_margin:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_lhb:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_lhb_seats:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_stock_limit_pool:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc]
 
 cn_stock_chips_perf:
-  priority: [tushare, qdc]
+  priority: [qdc]
 
 # --- 6. 股东与股本变动拆分表 (8) ---
 cn_stock_holder_num:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_top_holders:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_restricted_release:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_block_trade:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_repurchase:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc]
 
 cn_stock_holder_trade:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc]
 
 cn_stock_pledge:
-  priority: [tushare, qdc, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_stock_research_visits:
-  priority: [tushare, qdc]
+  priority: [qdc]
 
 # --- 7. 个股 Tick 与 L2 行情 (2) ---
 cn_stock_tick:
@@ -130,50 +132,50 @@ cn_stock_tick_l2:
 
 # --- 8. 独立 ETF 域 (5，不含 cn_etf_pcf) ---
 cn_etf_basic:
-  priority: [tushare, amazingdata, straightflush]
+  priority: [straightflush, amazingdata]
 
 cn_etf_bars_daily:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
   field_override:
-    adjfactor: tushare
+    adjfactor: qdc          # QDC cn_etf_adj 覆盖复权与折算（Tushare 无 fund_daily 权限）
 
 cn_etf_bars_minute:
-  priority: [qdc, tushare, amazingdata]
+  priority: [qdc, amazingdata]
 
 cn_etf_fundamental:
-  priority: [tushare, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_etf_tick:
   priority: [qdc, amazingdata]
 
 # --- 9. 场外及场内公募基金 (5) ---
 cn_fund_basic:
-  priority: [tushare, straightflush]
+  priority: [straightflush]
 
 cn_fund_managers:
-  priority: [tushare, straightflush]
+  priority: [straightflush]
 
 cn_fund_nav:
-  priority: [tushare, straightflush]
+  priority: [straightflush]
 
 cn_fund_dividend:
-  priority: [tushare, straightflush]
+  priority: [straightflush]
 
 cn_fund_portfolio:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc]
 
 # --- 10. 期货 (4) ---
 cn_futures_bars_daily:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata]
 
 cn_futures_tick_l2:
   priority: [qdc, amazingdata]
 
 cn_futures_contract_specs:
-  priority: [tushare, qdc, amazingdata, straightflush]
+  priority: [straightflush, qdc, amazingdata, tushare]  # QDC 未购国内期货且 SF/AD 规格不全；tushare fut_basic 可作补充
 
 cn_futures_continuous:
-  priority: [tushare, qdc, straightflush]
+  priority: [straightflush, qdc]
 
 # --- 交叉校验容差（按字段类别，映射定义见 data/ingestion.py 的 TOLERANCE_CLASS）---
 # price 与 adjfactor 为绝对容差；volume、amount、pe_pb 与 default 为相对容差。

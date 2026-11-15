@@ -43,8 +43,24 @@ _NUMERIC_COLS = (
 
 def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将 AmazingData 原始 DataFrame（``stock`` 或 ``option``）转换为统一 ``bars_daily`` 格式。"""
-    if asset_type not in ("stock", "option"):
+    if asset_type not in ("stock", "option", "calendar"):
         raise ValueError(f"unsupported asset_type: {asset_type!r}")
+    if asset_type == "calendar":
+        if raw_df.empty:
+            return pd.DataFrame({"trade_date": pd.Series(dtype="object")})
+        col = "trade_date" if "trade_date" in raw_df.columns else "cal_date"
+        if col not in raw_df.columns:
+            raise ValueError("calendar raw_df missing 'trade_date' or 'cal_date'")
+        dates = pd.to_datetime(
+            raw_df[col].astype(str), format="mixed", errors="coerce"
+        ).dt.date
+        return (
+            pd.DataFrame({"trade_date": dates})
+            .dropna(subset=["trade_date"])
+            .drop_duplicates(subset=["trade_date"])
+            .sort_values("trade_date")
+            .reset_index(drop=True)
+        )
 
     # 重命名前合并两列复权因子，避免列名冲突；以 NAV_ADJ_FACTOR 为准
     df = raw_df.copy()

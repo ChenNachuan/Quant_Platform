@@ -357,34 +357,58 @@ class TestSourcePriorityConfig:
         missing = asset_tables - (set(cfg) - {"cross_check"})
         assert not missing, f"missing in source_priority.yaml: {sorted(missing)}"
 
+    def test_global_source_order_and_tushare_supplement_policy(self):
+        cfg = load_source_priority()
+        global_rank = {
+            "straightflush": 0,
+            "qdc": 1,
+            "amazingdata": 2,
+            "tushare": 3,
+        }
+        for table, entry in cfg.items():
+            if table == "cross_check":
+                continue
+            priority = entry["priority"]
+            assert priority, f"{table}: empty priority"
+            assert priority[0] != "tushare", f"{table}: tushare must not be primary"
+            ranks = [global_rank[s] for s in priority]
+            assert ranks == sorted(ranks), (
+                f"{table}: priority {priority} violates straightflush->qdc->amazingdata->tushare order"
+            )
+            overrides = entry.get("field_override") or {}
+            for field, src in overrides.items():
+                assert src != "tushare", (
+                    f"{table}: field_override {field} must not depend on rate-limited tushare"
+                )
+
     def test_loaders_canonical_and_legacy_aliases(self):
-        assert get_primary_source("cn_stock_bars_daily") == "tushare"
-        assert get_primary_source("bars_daily") == "tushare"
+        assert get_primary_source("cn_stock_bars_daily") == "straightflush"
+        assert get_primary_source("bars_daily") == "straightflush"
         assert get_source_priority("cn_stock_bars_daily") == [
-            "tushare",
+            "straightflush",
             "qdc",
             "amazingdata",
-            "straightflush",
         ]
-        assert get_source_priority("fundamental") == ["tushare", "qdc", "straightflush"]
-        assert get_field_overrides("bars_daily") == {"adjfactor": "tushare"}
-        assert get_field_overrides("cn_etf_bars_daily") == {"adjfactor": "tushare"}
+        assert get_source_priority("fundamental") == ["straightflush", "qdc"]
+        assert get_field_overrides("bars_daily") == {"adjfactor": "qdc"}
+        assert get_field_overrides("cn_etf_bars_daily") == {"adjfactor": "qdc"}
+        assert get_field_overrides("fundamental") == {"pe_ttm": "qdc"}
         assert get_field_overrides("bars_minute") == {}
         assert get_source_priority("reference", "calendar") == [
-            "tushare",
-            "qdc",
             "straightflush",
+            "qdc",
             "amazingdata",
         ]
         assert get_primary_source("cn_stock_fundamental_consensus") == "qdc"
         assert get_primary_source("cn_stock_tick") == "qdc"
         assert get_primary_source("cn_etf_tick") == "qdc"
+        assert get_primary_source("cn_etf_bars_daily") == "straightflush"
 
     def test_field_override_source_must_be_in_priority(self, tmp_path):
         bad = tmp_path / "source_priority.yaml"
         bad.write_text(
             "cn_stock_bars_daily:\n"
-            "  priority: [tushare, qdc]\n"
+            "  priority: [straightflush, qdc]\n"
             "  field_override:\n"
             "    adjfactor: amazingdata\n",
             encoding="utf-8",
@@ -395,9 +419,9 @@ class TestSourcePriorityConfig:
 
 class TestShouldCrossCheckHook:
     def test_fires_only_when_primary_done_and_all_backups_raw_arrived(self, tmp_path):
-        backups = ["qdc", "amazingdata", "straightflush"]
+        backups = ["qdc", "amazingdata"]
         assert not should_cross_check(
-            "tushare", "bars_daily", TRADE_DATE, data_root=tmp_path
+            "straightflush", "bars_daily", TRADE_DATE, data_root=tmp_path
         )
 
         # Partial backups still do not trigger
@@ -405,7 +429,7 @@ class TestShouldCrossCheckHook:
         first.parent.mkdir(parents=True, exist_ok=True)
         first.touch()
         assert not should_cross_check(
-            "tushare", "bars_daily", TRADE_DATE, data_root=tmp_path
+            "straightflush", "bars_daily", TRADE_DATE, data_root=tmp_path
         )
 
         for b in backups[1:]:
@@ -414,12 +438,12 @@ class TestShouldCrossCheckHook:
             p.touch()
 
         assert should_cross_check(
-            "tushare", "bars_daily", TRADE_DATE, data_root=tmp_path
+            "straightflush", "bars_daily", TRADE_DATE, data_root=tmp_path
         )
         assert raw_exists("qdc", "bars_daily", TRADE_DATE, data_root=tmp_path)
 
     def test_backup_ingest_never_triggers(self, tmp_path):
-        for b in ("qdc", "amazingdata", "straightflush"):
+        for b in ("qdc", "amazingdata"):
             p = raw_path(b, "bars_daily", TRADE_DATE, tmp_path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.touch()
@@ -452,10 +476,10 @@ class TestOcrRegressions:
             "tushare", "factor", TRADE_DATE, data_root=tmp_path
         )
         assert not should_cross_check(
-            "tushare", "bars_daily_futures", TRADE_DATE, data_root=tmp_path
+            "straightflush", "bars_daily_futures", TRADE_DATE, data_root=tmp_path
         )
         assert not should_cross_check(
-            "tushare", "reference", TRADE_DATE, data_root=tmp_path
+            "straightflush", "reference", TRADE_DATE, data_root=tmp_path
         )
 
     def test_zero_matched_rows_is_inconclusive_not_clean(self, caplog):

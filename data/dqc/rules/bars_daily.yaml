@@ -189,9 +189,9 @@ rules:
     type: column_check
     columns: [ticker]
     condition: "regex"
-    value: "^[036]\\d{5}\\.(SH|SZ)$"
+    value: "^([036]\\d{5}\\.(SH|SZ)|(43|83|87|92)\\d{4}\\.BJ)$"
     applicability: [daily, minute, fund, factor, reference]
-    threshold: "regex ^[036]\\d{5}\\.(SH|SZ)$"
+    threshold: "regex ^([036]\\d{5}\\.(SH|SZ)|(43|83|87|92)\\d{4}\\.BJ)$"
     threshold_source: fixed
     boundary: "full regex match: partial match or mismatch fails"
     description: "Ticker format validation"

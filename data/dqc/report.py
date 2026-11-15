@@ -365,30 +365,74 @@ def build_reference_overrides(
     root = Path(data_root)
     overrides: dict[str, Any] = {"today": data_date}
 
-    cal = root / "asset" / "calendar" / "sse.parquet"
-    if cal.exists():
+    cal = next(
+        (
+            p
+            for p in (
+                root / "asset" / "cn_calendar" / "SSE.parquet",
+                root / "asset" / "cn_calendar" / "sse.parquet",
+                root / "asset" / "calendar" / "sse.parquet",
+            )
+            if p.exists()
+        ),
+        None,
+    )
+    if cal is not None:
         cal_df = pd.read_parquet(cal)
         if "trade_date" in cal_df.columns:
             overrides["calendar_dates"] = sorted(
                 pd.to_datetime(cal_df["trade_date"]).dt.strftime("%Y-%m-%d").unique()
             )
 
-    ca = root / "asset" / "reference" / "corporate_actions.parquet"
-    if ca.exists():
+    ca = next(
+        (
+            p
+            for p in (
+                root
+                / "asset"
+                / "cn_stock_corporate_actions"
+                / "corporate_actions.parquet",
+                root / "asset" / "reference" / "corporate_actions.parquet",
+            )
+            if p.exists()
+        ),
+        None,
+    )
+    if ca is not None:
         ca_df = pd.read_parquet(ca)
         if "ex_date" in ca_df.columns:
             overrides["ca_dates"] = sorted(
                 pd.to_datetime(ca_df["ex_date"]).dt.strftime("%Y-%m-%d").unique()
             )
 
-    ind = root / "asset" / "reference" / "industry.parquet"
-    if ind.exists():
+    ind = next(
+        (
+            p
+            for p in (
+                root / "asset" / "cn_stock_industry" / "industry.parquet",
+                root / "asset" / "reference" / "industry.parquet",
+            )
+            if p.exists()
+        ),
+        None,
+    )
+    if ind is not None:
         ind_df = pd.read_parquet(ind)
         if "ticker" in ind_df.columns:
             overrides["universe"] = sorted(set(ind_df["ticker"].astype(str)))
 
-    bars_dir = root / "asset" / "bars_daily"
-    if bars_dir.exists():
+    bars_dir = next(
+        (
+            d
+            for d in (
+                root / "asset" / "cn_stock_bars_daily",
+                root / "asset" / "bars_daily",
+            )
+            if d.exists()
+        ),
+        None,
+    )
+    if bars_dir is not None:
         prior = [
             f
             for f in bars_dir.glob("*.parquet")

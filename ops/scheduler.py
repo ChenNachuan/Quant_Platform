@@ -6,7 +6,7 @@
 2. 任一任务终态 ``FAILED`` 时，无论 ``on_failure`` 为 ``skip`` 或 ``hold``，均须为
    当日任务链（:func:`job_chain`）中的所有下游任务写入 ``SKIPPED`` 记录并终止流水线。
 3. 若信号任务因上游失败被跳过（``SKIPPED``），同样触发保留旧组合逻辑。
-4. ``fetch_stock_daily`` 通过子进程调用 Docker 容器执行。
+4. ``fetch_stock_daily`` 通过子进程调用正式入库脚本执行。
 5. ``run_id`` 格式为 ``{YYYYMMDD}_{job_name}_{seq:03d}``，按 ``(day, job)`` 递增；
    每次尝试（含 ``RETRY``）均向 ``logs/runs/jobs.jsonl`` 追加一条记录。
 """
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -176,15 +177,14 @@ def _pending(name: str, owner: str) -> Callable[[], None]:
 
 
 def fetch_stock_daily() -> str:
-    """通过子进程在项目根目录运行 Docker 容器内的日行情拉取脚本。"""
+    """通过子进程在项目根目录运行正式日频入库脚本。"""
+    script = REPO_ROOT / "scripts" / "ingestion" / "fetch_daily.py"
     proc = subprocess.run(
         [
-            "docker-compose",
-            "run",
-            "--rm",
-            "amazingdata",
-            "python3",
-            "/scripts/data_fetcher/fetch_stock_daily.py",
+            sys.executable,
+            str(script),
+            "--tables",
+            "cn_stock_bars_daily",
         ],
         cwd=REPO_ROOT,
         capture_output=True,

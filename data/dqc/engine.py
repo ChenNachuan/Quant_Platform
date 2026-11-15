@@ -496,6 +496,7 @@ def ingest_with_dqc(
     batch_config: BatchRejectConfig | None = None,
     data_root: str | os.PathLike = str(DATA_ROOT),
     target_path: str | os.PathLike | None = None,
+    source_tag: str | None = None,
 ) -> pd.DataFrame:
     """执行七步 DQC 入库流程并返回清洗后的 ``df_clean``。
 
@@ -567,9 +568,15 @@ def ingest_with_dqc(
         else _landing_path(table, data_date, data_root)
     )
     if target_path is None and is_monthly_partition(table):
-        upsert_parquet_atomic(validated, path, table=table, partition_dates=[data_date])
+        upsert_parquet_atomic(
+            validated,
+            path,
+            table=table,
+            partition_dates=[data_date],
+            source_tag=source_tag,
+        )
     else:
-        write_parquet_atomic(validated, path, table=table)
+        write_parquet_atomic(validated, path, table=table, source_tag=source_tag)
 
     flagged_rate = (
         float((df_clean["quality_flag"] != 0).mean()) if len(df_clean) else 0.0

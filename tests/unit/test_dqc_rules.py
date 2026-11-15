@@ -730,7 +730,11 @@ class TestHardTriggerCases:
     def test_L13_ticker_format(self):
         df = self._daily()
         df.loc[0, "ticker"] = "999999.XX"
-        self._assert_caught("L13", evaluate_column_check(df, self._rule("L13")))
+        df.loc[1, "ticker"] = "920001.BJ"
+        mask = evaluate_column_check(df, self._rule("L13"))
+        assert bool(mask.iloc[0]) is True
+        assert bool(mask.iloc[1]) is False
+        self._assert_caught("L13", mask)
 
     def test_L14_date_format(self):
         df = self._daily()

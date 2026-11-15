@@ -342,10 +342,13 @@ class StraightFlushAdapter(SourceAdapter):
         return pd.DataFrame(rows)
 
     def _fetch_calendar(self, trade_date: date) -> pd.DataFrame:
-        date_str = trade_date.strftime("%Y%m%d")
+        # 接口单次上限 10 个自然年：拉取截至 trade_date 的近 10 年交易日历
+        start_day = date(max(1990, trade_date.year - 9), 1, 1)
+        start_str = start_day.strftime("%Y%m%d")
+        end_str = trade_date.strftime("%Y%m%d")
         payload = self._request_json(
             "/api/a-share/calendar/trading-days",
-            params={"start_date": date_str, "end_date": date_str},
+            params={"start_date": start_str, "end_date": end_str},
         )
         items = (payload.get("data") or {}).get("item") or []
         return pd.DataFrame(items)
