@@ -1,6 +1,6 @@
 """FactorDAG 调度层：静态拓扑执行、内存缓存与故障隔离。
 
-基于 ``research.factor_interface.Factor`` 契约，使用 ``parse_dependency`` 解析
+基于 ``research.factor.interface.Factor`` 契约，使用 ``parse_dependency`` 解析
 ``depends_on()`` 构建静态有向无环图，按拓扑顺序执行并维护以
 ``(name, version, date_range, depends_hash)`` 为键的内存缓存。
 """
@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from research.factor_interface import (
+from research.factor.interface import (
     KIND_FACTOR,
     KIND_TABLE,
     Factor,

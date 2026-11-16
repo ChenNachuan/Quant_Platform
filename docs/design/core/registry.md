@@ -6,7 +6,7 @@
 
 共享注册表机制：`FactorRegistry`（因子类注册与工厂创建）与 `RuleRegistry`（规则注册）。**代码即注册表**——因子存在性由装饰器注册，元数据从 Factor 类属性自动提取，不建独立注册表库。
 
-边界：因子治理流程（入库/退出/去重/生命周期）归 ../research/factor_governance.md；策略侧 alphaType 注册是另一套双表（../research/alpha_type.md），**两套各司其职**——因子侧 FactorRegistry + metadata.json，策略侧 alphaType JSON。
+边界：因子治理流程（入库/退出/去重/生命周期）归 [../research/factor/governance.md](../research/factor/governance.md)；策略侧 alphaType 注册是另一套双表（[../research/signal/alpha_type.md](../research/signal/alpha_type.md)），**两套各司其职**——因子侧 FactorRegistry + metadata.json，策略侧 alphaType JSON。
 
 ## 接口签名
 

@@ -1,18 +1,18 @@
 # factor_runtime
 
-> 域：research · 对应代码 research/factor_runtime.py · 来源 §58 / §59（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/factor/runtime.py · 来源 §58 / §59（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
-FactorDAG 的构建与执行：依赖解析、拓扑排序、缓存、增量更新、层内并行、失败处理、ML 因子调度。消费 [factor_interface.md](factor_interface.md) 的 `depends_on()`，产出的 DataFrame 交 [factor_storage.md](factor_storage.md) 落盘、交 [post_processor.md](post_processor.md) 后处理。
+FactorDAG 的构建与执行：依赖解析、拓扑排序、缓存、增量更新、层内并行、失败处理、ML 因子调度。消费 [factor_interface.md](interface.md) 的 `depends_on()`，产出的 DataFrame 交 [factor_storage.md](storage.md) 落盘、交 [post_processor.md](../post_processor.md) 后处理。
 
 不做：按日期切分并行、per-di 精细增量、状态持久化（5 色灯）、外部调度框架、AST 静态分析。
 
 ### 拓扑分层与增量缓存流程
 
-![FactorDAG 拓扑分层执行与增量缓存机制](../.diagrams/09-factor-dag-runtime.png)
+![FactorDAG 拓扑分层执行与增量缓存机制](../../.diagrams/09-factor-dag-runtime.png)
 
-> [打开 Archify 交互图](../.diagrams/09-factor-dag-runtime.html)
+> [打开 Archify 交互图](../../.diagrams/09-factor-dag-runtime.html)
 
 ## 接口签名
 
@@ -35,7 +35,7 @@ def compute_all_safe(...) -> tuple[dict[str, pd.DataFrame], dict[str, Exception]
     # 容错版：失败不阻塞独立因子，返回 (results, errors)
 ```
 
-缓存 key = `(factor_name, version, date_range, depends_hash)`，目录见 [factor_storage.md](factor_storage.md)。
+缓存 key = `(factor_name, version, date_range, depends_hash)`，目录见 [factor_storage.md](storage.md)。
 
 ## 关键决策
 

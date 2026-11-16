@@ -6,7 +6,7 @@
 
 多资产交易规则的**唯一查表入口**：T+1、手数、印花税、涨跌停幅度、ST、做空等 A 股差异规则集中一处，执行层参数从这里取而不是散落硬编码。
 
-边界：规则的**执行**在各层——T+1 可卖判定在 ../execution/order_generation.md、涨跌停/做空检查在 ../execution/risk_control.md、印花税/手数在 ../execution/fee_model.md、ST/停牌过滤在 ../research/factor_interface.md、板块编码在 ../data/ingestion.md；asset_rules 只提供规则值。
+边界：规则的**执行**在各层——T+1 可卖判定在 ../execution/order_generation.md、涨跌停/做空检查在 ../execution/risk_control.md、印花税/手数在 ../execution/fee_model.md、ST/停牌过滤在 [../research/factor/interface.md](../research/factor/interface.md)、板块编码在 ../data/ingestion.md；asset_rules 只提供规则值。
 
 ## 接口签名
 

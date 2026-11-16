@@ -52,7 +52,7 @@ docker-compose run --rm amazingdata python3 /scripts/bootstrap/amazing_pull.py -
 ```text
 core/         共享工具（config / registry / logging / types / asset_rules）
 data/         数据接入与存储（SourceAdapter / Normalizer / DQC / storage_schema / storage_ops / DataAPI）
-research/     投研链路（Factor / FactorDAG / PostProcessor / FactorCombiner / AlphaSignal / ML）
+research/     投研链路（factor/ · signal/ · ml/ · post_processor · cross_sectional_backtest）
 execution/    执行与风控（PortfolioConstruction / OrderGeneration / RiskControl / FeeModel / Ledger / Broker）
 ops/          运维闭环（Scheduler / Monitoring / Reporting / Alerting）
 ```
@@ -135,7 +135,7 @@ $QUANT_DATA_ROOT/
 | 存储与查询 | Parquet + DuckDB 持久化 `catalog.duckdb` | ClickHouse、DuckDB 纯内存 | [docs/design/data/storage_schema.md](docs/design/data/storage_schema.md) |
 | 数据接入 | `SourceAdapter` 四方法 + watermark + Normalizer | 混合直写 asset 层 | [docs/design/data/ingestion.md](docs/design/data/ingestion.md) |
 | 多资产规则 | `core/asset_rules.py` 单表驱动 | 编译期 Traits / 散落硬编码 | [docs/design/core/asset_rules.md](docs/design/core/asset_rules.md) |
-| 因子组织与评价 | `Factor ABC` + `FactorDAG` + `alphalens-reloaded` | EBGraph / EventBrick | [docs/design/research/factor_interface.md](docs/design/research/factor_interface.md) |
+| 因子组织与评价 | `Factor ABC` + `FactorDAG` + `alphalens-reloaded` | EBGraph / EventBrick | [docs/design/research/factor/interface.md](docs/design/research/factor/interface.md) |
 | 回测与执行 | pandas 自研 `SimBroker` / `QmtBroker` | backtrader / vnpy 事件内核 | [docs/design/execution/broker.md](docs/design/execution/broker.md) |
 | 配置与密钥 | 三层 TOML + `.env` + `config_snapshot` | YAML 主配置（`on`→`True` 陷阱） | [docs/design/core/config.md](docs/design/core/config.md) |
 | 日志与调度 | Python logging + JSONL + APScheduler | ELK、crontab | [docs/design/ops/scheduler.md](docs/design/ops/scheduler.md) |

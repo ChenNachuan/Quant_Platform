@@ -1,0 +1,83 @@
+"""因子子包：因子定义契约、DAG 运行时、存储布局、评价门控与治理生命周期。"""
+
+from research.factor.evaluation import (
+    DEFAULT_PERIODS,
+    EXIT_IC_THRESHOLD,
+    GATE_IC_MIN,
+    GATE_IR_MIN,
+    GATE_T_BASE,
+    AlphalensAdapter,
+    EvalResult,
+    FactorPipeline,
+    check_exit,
+)
+from research.factor.governance import (
+    check_admission,
+    check_factor_health,
+    detect_redundant_factors,
+    diagnose_factor,
+    evaluate_factor,
+    list_factor_meta,
+    plot_factor_report,
+    redundancy_tier,
+    transition_lifecycle,
+)
+from research.factor.interface import (
+    Factor,
+    extract_factor_meta,
+    factor_meta,
+    parse_dependency,
+    validate_output,
+)
+from research.factor.runtime import (
+    FactorDAG,
+    MLFactor,
+    compute_all,
+    compute_all_safe,
+    compute_depends_hash,
+    compute_factor,
+)
+from research.factor.storage import (
+    load_factor,
+    load_factor_matrix,
+    save_factor_append,
+    save_factor_full,
+    write_metadata,
+)
+
+__all__ = [
+    "AlphalensAdapter",
+    "DEFAULT_PERIODS",
+    "EXIT_IC_THRESHOLD",
+    "EvalResult",
+    "Factor",
+    "FactorDAG",
+    "FactorPipeline",
+    "GATE_IC_MIN",
+    "GATE_IR_MIN",
+    "GATE_T_BASE",
+    "MLFactor",
+    "check_admission",
+    "check_exit",
+    "check_factor_health",
+    "compute_all",
+    "compute_all_safe",
+    "compute_depends_hash",
+    "compute_factor",
+    "detect_redundant_factors",
+    "diagnose_factor",
+    "evaluate_factor",
+    "extract_factor_meta",
+    "factor_meta",
+    "list_factor_meta",
+    "load_factor",
+    "load_factor_matrix",
+    "parse_dependency",
+    "plot_factor_report",
+    "redundancy_tier",
+    "save_factor_append",
+    "save_factor_full",
+    "transition_lifecycle",
+    "validate_output",
+    "write_metadata",
+]

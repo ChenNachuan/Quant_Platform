@@ -15,7 +15,7 @@
 | `Position` | 单票持仓（数量/均价/市值/盈亏） | [../execution/ledger.md](../execution/ledger.md) |
 | `Account` | 账户资金（cash/冻结/总资产/累计费用） | [../execution/ledger.md](../execution/ledger.md) |
 | `JournalEntry` | 事件流记录（append-only，账本本体） | [../execution/ledger.md](../execution/ledger.md) |
-| `AlphaSignal` | 截面分数 DataFrame | [../research/alpha_signal.md](../research/alpha_signal.md) |
+| `AlphaSignal` | 截面分数 DataFrame | [../research/signal/alpha_signal.md](../research/signal/alpha_signal.md) |
 | `TargetPortfolio` | ticker → 目标权重/金额 | [../execution/portfolio_construction.md](../execution/portfolio_construction.md) |
 | `Direction` / `OrderStatus` / `PriceType` | 账本三枚举 | [../execution/ledger.md](../execution/ledger.md) |
 | `ASSET_RULES` 相关类型 | 多资产规则值 | [asset_rules.md](asset_rules.md) |
@@ -35,7 +35,7 @@
 | `data/ingestion.py`、`raw.py`、`quarantine.py`、`data_revision.py` | `table` | `str`（`SCHEMA` 规范名或别名） | `cn_stock_bars_daily` / `bars_daily` | 资产存储表名与审计路径分区 |
 | `data/dqc/engine.py` | `dqc_group` | `DqcRuleGroup` | `bars_daily` / `bars_minute` / `fundamental` / `factor` / `reference` | DQC 规则集名 |
 
-注：`research/alpha_type.py` 标签维度 `TAG_DIMENSIONS["asset_type"]` 与 `Factor.asset_types` 描述因子适用标的类别，保留原语义命名。
+注：`research/signal/alpha_type.py` 标签维度 `TAG_DIMENSIONS["asset_type"]` 与 `Factor.asset_types` 描述因子适用标的类别，保留原语义命名。
 
 ## 关键决策
 

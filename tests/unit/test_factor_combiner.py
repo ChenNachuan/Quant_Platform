@@ -1,4 +1,4 @@
-"""Tests for research.factor_combiner — combination, preprocess, evaluation.
+"""Tests for research.signal.combiner — combination, preprocess, evaluation.
 
 Covers every DoD row of S6-T1:
 
@@ -26,7 +26,7 @@ import pandas as pd
 import pytest
 
 from core.config import config_snapshot
-from research.factor_combiner import (
+from research.signal.combiner import (
     DEFAULT_LOOKBACK,
     EVAL_METRIC_KEYS,
     WEIGHT_METHODS,
@@ -960,7 +960,7 @@ class TestEvaluate:
         so the drawdown from initial capital is invisible and the metric
         under-reports (and with it, calmar).
         """
-        from research.factor_combiner import _max_drawdown
+        from research.signal.combiner import _max_drawdown
 
         rets = pd.Series([-0.10, 0.05])
         mdd = _max_drawdown(rets)

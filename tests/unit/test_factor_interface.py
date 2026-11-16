@@ -1,4 +1,4 @@
-"""Tests for research.factor_interface — Factor ABC, dependency parsing,
+"""Tests for research.factor.interface — Factor ABC, dependency parsing,
 output contract, metadata extraction, and category / name validation.
 
 Covers every DoD row: depends_on prefix resolution and rejection, output
@@ -12,7 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from research.factor_interface import (
+from research.factor.interface import (
     DEFAULT_CATEGORY,
     FACTOR_CATEGORIES,
     KIND_FACTOR,
@@ -225,7 +225,11 @@ class TestNameValidation:
 
     def test_missing_name_rejected(self):
         with pytest.raises(ValueError, match="name"):
-            type("NoName", (Factor,), {"depends_on": lambda s: [], "compute": lambda s, d: None})
+            type(
+                "NoName",
+                (Factor,),
+                {"depends_on": lambda s: [], "compute": lambda s, d: None},
+            )
 
     def test_empty_name_rejected(self):
         with pytest.raises(ValueError, match="name"):
@@ -237,7 +241,17 @@ class TestNameValidation:
 
     @pytest.mark.parametrize(
         "bad",
-        ["mom20", "Momentum20", "factor_001", "20d", "_mom", "mom_", "mom__20d", "mom-20d", "mom 20d"],
+        [
+            "mom20",
+            "Momentum20",
+            "factor_001",
+            "20d",
+            "_mom",
+            "mom_",
+            "mom__20d",
+            "mom-20d",
+            "mom 20d",
+        ],
     )
     def test_bad_name_rejected(self, bad):
         with pytest.raises(ValueError, match="snake_case"):
@@ -249,7 +263,14 @@ class TestNameValidation:
 
     @pytest.mark.parametrize(
         "good",
-        ["momentum_20d", "vol_adj_momentum", "cs_rank_close", "sentiment_flow_5d", "a_b", "x1_y2_z3"],
+        [
+            "momentum_20d",
+            "vol_adj_momentum",
+            "cs_rank_close",
+            "sentiment_flow_5d",
+            "a_b",
+            "x1_y2_z3",
+        ],
     )
     def test_good_name_accepted(self, good):
         klass = type(

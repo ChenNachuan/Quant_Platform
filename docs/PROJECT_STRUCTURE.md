@@ -25,7 +25,10 @@ Quant/
 │   ├── ingestion/          # 日常入库、区间回补、交叉校验与容器拉取脚本
 │   └── data_processing/
 │ 
-├── research/               # 因子接口/运行时/存储、信号、评价、治理、ML 信号
+├── research/               # 投研域（因子体系 / 信号合成 / ML 信号 / 后处理与截面回测）
+│   ├── factor/             # interface.py / runtime.py / storage.py / evaluation.py / governance.py
+│   ├── signal/             # combiner.py / alpha_signal.py / alpha_type.py
+│   ├── ml/                 # signal.py
 │   └── reports/
 │ 
 ├── factor_library/         # 多资产因子

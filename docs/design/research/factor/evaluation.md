@@ -1,13 +1,13 @@
 # factor_evaluation
 
-> 域：research · 对应代码 research/factor_evaluation.py · 来源 §27（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/factor/evaluation.py · 来源 §27（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
 alphalens（**alphalens-reloaded 0.4.6**，§28.2/§28.6）接入与因子评价流水线：`FactorPipeline`（compute → preprocess → evaluate → register）+ `AlphalensAdapter` 格式适配 + 门控判定 + 产出落盘 + 月度重评估。
 
 - 负责：因子数据来源桥接（开发期现算 / 注册后读表）、pricing 口径归一、评价指标提取、准入/退出门控、attempt_log 多重检验记账。
-- 不负责：组合回测（门控通过后才进策略）、中性化算法本身（[post_processor.md](post_processor.md)）、注册表治理流程（[factor_governance.md](factor_governance.md)）。
+- 不负责：组合回测（门控通过后才进策略）、中性化算法本身（[post_processor.md](../post_processor.md)）、注册表治理流程（[factor_governance.md](governance.md)）。
 - 下游策略**不直接依赖 alphalens**，只经 `DataAPI.get_factor()` 消费注册后因子。
 
 ## 接口签名

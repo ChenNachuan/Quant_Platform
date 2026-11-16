@@ -1,14 +1,14 @@
 # factor_governance
 
-> 域：research · 对应代码 research/factor_governance.py · 来源 §62（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/factor/governance.py · 来源 §62（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
-因子治理层：入库/退出的量化标准、生命周期状态机、血缘、命名与文档规范、相似因子去重、容量控制、异常排查、单测范式、四图报告。消费 [factor_evaluation.md](factor_evaluation.md) 的 IC 序列，与 [factor_storage.md](factor_storage.md) 的 metadata.json、[factor_runtime.md](factor_runtime.md) 的 depends_hash 衔接。
+因子治理层：入库/退出的量化标准、生命周期状态机、血缘、命名与文档规范、相似因子去重、容量控制、异常排查、单测范式、四图报告。消费 [factor_evaluation.md](evaluation.md) 的 IC 序列，与 [factor_storage.md](storage.md) 的 metadata.json、[factor_runtime.md](runtime.md) 的 depends_hash 衔接。
 
-注册表机制（`FactorRegistry` / `@register_factor` / 工厂创建）归 [../core/registry.md](../core/registry.md)，本模块只定治理口径（代码即注册表、元数据载体、状态三态）。
+注册表机制（`FactorRegistry` / `@register_factor` / 工厂创建）归 [../core/registry.md](../../core/registry.md)，本模块只定治理口径（代码即注册表、元数据载体、状态三态）。
 
-不属于本模块：IC 计算与 alphalens tearsheet（[factor_evaluation.md](factor_evaluation.md)）、多因子合成（[factor_combiner.md](factor_combiner.md)）、独立数据库/JSON 注册表（不建）。
+不属于本模块：IC 计算与 alphalens tearsheet（[factor_evaluation.md](evaluation.md)）、多因子合成（[factor_combiner.md](../signal/combiner.md)）、独立数据库/JSON 注册表（不建）。
 
 ## 接口签名
 
@@ -44,9 +44,9 @@ def plot_factor_report(factor_values, returns, factor_name,
 
 生命周期：`draft →(入库检验通过)→ production →(衰减检测触发)→ deprecated`；production 期间 rolling 监控可进 `warning`（提前重训/降权）再降级。deprecated 不物理删除（保留代码+历史数据）。
 
-![因子三态生命周期与健康监控](../.diagrams/10-factor-lifecycle.png)
+![因子三态生命周期与健康监控](../../.diagrams/10-factor-lifecycle.png)
 
-> [打开 Archify 交互图](../.diagrams/10-factor-lifecycle.html)
+> [打开 Archify 交互图](../../.diagrams/10-factor-lifecycle.html)
 
 ## 关键决策
 
@@ -61,7 +61,7 @@ def plot_factor_report(factor_values, returns, factor_name,
 | 命名 `{类型}_{核心语义}_{参数}` snake_case | `mom20`/`Momentum20`/`factor_001`/中文 | 可读性优先；UFormula 短 tag 是公式热路径需求 |
 | 文档=docstring + description 属性 | 独立文档文件 | compute() 是权威定义；研究过程写研究日志 |
 | 去重：截面 Spearman 均值 >0.7 标冗余，4 档处理 | — | 「不做相关性检查，5 个相关 0.9 的因子 = 1 个因子」（§7.8） |
-| 冗余处理：保留 IC 高者，**不做合并** | 等权平均合并 | 合并引入新自由度；合成在 [factor_combiner.md](factor_combiner.md) |
+| 冗余处理：保留 IC 高者，**不做合并** | 等权平均合并 | 合并引入新自由度；合成在 [factor_combiner.md](../signal/combiner.md) |
 | deprecated 不物理删除 | 删代码/删数据 | 保回测复现与排查 |
 | 容量 20-50 个 production 因子 | 无上限 | 「3-5 个就够」是单策略层面；因子库供多策略选用；>50 说明去重没做好 |
 | 多重检验校正 t=√(2·ln N) | 固定 t>2 不看 N | 试 100 个才找到的 t=2.5 不可信（§8.9[8]，对齐 attempt_log） |

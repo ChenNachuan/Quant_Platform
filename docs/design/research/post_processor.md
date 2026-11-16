@@ -6,9 +6,9 @@
 
 因子后处理流水线：原始因子值 → 干净因子值。四步 **去极值 → 填充 → 标准化 → 中性化（可选）**，Pipeline 模式运行时可配置。所有步骤 `groupby(date)` 截面独立计算，天然无前视。
 
-- 输入：`compute()` 原始输出（[factor_storage.md](factor_storage.md) 存的就是原始值）
-- 输出：干净因子值 → 对接 [factor_evaluation.md](factor_evaluation.md)（alphalens）
-- 不属于本模块：因子计算（[factor_interface.md](factor_interface.md)）、独立正交化步骤（并入中性化回归）
+- 输入：`compute()` 原始输出（[factor_storage.md](factor/storage.md) 存的就是原始值）
+- 输出：干净因子值 → 对接 [factor_evaluation.md](factor/evaluation.md)（alphalens）
+- 不属于本模块：因子计算（[factor_interface.md](factor/interface.md)）、独立正交化步骤（并入中性化回归）
 
 ## 接口签名
 

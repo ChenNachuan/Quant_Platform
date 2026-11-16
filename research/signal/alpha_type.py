@@ -16,7 +16,7 @@ from typing import Any
 
 import pandas as pd
 
-from research.alpha_signal import DEFAULT_K, WEIGHT_METHODS, signal_to_weights
+from research.signal.alpha_signal import DEFAULT_K, WEIGHT_METHODS, signal_to_weights
 from core.config import DATA_ROOT
 
 __all__ = [

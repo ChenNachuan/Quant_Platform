@@ -1,0 +1,63 @@
+"""信号子包：多因子合成、AlphaSignal 统一信号层与 alphaType 策略配方治理。"""
+
+from research.signal.alpha_signal import (
+    DEFAULT_K,
+    AlphaSignal,
+    signal_to_weights,
+    write_signal,
+)
+from research.signal.alpha_type import (
+    REGISTRY_DIR,
+    TAG_DIMENSIONS,
+    Rule,
+    RulePipeline,
+    TopKFilter,
+    build_portfolio,
+    compute_turnover,
+    create_alpha_type,
+    create_rule,
+    list_alpha_types,
+    log_audit,
+    promote_alpha_type,
+    run_daily_signal,
+    send_alert,
+    transition_alpha_type,
+)
+from research.signal.combiner import (
+    DEFAULT_LOOKBACK,
+    EVAL_METRIC_KEYS,
+    ZERO_SIGMA_IR,
+    FactorCombiner,
+    factor_contribution,
+    preprocess,
+    write_eval_report,
+)
+
+__all__ = [
+    "AlphaSignal",
+    "DEFAULT_K",
+    "DEFAULT_LOOKBACK",
+    "EVAL_METRIC_KEYS",
+    "FactorCombiner",
+    "REGISTRY_DIR",
+    "Rule",
+    "RulePipeline",
+    "TAG_DIMENSIONS",
+    "TopKFilter",
+    "ZERO_SIGMA_IR",
+    "build_portfolio",
+    "compute_turnover",
+    "create_alpha_type",
+    "create_rule",
+    "factor_contribution",
+    "list_alpha_types",
+    "log_audit",
+    "preprocess",
+    "promote_alpha_type",
+    "run_daily_signal",
+    "send_alert",
+    "signal_to_weights",
+    "transition_alpha_type",
+    "write_eval_report",
+    "write_signal",
+]

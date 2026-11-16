@@ -11,7 +11,7 @@ Three lines named by the ticket, plus the two seams the ACs pin:
 * **归因报告解读三线** — the design's three interpretation lines each fire on
   their own condition and stay silent when the source is missing.
 * **ac-4** — the factor-contribution breakdown is
-  ``research.factor_combiner.factor_contribution`` called verbatim, not a copy.
+  ``research.signal.combiner.factor_contribution`` called verbatim, not a copy.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import pytest
 from scipy.stats import linregress
 
 import ops.reporting as reporting
-import research.factor_combiner as factor_combiner
+import research.signal.combiner as factor_combiner
 from ops.alerting import AlertLevel
 from ops.reporting import (
     ANNUALIZATION,
@@ -330,7 +330,7 @@ class TestInterpretation:
 
 
 # ---------------------------------------------------------------------------
-# ac-4 — the factor-contribution breakdown reuses research.factor_combiner
+# ac-4 — the factor-contribution breakdown reuses research.signal.combiner
 # ---------------------------------------------------------------------------
 
 

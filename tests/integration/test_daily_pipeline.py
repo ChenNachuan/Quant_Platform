@@ -608,7 +608,7 @@ class TestAttributionBody:
         assert "## Alpha-Beta 回归" in content
         assert "| alpha_annual |" in content
         assert "## 因子贡献拆解" in content
-        # research.factor_combiner.factor_contribution, rendered verbatim.
+        # research.signal.combiner.factor_contribution, rendered verbatim.
         assert "| momentum | 0.6000 |" in content
         assert "| value | -0.4000 |" in content
         assert "## 解读" in content

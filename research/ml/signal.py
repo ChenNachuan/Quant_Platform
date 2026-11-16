@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from research.alpha_signal import _cross_zscore  # noqa: PLC2701
+from research.signal.alpha_signal import _cross_zscore  # noqa: PLC2701
 from research.post_processor import standardize_zscore
 from core.config import DATA_ROOT
 
@@ -154,7 +154,7 @@ def build_feature_matrix(
     if not specs:
         raise ValueError("specs must be a non-empty list")
 
-    from research.factor_storage import load_factor  # 延迟导入以避免循环依赖
+    from research.factor.storage import load_factor  # 延迟导入以避免循环依赖
 
     frames: list[pd.DataFrame] = []
     for i, spec in enumerate(specs):

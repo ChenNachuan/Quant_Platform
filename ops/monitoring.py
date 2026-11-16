@@ -25,7 +25,7 @@ import pandas as pd
 
 from data.data_api import DataAPI
 from ops import alerting
-from research.alpha_type import compute_turnover
+from research.signal.alpha_type import compute_turnover
 from core.config import DATA_ROOT
 
 #: 指标时点快照追加写路径

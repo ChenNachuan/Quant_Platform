@@ -1,4 +1,4 @@
-"""Tests for research.factor_runtime — FactorDAG, caching, failure isolation.
+"""Tests for research.factor.runtime — FactorDAG, caching, failure isolation.
 
 Covers every DoD row: cycle detection (ValueError), dependency ordering
 (upstream before downstream), cache key shape and override semantics
@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.factor_interface import Factor
-from research.factor_runtime import (
+from research.factor.interface import Factor
+from research.factor.runtime import (
     FactorDAG,
     MLFactor,
     compute_all,
@@ -387,7 +387,9 @@ class TestCacheKey:
         result2 = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08")
         assert result1 is result2  # cache hit — same object
 
-        result3 = compute_factor(dag, "returns_1d", "2024-01-02", "2024-01-08", force=True)
+        result3 = compute_factor(
+            dag, "returns_1d", "2024-01-02", "2024-01-08", force=True
+        )
         assert result3 is not result1  # force recomputed
         pd.testing.assert_frame_equal(result3, result1)
 

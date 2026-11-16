@@ -57,4 +57,4 @@ def append_metrics_snapshot(date: str, metrics: dict) -> None:
 - collect_metrics 返回 {"strategy": {...}, "system":{...}},每项含 value和status
 - 策略指标三档(健康/警告/退出),系统指标两档(正常/超阈值)
 - 时点快照追加写 logs/ops/metrics.jsonl,供告警判定和趋势分析
-- 策略指标阈值与因子治理的衰减退出([../research/factor_governance.md](../research/factor_governance.md))共用同一套判据
+- 策略指标阈值与因子治理的衰减退出([../research/factor/governance.md](../research/factor/governance.md))共用同一套判据

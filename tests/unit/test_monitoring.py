@@ -92,7 +92,7 @@ def _day_end(nav=None, benchmark_nav=None, position_count=None, design=None):
 
 
 def _eval(root, name, *, max_drawdown=-0.10, ic_mean=0.04, mtime=None):
-    from research.factor_combiner import EVAL_METRIC_KEYS, write_eval_report
+    from research.signal.combiner import EVAL_METRIC_KEYS, write_eval_report
 
     metrics = dict.fromkeys(EVAL_METRIC_KEYS, 0.0)
     metrics["max_drawdown"] = max_drawdown

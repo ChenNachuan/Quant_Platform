@@ -1,13 +1,13 @@
 # factor_combiner
 
-> 域：research · 对应代码 research/factor_combiner.py · 来源 §16、§63（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/signal/combiner.py · 来源 §16、§63（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
 多因子合成：把通过单因子检验的因子捏成一个综合 `score`，并给出合成质量评估。实现级收口在 §63（FactorCombiner 类、权重窗口、评估指标表、eval_report）。
 
 - 负责：合成前预处理原则（去极值 → 逐截面 z-score → 中性化）、合成方法选型与权重窗口、score→weights 之外的合成本体、组合评估指标与 factor_contribution、eval_report 落盘。
-- 不负责：单因子评价门控（[factor_evaluation.md](factor_evaluation.md)）、后处理流水线实现（[post_processor.md](post_processor.md)）、score→持仓权重（[alpha_signal.md](alpha_signal.md) `signal_to_weights`）、ML 合成（归 MLFactor，[factor_runtime.md](factor_runtime.md) §59）。
+- 不负责：单因子评价门控（[factor_evaluation.md](../factor/evaluation.md)）、后处理流水线实现（[post_processor.md](../post_processor.md)）、score→持仓权重（[alpha_signal.md](alpha_signal.md) `signal_to_weights`）、ML 合成（归 MLFactor，[factor_runtime.md](../factor/runtime.md) §59）。
 - 与 §60（后处理）、§62（治理指标）、§65（alphaType signal_source）衔接。
 
 ## 接口签名

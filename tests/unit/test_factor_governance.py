@@ -1,4 +1,4 @@
-"""Tests for research.factor_governance — admission gate, exit line,
+"""Tests for research.factor.governance — admission gate, exit line,
 lifecycle transitions, and IC evaluation (S11-T2 iteration 1, ac-1..ac-3).
 
 Covers per-condition admission boundary behaviour (strict >, boundary fails),
@@ -13,7 +13,7 @@ import math
 import pandas as pd
 import pytest
 
-from research.factor_governance import (
+from research.factor.governance import (
     CORR_MAX,
     CS_STD_CV_ABNORMAL,
     EXIT_IC_THRESHOLD,
@@ -207,7 +207,7 @@ class TestLifecycle:
 
     def test_legal_transitions_constant(self):
         """_LIFECYCLE_LEGAL has exactly the two permitted pairs."""
-        from research.factor_governance import _LIFECYCLE_LEGAL
+        from research.factor.governance import _LIFECYCLE_LEGAL
 
         assert _LIFECYCLE_LEGAL == {
             ("draft", "production"),

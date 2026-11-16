@@ -1,4 +1,4 @@
-"""Integration tests for ``research.factor_evaluation`` (S11-T1).
+"""Integration tests for ``research.factor.evaluation`` (S11-T1).
 
 Acceptance coverage (QUANT-43):
 
@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.factor_evaluation import (
+from research.factor.evaluation import (
     AlphalensAdapter,
     EXIT_IC_THRESHOLD,
     EvalResult,
@@ -33,7 +33,7 @@ from research.factor_evaluation import (
     check_exit,
     factor_family,
 )
-from research.factor_storage import load_factor, save_factor_append
+from research.factor.storage import load_factor, save_factor_append
 
 pytestmark = pytest.mark.integration
 

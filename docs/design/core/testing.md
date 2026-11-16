@@ -5,7 +5,7 @@
 
 平台测试策略：pytest 三层目录、单测覆盖约定、hypothesis 性质测试、测试替身、黄金样本端到端对拍。规定**测什么、怎么组织、容差多少**，不含具体测试用例实现。
 
-边界：因子单测四范式归 ../research/factor_governance.md；黄金样本的策略逻辑是等权 top-5 ETF 动量，验证方法在此收口。
+边界：因子单测四范式归 [../research/factor/governance.md](../research/factor/governance.md)；黄金样本的策略逻辑是等权 top-5 ETF 动量，验证方法在此收口。
 
 ## 测试分层
 

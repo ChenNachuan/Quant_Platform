@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from research.factor_evaluation import (
+from research.factor.evaluation import (
     EXIT_IC_THRESHOLD,
     GATE_IC_MIN,
     GATE_IR_MIN,

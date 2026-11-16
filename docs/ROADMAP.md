@@ -10,11 +10,11 @@
 | S1 · core 底座 | `core/{types,config,logging,registry,asset_rules}.py` | 已完成 |
 | S2 · 测试骨架 | `tests/{unit,integration,golden}/` 三层体系与黄金样本夹具 | 已完成 |
 | S3 · 存储与取数 | `storage_schema`（11 表）/ `storage_ops`（月+日分区）/ `DataAPI` | 已完成 |
-| S4–S6 · 因子与信号 | `Factor` / `FactorDAG` / `factor_storage` / `post_processor` / `FactorCombiner` / `AlphaSignal` | 已完成 |
+| S4–S6 · 因子与信号 | `factor/{interface,runtime,storage}` / `post_processor` / `signal/{combiner,alpha_signal}` | 已完成 |
 | S7 · 执行与回测 | `ledger` / `fee_model` / `risk_control` / `portfolio_construction` / `order_generation` / `SimBroker` / `cross_sectional_backtest` | 已完成 |
 | S8 · 黄金样本闸门 | 五步验证法全绿 + `golden_baseline_2020_2024.json` 落盘 | 已完成 |
 | S9–S10 · 数据接入与仲裁 | 五源 Adapters & Normalizers / DQC（44 规则）/ 多源仲裁 / 日历复权 / 数据修订 | 已完成 |
-| S11 · 评价与治理 | `factor_evaluation` / `factor_governance` / `alpha_type` / `ml_signal` | 已完成 |
+| S11 · 评价与治理 | `factor/{evaluation,governance}` / `signal/alpha_type` / `ml/signal` | 已完成 |
 | S12 · 运维闭环 | `ops/{scheduler,monitoring,reporting,alerting}.py` + `daily_pipeline` | 已完成 |
 | S13 · 迁移与归档 | M1–M5 旧桥接/ZVT/`examples` 清理、`PROJECT_STRUCTURE` 定稿、L2 路径登记 | 已完成 |
 

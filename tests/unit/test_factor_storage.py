@@ -1,4 +1,4 @@
-"""Tests for research.factor_storage — per-factor-one-table persistence.
+"""Tests for research.factor.storage — per-factor-one-table persistence.
 
 Covers every DoD row:
 
@@ -39,8 +39,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from research.factor_interface import Factor
-from research.factor_storage import (
+from research.factor.interface import Factor
+from research.factor.storage import (
     DEFAULT_BASE_DIR,
     METADATA_FIELDS,
     load_factor,
@@ -520,7 +520,7 @@ class TestCrashSafeWrites:
         years while ``metadata.json`` still described the old coverage —
         ``load_factor`` then returned truncated history as complete.
         """
-        import research.factor_storage as fs
+        import research.factor.storage as fs
 
         factor = Mom20D()
         save_factor_full(
@@ -589,7 +589,7 @@ class TestCrashSafeWrites:
         self, tmp_path, monkeypatch
     ):
         """A failed year write must not leave .tmp or a half-written target."""
-        import research.factor_storage as fs
+        import research.factor.storage as fs
 
         factor = Mom20D()
         fake, calls = _failing_after(0, fs.write_parquet_atomic)  # first write blows up
@@ -606,7 +606,7 @@ class TestCrashSafeWrites:
 
     def test_append_write_is_atomic(self, tmp_path, monkeypatch):
         """A failed append write leaves the previously stored year intact."""
-        import research.factor_storage as fs
+        import research.factor.storage as fs
 
         factor = Mom20D()
         save_factor_append(
@@ -627,7 +627,7 @@ class TestCrashSafeWrites:
 
     def test_append_uses_tmp_then_replace(self, tmp_path, monkeypatch):
         """The year file is created by a rename, never by a direct write."""
-        import research.factor_storage as fs
+        import research.factor.storage as fs
 
         seen = {}
         real = fs.write_parquet_atomic

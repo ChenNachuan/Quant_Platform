@@ -21,7 +21,7 @@
 ```text
 core/         共享工具（config / registry / logging / types / asset_rules）
 data/         数据接入与存储（SourceAdapter / DQC / 存储 schema / DataAPI）
-research/     投研（Factor / DAG / 后处理 / 合成 / 评价 / alphaType）
+research/     投研（factor/ 因子体系 · signal/ 信号与配方 · ml/ 模型信号 · post_processor · cross_sectional_backtest）
 execution/    执行（组合构建 / 订单 / 风控 / 费用 / 账本 / 柜台）
 ops/          运维（调度 / 监控 / 归因 / 告警）
 ```
@@ -60,7 +60,7 @@ for date in rebalance_dates():
 
 > [打开 Archify 交互图](.diagrams/02-main-pipeline-dataflow.html)
 
-- AlphaSignal：截面分数 DataFrame ->  [research/alpha_signal.md](research/alpha_signal.md)
+- AlphaSignal：截面分数 DataFrame ->  [research/signal/alpha_signal.md](research/signal/alpha_signal.md)
 - Portfolio：目标持仓构建 ->  [execution/portfolio_construction.md](execution/portfolio_construction.md)
 - Execution: 风控 + 撮合 + 记账 -> [execution/broker.md](execution/broker.md)
 
@@ -72,7 +72,7 @@ for date in rebalance_dates():
 
 > [打开 Archify 交互图](.diagrams/09-factor-dag-runtime.html)
 
-静态拓扑DAG，不用时间订阅————离线计算无实时事件流、依赖关系静态、DataFrame天然批量。详见[research/factor_interface.md](research/factor_interface.md)和[research/factor_runtime.md](research/factor_runtime.md)。
+静态拓扑DAG，不用时间订阅————离线计算无实时事件流、依赖关系静态、DataFrame天然批量。详见[research/factor/interface.md](research/factor/interface.md)和[research/factor/runtime.md](research/factor/runtime.md)。
 
 alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/滑点/涨跌停），不是验证层；与正式回测结论矛盾时**以回测为准**。
 
@@ -83,7 +83,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 | 回测引擎 | pandas自研 SimBroker/QmtBroker | backtrader/vnpy（事件驱动不需要）；VectorBT 留 V2 备选 | [execution/broker.md](execution/broker.md) |
 | 存储 | Parquet + DuckDB 持久化 `catalog.duckdb`（`asset/` 51 表与 `factors/` 1 表平级，无 `ext/` 顶层） | ClickHouse、DuckDB 纯内存模式、混合目录 `cn_reference/` | [data/storage_schema.md](data/storage_schema.md)、[data/asset/](data/asset/README.md) |
 | 数据接入 | SourceAdapter 四方法 + watermark | - | [data/source_adapter.md](data/source_adapter.md) |
-| 因子评价 | alphalens-reloaded 0.4.6 | alphalens 原版（不维护） | [research/factor_evaluation.md](research/factor_evaluation.md) |
+| 因子评价 | alphalens-reloaded 0.4.6 | alphalens 原版（不维护） | [research/factor/evaluation.md](research/factor/evaluation.md) |
 | 配置 | TOML 三层 + .env + git | YAML（on→True 陷阱）；配置中心（单机不需要） | [core/config.md](core/config.md) |
 | 日志 | Python logging + JSONL | ELK/Loki、分布式追踪（单进程 grep/jq 足够） | [core/logging.md](core/logging.md) |
 | 测试 | pytest 三层 + hypothesis + 黄金样本 | - | [core/testing.md](core/testing.md) |
@@ -97,7 +97,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 | 契约 | 形态 | 文档 |
 |---|---|---|
 | 行情长表 `load_bars` | date/ticker/OHLCV/amount/[adjfactor] | [data/data_api.md](data/data_api.md) |
-| AlphaSignal | 截面分数 DataFrame | [research/alpha_signal.md](research/alpha_signal.md) |
+| AlphaSignal | 截面分数 DataFrame | [research/signal/alpha_signal.md](research/signal/alpha_signal.md) |
 | TargetPortfolio | ticker → 目标权重/金额 | [execution/portfolio_construction.md](execution/portfolio_construction.md) |
 | 账本 dataclass | Order / Trade / Position / Account / JournalEntry | [execution/ledger.md](execution/ledger.md) |
 | config_snapshot | `path@hash` 钉进运行记录 | [core/config.md](core/config.md)、[core/logging.md](core/logging.md) |
@@ -130,7 +130,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 
 ## 8. 文档地图
 
-- 设计文档分域索引见 [design/README.md](README.md)
+- 设计文档分域索引见 [design/README.md](README.md)（`research/` 已按 `factor/`、`signal/`、`ml/` 与顶层工具 `post_processor` / `cross_sectional_backtest` 分层）
 - 资产表逐字段字典见 [data/asset/README.md](data/asset/README.md)
 - 仓库文档总目录见 [docs/README.md](../README.md)
 - 现行代码放置规则见 [PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)

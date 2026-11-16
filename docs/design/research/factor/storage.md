@@ -1,14 +1,14 @@
 # factor_storage
 
-> 域：research · 对应代码 research/factor_storage.py · 来源 §61（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/factor/storage.py · 来源 §61（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
-因子值的物理落盘布局：每因子一目录、语义化版本目录、按年 Parquet、metadata.json 元数据、append/full 两种写入、DuckDB 查询与 `load_factor_matrix()` 逻辑宽表。存 [factor_interface.md](factor_interface.md) 的 `compute()` 原始输出（§60 存原始值决策，NaN 保留不填）。
+因子值的物理落盘布局：每因子一目录、语义化版本目录、按年 Parquet、metadata.json 元数据、append/full 两种写入、DuckDB 查询与 `load_factor_matrix()` 逻辑宽表。存 [factor_interface.md](interface.md) 的 `compute()` 原始输出（§60 存原始值决策，NaN 保留不填）。
 
-- 输入：`compute()` / [factor_runtime.md](factor_runtime.md) 产出的 `DataFrame[date, ticker, {factor_name}]`
+- 输入：`compute()` / [factor_runtime.md](runtime.md) 产出的 `DataFrame[date, ticker, {factor_name}]`
 - 输出：`$QUANT_DATA_ROOT/factors/{name}/v{version}/{year}.parquet + metadata.json`；ML 因子另有 `model/model.joblib`（随因子 version 走）
-- 不属于本模块：行情 bars（data 域）、回测产物 `outputs/`、后处理（消费时做，[post_processor.md](post_processor.md)）
+- 不属于本模块：行情 bars（data 域）、回测产物 `outputs/`、后处理（消费时做，[post_processor.md](../post_processor.md)）
 
 ## 接口签名
 

@@ -45,17 +45,20 @@ design/
 │       ├── 06-etf-and-fund.md               —— 独立 ETF 域（5 张）+ 场外/LOF 公募基金（5 张）
 │       └── 07-futures.md                    —— 期货日线、五档 L2、合约规格与主连（4 张）
 ├── research/
-│   ├── alpha_signal.md          —— 统一信号层 AlphaSignal，score → 权重转换
-│   ├── alpha_type.md            —— 策略配方治理：注册、七维标签、生命周期
-│   ├── cross_sectional_backtest.md —— 横截面组合模拟器 cs_portfolio_sim（pandas 自建）
-│   ├── factor_combiner.md       —— 多因子合成（等权 / IC 加权 / IC-IR 加权）
-│   ├── factor_evaluation.md     —— alphalens-reloaded 0.4.6 评价流水线与筛选门控
-│   ├── factor_governance.md     —— 因子准入/退出标准、血缘追踪、去重机制
-│   ├── factor_interface.md      —— Factor ABC 接口定义：depends_on() + compute()
-│   ├── factor_runtime.md        —— FactorDAG 拓扑排序、分层并行执行、增量缓存
-│   ├── factor_storage.md        —— 按因子名/版本/年份分目录存储，Parquet + metadata.json
-│   ├── ml_signal.md             —— MLSignalAdapter 模型适配、模型生命周期、实验管理
-│   └── post_processor.md        —— 四步后处理：去极值(MAD) → 填充 → 标准化 → 中性化
+│   ├── factor/
+│   │   ├── interface.md         —— Factor ABC 接口定义：depends_on() + compute()
+│   │   ├── runtime.md           —— FactorDAG 拓扑排序、分层并行执行、增量缓存
+│   │   ├── storage.md           —— 按因子名/版本/年份分目录存储，Parquet + metadata.json
+│   │   ├── evaluation.md        —— alphalens-reloaded 0.4.6 评价流水线与筛选门控
+│   │   └── governance.md        —— 因子准入/退出标准、血缘追踪、去重机制
+│   ├── signal/
+│   │   ├── combiner.md          —— 多因子合成（等权 / IC 加权 / IC-IR 加权）
+│   │   ├── alpha_signal.md      —— 统一信号层 AlphaSignal，score → 权重转换
+│   │   └── alpha_type.md        —— 策略配方治理：注册、七维标签、生命周期
+│   ├── ml/
+│   │   └── signal.md            —— MLSignalAdapter 模型适配、模型生命周期、实验管理
+│   ├── post_processor.md        —— 四步后处理：去极值(MAD) → 填充 → 标准化 → 中性化
+│   └── cross_sectional_backtest.md —— 横截面组合模拟器 cs_portfolio_sim（pandas 自建）
 ├── execution/
 │   ├── broker.md                —— Broker ABC 四方法接口，SimBroker/QmtBroker 实现
 │   ├── fee_model.md             —— 佣金、印花税、过户费、滑点模型

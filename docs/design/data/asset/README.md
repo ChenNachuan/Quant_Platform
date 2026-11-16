@@ -2,7 +2,7 @@
 
 > 上级索引：[storage_schema.md](../storage_schema.md) · 代码权威：[data/storage_schema.py](../../../../data/storage_schema.py) · 源优先级：[config/source_priority.yaml](../../../../config/source_priority.yaml)
 
-本目录记录 `$QUANT_DATA_ROOT/asset/` 下 **51 张规范表**（47 张 A 股域表 + 4 张期货表）的完整字段 Schema、主键约束、分区策略、数据源仲裁与交叉校验说明（`factors/` 另见 [factor_storage.md](../../research/factor_storage.md)）。
+本目录记录 `$QUANT_DATA_ROOT/asset/` 下 **51 张规范表**（47 张 A 股域表 + 4 张期货表）的完整字段 Schema、主键约束、分区策略、数据源仲裁与交叉校验说明（`factors/` 另见 [factor/storage.md](../../research/factor/storage.md)）。
 
 ## 文档导航
 

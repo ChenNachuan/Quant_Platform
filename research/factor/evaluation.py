@@ -26,7 +26,7 @@ from typing import Any, Callable, Sequence
 
 import pandas as pd
 
-from research.factor_storage import _safe_component, save_factor_full
+from research.factor.storage import _safe_component, save_factor_full
 from research.post_processor import PIPELINE_STOCK_EVAL, PostProcessor, neutralize
 from core.config import DATA_ROOT
 

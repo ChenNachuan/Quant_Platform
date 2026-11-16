@@ -1,10 +1,10 @@
 # factor_interface
 
-> 域：research · 对应代码 research/factor_interface.py · 来源 §57（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/factor/interface.py · 来源 §57（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
-因子的抽象定义与 IO 契约：Factor ABC + `depends_on()` 依赖声明 + `compute()` 统一输出。只定义「一个因子是什么」；计算调度在 [factor_runtime.md](factor_runtime.md)，后处理在 [post_processor.md](post_processor.md)，落盘在 [factor_storage.md](factor_storage.md)，治理在 [factor_governance.md](factor_governance.md)。
+因子的抽象定义与 IO 契约：Factor ABC + `depends_on()` 依赖声明 + `compute()` 统一输出。只定义「一个因子是什么」；计算调度在 [factor_runtime.md](runtime.md)，后处理在 [post_processor.md](../post_processor.md)，落盘在 [factor_storage.md](storage.md)，治理在 [factor_governance.md](governance.md)。
 
 - 输入：`data: dict[str, pd.DataFrame]`——`depends_on()` 声明的每个依赖名 → DataFrame（数据表经 `load_bars()` 加载，上游因子经 FactorDAG 传入）
 - 输出：`DataFrame[date, ticker, {factor_name}]`，**原始值**（后处理不属于 Factor 接口）
@@ -93,4 +93,4 @@ class VolAdjMomentum(Factor):
 
 - `version` 字段变更规范（compute 逻辑改了必须手动 bump？谁来强制——可在 CI 检查）（§57）
 - `category="event"` / `"alternative"` 两类的接口约定（事件表输入、非 bars 输入如何在 `depends_on()` 声明）（§57）
-- 因子命名规范（`momentum_20d` vs `mom_20d`，与因子注册表 name 字段对齐）（§57；命名格式已在 [factor_governance.md](factor_governance.md) §62.6 定为 `{类型}_{语义}_{参数}` snake_case，此处指强制校验手段）
+- 因子命名规范（`momentum_20d` vs `mom_20d`，与因子注册表 name 字段对齐）（§57；命名格式已在 [factor_governance.md](governance.md) §62.6 定为 `{类型}_{语义}_{参数}` snake_case，此处指强制校验手段）

@@ -1,13 +1,13 @@
 # ml_signal
 
-> 域：research · 对应代码 research/ml_signal.py · 来源 §64（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 research/ml/signal.py · 来源 §64（archive/OPEN_QUESTIONS.md）
 
 ## 职责与边界
 
 ML/DL 信号治理：模型输出 → `MLSignalAdapter` → `AlphaSignal`（与多因子路径在 §63.5 汇聚）。八问收口：输出映射、特征管理、模型生命周期、实验管理、ensemble、衰减监控、算力、过拟合防控。
 
 - 负责：输出形态映射、特征矩阵与 features_hash、模型版本与部署目录、experiments/ 实验记录、信号层 ensemble、衰减监控接入、过拟合三检。
-- 不负责：MLFactor train/predict 调度形态（[factor_runtime.md](factor_runtime.md) §59）、合成与权重（[factor_combiner.md](factor_combiner.md) / [alpha_signal.md](alpha_signal.md)）、alphaType 的 ml_factor 注册（[alpha_type.md](alpha_type.md) §65）。
+- 不负责：MLFactor train/predict 调度形态（[factor_runtime.md](../factor/runtime.md) §59）、合成与权重（[factor_combiner.md](../signal/combiner.md) / [alpha_signal.md](../signal/alpha_signal.md)）、alphaType 的 ml_factor 注册（[alpha_type.md](../signal/alpha_type.md) §65）。
 - 目标：把 alstm/ 下 35+ 实验脚本群收口成可治理体系；公司对应物 UModel 训练平台 + Alpha 入库 + Datamall 实验追踪，个人平台用 JSON 目录等价物。
 
 ## 接口签名
@@ -109,4 +109,4 @@ verdict = sanity_check_ml_model(test_metrics, train_ic=..., baseline_sharpe=...)
 - transform_bars 的变换集合（pct_change_N 之外还有哪些）
 - features_hash 具体算法（hash 组成与编码）
 - KS 检验的参考窗口（历史多长算「分布漂移」）
-- ensemble 权重公式（validation ICIR 归一化细节）；与 [factor_combiner.md](factor_combiner.md) 的 ensemble 权重进 combiner 问题同源
+- ensemble 权重公式（validation ICIR 归一化细节）；与 [factor_combiner.md](../signal/combiner.md) 的 ensemble 权重进 combiner 问题同源

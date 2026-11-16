@@ -1,4 +1,4 @@
-"""Tests for research.alpha_signal — AlphaSignal and score → weights.
+"""Tests for research.signal.alpha_signal — AlphaSignal and score → weights.
 
 Covers every acceptance row of S6-T2:
 
@@ -24,7 +24,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from research.alpha_signal import (
+from research.signal.alpha_signal import (
     DEFAULT_K,
     WEIGHT_METHODS,
     AlphaSignal,

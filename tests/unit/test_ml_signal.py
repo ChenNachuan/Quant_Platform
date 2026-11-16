@@ -1,4 +1,4 @@
-"""Tests for research.ml_signal — MLSignalAdapter, smooth_signal, feature versioning.
+"""Tests for research.ml.signal — MLSignalAdapter, smooth_signal, feature versioning.
 
 Covers acceptance criteria ac-2, ac-3, ac-4 of QUANT-46:
 
@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.ml_signal import (
+from research.ml.signal import (
     DEFAULT_HALFLIFE,
     PROB_CLIP_HIGH,
     PROB_CLIP_LOW,
@@ -396,7 +396,7 @@ class TestBuildFeatureMatrix:
             assert name == "momentum"
             return factor_df.copy()
 
-        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        monkeypatch.setattr("research.factor.storage.load_factor", mock_load_factor)
         specs = [{"source": "factor", "name": "momentum", "transform": "zscore_cs"}]
         result = build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
         assert "feat_0" in result.columns
@@ -425,7 +425,7 @@ class TestBuildFeatureMatrix:
         def mock_load_factor(name, start, end, version="1.0", base_dir=""):
             return factor_df.copy()
 
-        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        monkeypatch.setattr("research.factor.storage.load_factor", mock_load_factor)
         bars = pd.DataFrame(
             {
                 "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
@@ -451,7 +451,7 @@ class TestBuildFeatureMatrix:
         def mock_load_factor(name, start, end, version="1.0", base_dir=""):
             return pd.DataFrame(columns=["date", "ticker", name])
 
-        monkeypatch.setattr("research.factor_storage.load_factor", mock_load_factor)
+        monkeypatch.setattr("research.factor.storage.load_factor", mock_load_factor)
         specs = [{"source": "factor", "name": "momentum", "transform": "none"}]
         with pytest.raises(ValueError, match="no data"):
             build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
@@ -1053,7 +1053,7 @@ class TestOcrRegression:
     # -- finding 6: TRANSFORMS constant -----------------------------------
 
     def test_transforms_constant_matches_implementation(self):
-        from research.ml_signal import TRANSFORMS
+        from research.ml.signal import TRANSFORMS
 
         assert "pct_change_N" in TRANSFORMS
         assert "pct_change" not in TRANSFORMS

@@ -40,9 +40,10 @@ docs/design/
 │   ├── level2_data.md               # Level-2 微观结构与高维快照规范
 │   └── QDC_ingestion_contract.md    # QDCData 落盘布局与字段映射契约（qdc_migration_contract.md 为其软链）
 ├── research/                        # 投研与因子流水线（11 份）
-│   ├── factor_interface.md / factor_runtime.md / factor_storage.md
-│   ├── post_processor.md / factor_combiner.md / factor_evaluation.md / factor_governance.md
-│   ├── alpha_signal.md / alpha_type.md / ml_signal.md / cross_sectional_backtest.md
+│   ├── factor/                      # interface.md / runtime.md / storage.md / evaluation.md / governance.md
+│   ├── signal/                      # combiner.md / alpha_signal.md / alpha_type.md
+│   ├── ml/                          # signal.md
+│   └── post_processor.md / cross_sectional_backtest.md
 ├── execution/                       # 组合构建、风控、费用、账本与执行（6 份）
 │   ├── portfolio_construction.md / order_generation.md / risk_control.md
 │   └── fee_model.md / ledger.md / broker.md
@@ -62,8 +63,8 @@ docs/design/
 | 06 | 多源入库仲裁、补缺与交叉校验 | `workflow` | [data/ingestion.md](data/ingestion.md) | [PNG](.diagrams/06-multi-source-ingestion.png) · [HTML](.diagrams/06-multi-source-ingestion.html) |
 | 07 | `ingest_with_dqc` 七步入库与三级拒收闸门 | `workflow` | [data/dqc_severity.md](data/dqc_severity.md) | [PNG](.diagrams/07-dqc-seven-step-gate.png) · [HTML](.diagrams/07-dqc-seven-step-gate.html) |
 | 08 | 数据回溯修正与因子过期重算闭环 | `workflow` | [data/data_revision.md](data/data_revision.md) | [PNG](.diagrams/08-data-revision-loop.png) · [HTML](.diagrams/08-data-revision-loop.html) |
-| 09 | `FactorDAG` 拓扑分层执行与增量缓存 | `workflow` | [research/factor_runtime.md](research/factor_runtime.md) | [PNG](.diagrams/09-factor-dag-runtime.png) · [HTML](.diagrams/09-factor-dag-runtime.html) |
-| 10 | 因子三态生命周期与健康监控 | `lifecycle` | [research/factor_governance.md](research/factor_governance.md) | [PNG](.diagrams/10-factor-lifecycle.png) · [HTML](.diagrams/10-factor-lifecycle.html) |
+| 09 | `FactorDAG` 拓扑分层执行与增量缓存 | `workflow` | [research/factor/runtime.md](research/factor/runtime.md) | [PNG](.diagrams/09-factor-dag-runtime.png) · [HTML](.diagrams/09-factor-dag-runtime.html) |
+| 10 | 因子三态生命周期与健康监控 | `lifecycle` | [research/factor/governance.md](research/factor/governance.md) | [PNG](.diagrams/10-factor-lifecycle.png) · [HTML](.diagrams/10-factor-lifecycle.html) |
 | 11 | 信号 → 目标组合 → 交易订单三层换算流 | `dataflow` | [execution/portfolio_construction.md](execution/portfolio_construction.md) | [PNG](.diagrams/11-portfolio-order-dataflow.png) · [HTML](.diagrams/11-portfolio-order-dataflow.html) |
 | 12 | 订单六态状态机与冻结资金流转 | `lifecycle` | [execution/ledger.md](execution/ledger.md) | [PNG](.diagrams/12-order-lifecycle.png) · [HTML](.diagrams/12-order-lifecycle.html) |
 | 13 | `broker.submit_orders()` 风控撮合记账时序 | `sequence` | [execution/broker.md](execution/broker.md) | [PNG](.diagrams/13-broker-submit-sequence.png) · [HTML](.diagrams/13-broker-submit-sequence.html) |

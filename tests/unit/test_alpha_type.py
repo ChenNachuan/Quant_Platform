@@ -1,4 +1,4 @@
-"""Tests for research.alpha_type — governance + runtime (S11-T3).
+"""Tests for research.signal.alpha_type — governance + runtime (S11-T3).
 
 Covers AC1 (7-dim closed-enum tags), AC2 (5-state lifecycle),
 AC3 (run_daily_signal failure → HOLD), AC4 (audit append-only),
@@ -12,7 +12,7 @@ import json
 import pandas as pd
 import pytest
 
-from research.alpha_type import (
+from research.signal.alpha_type import (
     TAG_DIMENSIONS,
     RulePipeline,
     TopKFilter,
@@ -440,7 +440,7 @@ class TestRunDailySignal:
         """Both attempts fail → HOLD, prev portfolio passes through unchanged."""
         alerts = []
         monkeypatch.setattr(
-            "research.alpha_type.send_alert",
+            "research.signal.alpha_type.send_alert",
             lambda level, msg, **kw: alerts.append((level, msg)),
         )
         alpha = {"alpha_type_id": "test_hold", "params": {}}
@@ -464,7 +464,9 @@ class TestRunDailySignal:
 
     def test_failure_no_prev_portfolio_holds_none(self, monkeypatch):
         """No prev portfolio → HOLD returns None (never fabricates empty book)."""
-        monkeypatch.setattr("research.alpha_type.send_alert", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "research.signal.alpha_type.send_alert", lambda *a, **kw: None
+        )
         alpha = {"alpha_type_id": "test_none", "params": {}}
 
         def failing_signal_fn(a, d):
@@ -523,7 +525,7 @@ class TestBuildPortfolio:
     def test_concentration_alert_no_correction(self, monkeypatch):
         alerts = []
         monkeypatch.setattr(
-            "research.alpha_type.send_alert",
+            "research.signal.alpha_type.send_alert",
             lambda level, msg, **kw: alerts.append((level, msg)),
         )
         alpha = {
@@ -543,7 +545,7 @@ class TestBuildPortfolio:
     def test_turnover_alert_no_trim(self, monkeypatch):
         alerts = []
         monkeypatch.setattr(
-            "research.alpha_type.send_alert",
+            "research.signal.alpha_type.send_alert",
             lambda level, msg, **kw: alerts.append((level, msg)),
         )
         alpha = {
@@ -561,7 +563,9 @@ class TestBuildPortfolio:
 
     def test_equal_weight_fallback_on_solve_failure(self, monkeypatch):
         """Solver exception → 1/N fallback, never empty."""
-        monkeypatch.setattr("research.alpha_type.send_alert", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "research.signal.alpha_type.send_alert", lambda *a, **kw: None
+        )
         alpha = {
             "alpha_type_id": "bp_fb",
             "params": {"weight_method": "top_k", "total_position": 1.0},
@@ -570,7 +574,7 @@ class TestBuildPortfolio:
         signal = _make_signal(n=4)
         # Force solver failure by monkeypatching signal_to_weights.
         monkeypatch.setattr(
-            "research.alpha_type.signal_to_weights",
+            "research.signal.alpha_type.signal_to_weights",
             lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("solver fail")),
         )
         weights = build_portfolio(signal, alpha)
@@ -579,7 +583,9 @@ class TestBuildPortfolio:
 
     def test_empty_result_triggers_fallback(self, monkeypatch):
         """Review fix 1: solver succeeds but yields no rows → fallback."""
-        monkeypatch.setattr("research.alpha_type.send_alert", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "research.signal.alpha_type.send_alert", lambda *a, **kw: None
+        )
         alpha = {
             "alpha_type_id": "bp_empty_res",
             "params": {"weight_method": "top_k", "total_position": 1.0},
@@ -588,7 +594,7 @@ class TestBuildPortfolio:
         signal = _make_signal(n=3)
         # Solver returns empty (e.g. all scores NaN under proportional).
         monkeypatch.setattr(
-            "research.alpha_type.signal_to_weights",
+            "research.signal.alpha_type.signal_to_weights",
             lambda *a, **kw: pd.DataFrame(columns=["date", "ticker", "target_weight"]),
         )
         weights = build_portfolio(signal, alpha)

@@ -6,7 +6,7 @@
 
 ``alpha_beta_attribution`` 基于月度收益率拟合 ``r_p = α + β·r_b + ε``，
 年化按 ``alpha_monthly × 12`` 计算，返回全精度浮点数（舍入仅在渲染层处理）。
-因子贡献拆解直接复用 :func:`research.factor_combiner.factor_contribution`。
+因子贡献拆解直接复用 :func:`research.signal.combiner.factor_contribution`。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 from scipy.stats import linregress
 
-from research.factor_combiner import factor_contribution
+from research.signal.combiner import factor_contribution
 
 __all__ = [
     "ANNUALIZATION",
