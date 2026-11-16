@@ -1,112 +1,81 @@
 # ml_signal
 
-> 域：research · 对应代码 research/ml/signal.py · 来源 §64（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 [research/ml/signal.py](../../../../research/ml/signal.py)
 
 ## 职责与边界
 
-ML/DL 信号治理：模型输出 → `MLSignalAdapter` → `AlphaSignal`（与多因子路径在 §63.5 汇聚）。八问收口：输出映射、特征管理、模型生命周期、实验管理、ensemble、衰减监控、算力、过拟合防控。
+ML/DL 信号治理层：将模型预测输出经 `MLSignalAdapter` 映射为标准截面信号（对接 [alpha_signal.md](../signal/alpha_signal.md)），并收口特征版本化、模型部署目录、实验追踪、信号层 ensemble、分布衰减监控与过拟合三检。
 
-- 负责：输出形态映射、特征矩阵与 features_hash、模型版本与部署目录、experiments/ 实验记录、信号层 ensemble、衰减监控接入、过拟合三检。
-- 不负责：MLFactor train/predict 调度形态（[factor_runtime.md](../factor/runtime.md) §59）、合成与权重（[factor_combiner.md](../signal/combiner.md) / [alpha_signal.md](../signal/alpha_signal.md)）、alphaType 的 ml_factor 注册（[alpha_type.md](../signal/alpha_type.md) §65）。
-- 目标：把 alstm/ 下 35+ 实验脚本群收口成可治理体系；公司对应物 UModel 训练平台 + Alpha 入库 + Datamall 实验追踪，个人平台用 JSON 目录等价物。
+- 负责：输出形态映射（分数 / 概率 / 期望收益）、特征矩阵构建与 `features_hash`、语义化模型目录与 `experiments/` 记录、信号层加权集成、分布漂移监控与过拟合校验。
+- 不负责：`MLFactor` 在 DAG 中的调度隔离（[runtime.md](../factor/runtime.md)）、多因子线性合成（[combiner.md](../signal/combiner.md)）、`alphaType` 配方注册与发布（[alpha_type.md](../signal/alpha_type.md)）。
 
 ## 接口签名
 
 ```python
 class MLSignalAdapter:
     @staticmethod
-    def from_scores(scores: pd.DataFrame) -> pd.DataFrame:
-        """[date, ticker, score] → 截面 z-score → AlphaSignal.frame。期望收益输出同此路。"""
+    def from_scores(scores: pd.DataFrame) -> pd.DataFrame: ...
+        # [date, ticker, score] → 截面 z-score（期望收益输出同此路径）
     @staticmethod
-    def from_probabilities(probs: pd.DataFrame) -> pd.DataFrame:
-        """probs: [date, ticker, prob] → logit → z-score → AlphaSignal。"""
+    def from_probabilities(probs: pd.DataFrame) -> pd.DataFrame: ...
+        # [date, ticker, prob] → logit → 截面 z-score
 
-def smooth_signal(frame: pd.DataFrame, halflife: int = 5) -> pd.DataFrame:
-    """逐 ticker EWM 平滑。日频策略默认开 halflife=5；月频再平衡不开。"""
-
-def build_feature_matrix(feature_specs: list[dict], start, end) -> pd.DataFrame:
-    # spec: {"source": "factor"|"raw", "name"|"field": ..., "transform": "pct_change_20"|...}
-    # source=factor → 读因子表；source=raw → transform_bars(field, transform, start, end)
-
-# 特征版本化: features_hash = hash(feature_specs + 依赖数据 depends_hash)（§58/§62）
-# model_id = {name}+v{major}.{minor}(训练日期)+train_end+features_hash
-
-def ensemble_models(models: list, X, weights: list[float] | None = None) -> pd.DataFrame:
-    """信号层加权平均，默认等权。signal_source.type="ensemble" 的实现（§65.1）。"""
-
-def sanity_check_ml_model(test_metrics: dict, train_ic: float, baseline_sharpe: float) -> str:
-    """过拟合三检 → "PASS" | "SUSPECT" | "REJECT"。"""
+def smooth_signal(frame: pd.DataFrame, halflife: int = 5) -> pd.DataFrame: ...
+    # 逐 ticker EWM 平滑（日频可选开启；月频再平衡不启用）
+def transform_bars(bars: pd.DataFrame, field: str, transform: str) -> pd.DataFrame: ...
+def build_feature_matrix(specs: list[dict], ...) -> pd.DataFrame: ...
+    # spec: {"source": "factor"|"raw", "name"|"field": ..., "transform": ...}
+def features_hash(specs: list[dict], dep_hashes: list[str]) -> str: ...
+def model_id(name: str, major: int, minor: int, train_date: str, train_end: str, feat_hash: str) -> str: ...
+def write_model(name: str, major: int, minor: int, model, config: dict, metadata: dict, ...) -> Path: ...
+def write_experiment(exp_id: str, metrics: dict, config: dict, ...) -> Path: ...
+def ensemble_models(models: list, X, weights: list[float] | None = None) -> pd.DataFrame: ...
+    # 信号层加权平均，默认等权
+def sanity_check_ml_model(test_metrics: dict, train_ic: float, baseline_sharpe: float) -> str: ...
+    # 过拟合三检 → "PASS" | "SUSPECT" | "REJECT"
 ```
 
-部署目录（§59 joblib 持久化）：
+模型部署与实验记录目录：
 
 ```text
 data/models/{name}/v{major}_{minor}/
-├── model.pkl            # joblib 序列化
-├── config.json          # 超参
-└── metadata.json        # model_id / train_end / features_hash / metrics
-experiments/{exp_id}/    # metrics.json + config + 时间戳（不用 MLflow）
+├── model.pkl            # joblib 持久化模型
+├── config.json          # 模型超参
+└── metadata.json        # model_id / train_end / features_hash / random_seed / metrics
+experiments/{exp_id}/    # metrics.json + config + 时间戳（本地 JSON 追踪，不依赖 MLflow）
 ```
 
 ## 关键决策
 
 | 决策 | 否决项 | 一句话理由 |
 |---|---|---|
-| 输出映射：截面分数默认 / 概率→logit→z-score / 期望收益同分数 | 分位分组、二值 | 分组是 to_weights 的事；二值丢强度 |
-| 特征 = 因子值 + 原始量价，复用因子表 | 独立 feature_store | 因子 ⊂ 特征；单数据源 |
-| 特征筛选人工 5–15 个 | PCA/Lasso 自动筛 | 解释性差 + 样本不足时选择不稳 |
-| features_hash 进 model_id | 只用版本号 | 特征血缘可追溯（复用 depends_hash） |
-| 训练窗口扩张窗口（起点固定，终点滚动） | 滚动 24 月 | A 股历史短，滚动样本不足 |
-| 重训频率年度 + KS p<0.05 衰减触发 | 月频重训 | 月频重训过拟合噪声 |
-| 严格时间切分 + Walk-Forward，禁 KFold | 随机 KFold | 时序泄漏（§16.4） |
-| data/models/ 语义化版本 + joblib | 每次实验都算生产 | train 输出写 data/models/，predict 读 model_id |
-| experiments/ JSON 目录 | MLflow / W&B | 外部服务依赖；35 个实验 JSON 足够 |
-| ensemble 在信号层加权平均（复用 FactorCombiner），默认等权 | 模型层平均 logits/参数 | 模型结构对齐是深水区；信号层可解释 |
-| 衰减监控复用 §62.4 三态（healthy/warning/exit） | 另起一套阈值 | ML 信号与因子同一阈值体系 |
-| 本地 CPU / 单 GPU，不建训练基础设施 | 分布式训练 | 单人规模不需要 |
-| 晋升线 test_ic>0.04 + test_ir>0.5 + test_sharpe>1.0 + 优于等权 | 只看 test IC | 教程 §7.4 铁律 |
+| 输出映射：连续分数默认；概率经 logit 再截面 z-score | 直接分位分组 / 二值化 | 分组交下游 `to_weights`，连续信号保留相对排序强度 |
+| 特征复用 `factors/` 因子表 + 原始量价派生 | 独立 `feature_store` | 因子即标准化特征，维持单一数据源与血缘一致 |
+| 人工精选 5–15 个强逻辑特征 | PCA / Lasso 全自动筛选 | 金融样本信噪比低，高维自动筛选极易过拟合且难归因 |
+| `features_hash` 写入 `model_id` 与 `metadata.json` | 仅记录版本号 | 上游因子或特征规格变动时可精确追溯模型血缘 |
+| 扩张窗口训练（起点固定、终点滚动） | 固定短滚动窗口（如 24 月） | A 股有效历史长度有限，扩张窗口减少参数方差 |
+| 年度重训 + KS 检验 `p < 0.05` 触发提前重训 | 高频月度重训 | 频繁重训容易拟合近期市场噪声 |
+| 严格时间切分 + Walk-Forward 验证，禁止随机 KFold | 随机 KFold 交叉验证 | 时序数据随机切分存在严重未来信息泄漏 |
+| 实验全落 `experiments/`；达标模型才写入 `data/models/` | 每次实验均视为生产模型 | 隔离探索性实验与可部署模型资产 |
+| ensemble 在信号层加权平均（默认等权） | 模型层平均参数 / logits | 异构模型结构差异大，信号层集成可解释且可对接 `FactorCombiner` |
+| 衰减监控复用三态门槛（`healthy` / `warning` / `exit`） | 另建独立阈值体系 | 与传统因子保持统一的准入（`test_ic > 0.04, ir > 0.5, sharpe > 1.0`）与退出标准 |
+| 本地 CPU / 单 GPU 训练 | 分布式训练平台 | 单机规模下模型训练非架构瓶颈 |
 
-过拟合三检阈值（sanity_check_ml_model）：
+过拟合检查规则（`sanity_check_ml_model`）：
 
-| 检查 | 判定 | 响应 |
+| 检查项 | 判定 | 处置建议 |
 |---|---|---|
-| test IC < 0.5 × train IC | SUSPECT | 查泄漏 / 减特征 / 加正则 |
-| 夏普 > 2.0 | SUSPECT | 查前视（shift(1)/成交价基准） |
-| 夏普未超等权 10% | REJECT | 不晋升，退回等权 |
-| 单特征重要性 > 50% | SUSPECT | 查目标泄漏 |
-| 换手 > 200%/月 | SUSPECT | 信号噪声学了样本内抖动 |
+| `test_ic < 0.5 × train_ic` | `SUSPECT` | 排查特征泄漏、精简特征或增强正则 |
+| `sharpe > 2.0` | `SUSPECT` | 复核 `shift(1)` 与成交价基准，排除前视偏差 |
+| 未超越等权基准 10% | `REJECT` | 不予晋升，退回等权基线组合 |
+| 单特征重要性 `> 50%` | `SUSPECT` | 检查目标变量泄漏 |
+| 月均换手 `> 200%` | `SUSPECT` | 模型过度学习样本内高频抖动噪声 |
 
 ## 实现要点
 
-```python
-# 训练侧（§59 train/predict 分离）
-# train → data/models/{name}/v{x}_{y}/model.pkl + metadata.json
-# predict → 读 model_id → 分数 → MLSignalAdapter → AlphaSignal
+详见 [research/ml/signal.py](../../../../research/ml/signal.py)。
 
-# 输出映射
-frame = MLSignalAdapter.from_scores(scores)          # 或 from_probabilities(probs)
-if frequency == "1d":
-    frame = smooth_signal(frame, halflife=5)          # 月频不开
-
-# 衰减（§64.7）：KS 分布漂移 p<0.05 → 提前重训
-# warning → 重训 + ensemble 降权；exit → 停用回退等权组合（§63.2 主路径）
-
-# ensemble（信号层）
-combined = ensemble_models([m1, m2, m3], X, weights=None)   # 默认等权
-# 权重来源: validation ICIR 或等权（默认等权，防权重优化过拟合）
-# 对应 alstm/ hybrid.py / low_volatility_model_a_mixer.py 的收口方向
-
-# 过拟合三检
-verdict = sanity_check_ml_model(test_metrics, train_ic=..., baseline_sharpe=...)
-# REJECT → 不进 data/models/；SUSPECT → 排查后再晋升
-
-# 可复现五要素（metadata.json 必含）：
-# random_seed / 依赖版本 / 特征列表 / 日期范围 / 超参
-```
-
-## 实施时定稿项
-
-- transform_bars 的变换集合（pct_change_N 之外还有哪些）
-- features_hash 具体算法（hash 组成与编码）
-- KS 检验的参考窗口（历史多长算「分布漂移」）
-- ensemble 权重公式（validation ICIR 归一化细节）；与 [factor_combiner.md](../signal/combiner.md) 的 ensemble 权重进 combiner 问题同源
+核心约定：
+- 特征矩阵通过 `build_feature_matrix` 统一从因子存储（`load_factor`）与量价变换（`transform_bars`）装配，再经 `features_hash` 绑定至 `model_id`。
+- `metadata.json` 必须记录可复现五要素：`random_seed`、依赖数据版本/指纹、特征列表、训练/验证日期范围与完整超参。
+- 衰减退出（`exit`）时停用该 ML 模型并自动回退等权多因子基线组合。

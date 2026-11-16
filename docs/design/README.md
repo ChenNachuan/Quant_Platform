@@ -2,7 +2,7 @@
 
 > 唯一权威架构总纲：[ARCHITECTURE.md](ARCHITECTURE.md) · 仓库文档总入口：[docs/README.md](../README.md) · 代码放置边界：[PROJECT_STRUCTURE.md](../PROJECT_STRUCTURE.md)
 
-本目录存放量化平台的五域设计契约（40 份模块文档，含 1 份契约软链共 41 项）、`asset/` 资产表分域字段字典（8 份），以及 `.diagrams/` 下的 14 份 Archify 交互式架构与流程示意图（含 `.json` 源定义、`.html` 交互图与 `.png` 静态预览）。
+本目录存放量化平台的五域设计契约（40 份模块文档）、`asset/` 资产表分域字段字典（8 份），以及 `.diagrams/` 下的 14 份 Archify 交互式架构与流程示意图（含 `.json` 源定义、`.html` 交互图与 `.png` 静态预览）。
 
 ## 整体结构
 
@@ -38,7 +38,7 @@ docs/design/
 │   ├── data_revision.md             # 数据修订检测、应用与影响传播
 │   ├── dqc_rules.md / dqc_runtime.md / dqc_severity.md   # DQC 规则、执行预算与质量位掩码
 │   ├── level2_data.md               # Level-2 微观结构与高维快照规范
-│   └── QDC_ingestion_contract.md    # QDCData 落盘布局与字段映射契约（qdc_migration_contract.md 为其软链）
+│   └── QDC_ingestion_contract.md    # QDCData 落盘布局与字段映射契约
 ├── research/                        # 投研与因子流水线（11 份）
 │   ├── factor/                      # interface.md / runtime.md / storage.md / evaluation.md / governance.md
 │   ├── signal/                      # combiner.md / alpha_signal.md / alpha_type.md

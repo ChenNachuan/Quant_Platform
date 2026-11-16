@@ -1,77 +1,77 @@
 # factor_evaluation
 
-> 域：research · 对应代码 research/factor/evaluation.py · 来源 §27（archive/OPEN_QUESTIONS.md）
+> 域：research · 对应代码 [research/factor/evaluation.py](../../../../research/factor/evaluation.py)
 
 ## 职责与边界
 
-alphalens（**alphalens-reloaded 0.4.6**，§28.2/§28.6）接入与因子评价流水线：`FactorPipeline`（compute → preprocess → evaluate → register）+ `AlphalensAdapter` 格式适配 + 门控判定 + 产出落盘 + 月度重评估。
+alphalens（`alphalens-reloaded`）集成与研究侧因子准入流水线：`FactorPipeline`（`compute → preprocess → evaluate → register`）+ `AlphalensAdapter` 格式适配 + 门控与衰减判定 + 产出落盘。
 
-- 负责：因子数据来源桥接（开发期现算 / 注册后读表）、pricing 口径归一、评价指标提取、准入/退出门控、attempt_log 多重检验记账。
-- 不负责：组合回测（门控通过后才进策略）、中性化算法本身（[post_processor.md](../post_processor.md)）、注册表治理流程（[factor_governance.md](governance.md)）。
-- 下游策略**不直接依赖 alphalens**，只经 `DataAPI.get_factor()` 消费注册后因子。
+- 负责：开发期表达式安全求值计算、pricing 口径归一、评价指标提取、准入/衰减门控、`attempt_log` 多重检验记账与评测产物落盘。
+- 不负责：组合回测（门控通过后进策略）、截面清洗算法本身（[post_processor.md](../post_processor.md)）、因子生命周期治理流转（[governance.md](governance.md)）。
+- 下游策略不直接依赖 alphalens，只消费注册与入库后的因子数据。
 
 ## 接口签名
 
 ```python
+DEFAULT_PERIODS: tuple[int, ...] = (1, 5, 10, 20)
+GATE_IC_MIN: float = 0.04
+GATE_IR_MIN: float = 0.5
+GATE_T_BASE: float = 2.0
+EXIT_IC_THRESHOLD: float = 0.03
+
 class AlphalensAdapter:
-    """格式适配（platform ↔ alphalens），纯静态无状态。"""
     @staticmethod
     def to_al_factor(factor_df: pd.DataFrame) -> pd.Series: ...
-        # 宽表(date × ticker) → MultiIndex Series(date, asset)
+        # 长表 [date, ticker, col] → MultiIndex Series(date, asset)
     @staticmethod
-    def to_al_prices(bars_df: pd.DataFrame, price_col='close') -> pd.DataFrame: ...
-        # 长表 → 宽表(DatetimeIndex × ticker)；ffill(limit=5) 处理停牌
+    def to_al_prices(bars_df: pd.DataFrame, price_col: str = "close") -> pd.DataFrame: ...
+        # 长表 → 宽表 (DatetimeIndex × ticker)；ffill(limit=5) 处理停牌
     @staticmethod
     def extract_metrics(factor_data, ic_series, mean_quant_ret) -> dict: ...
-        # rank_ic_mean / ir / ic_t_stat / quantile_monotonicity / top_minus_bottom / turnover
+        # 提取 rank_ic_mean / ir / ic_t_stat / quantile_monotonicity / top_minus_bottom / turnover
     @staticmethod
     def check_gate(metrics: dict, n_attempts: int = 1) -> tuple[bool, dict]: ...
+        # 准入门限：rank_ic_mean > 0.04, ir > 0.5, ic_t_stat > max(2.0, sqrt(2*ln(N)))
+
+def check_exit(metrics: dict) -> bool: ...
+    # rank_ic_mean < 0.03 触发衰减退出警戒
 
 @dataclass
 class EvalResult:
     summary: dict                  # 标量指标（决策面）
     gate_passed: bool
     gate_detail: dict
-    ic_series: pd.DataFrame        # 日频 IC 序列(1D/5D/10D/20D)
+    ic_series: pd.DataFrame        # 日频 IC 序列 (1D/5D/10D/20D)
     quantile_returns: pd.DataFrame
     turnover: pd.DataFrame
-    report_path: str | None        # HTML tearsheet
-```
+    report_path: str | None        # HTML tearsheet 路径
 
-`FactorPipeline` 流程：`compute(expr, universe, start, end)` → `preprocess(raw)` → `evaluate(processed, periods=(1, 5, 10, 20))` → `register(name, expr, result)`。
+class FactorPipeline:
+    def compute(self, expr: str, universe, start: str, end: str) -> pd.DataFrame: ...
+    def preprocess(self, raw: pd.DataFrame) -> pd.DataFrame: ...
+    def evaluate(self, processed: pd.DataFrame, periods: Sequence[int] = DEFAULT_PERIODS) -> EvalResult: ...
+    def register(self, name: str, expr: str, result: EvalResult) -> None: ...
+```
 
 ## 关键决策
 
 | 决策 | 否决项 | 一句话理由 |
 |---|---|---|
-| pricing = 日频收盘价，前复权 qfq | hfq（§25.2 旧示例）/ 分钟数据 | 历史收益率可比；分钟频在评价阶段无意义 |
-| alphalens = 回测前顺序门控 | 与回测并行 / 直接进回测 | 评价分钟级、全组合回测小时级；IC>0.04/IR>0.5/t>2 拦噪声 |
-| alphalens 在方法体内 lazy import | 模块级依赖 | 薄壳不碰因子检验逻辑 |
-| 产出三层落地：标量→注册表 eval 块、时间序列→factor_eval/ Parquet、tearsheet→HTML | 单一落点 | 标量是决策面、序列是诊断、HTML 是人读 |
-| 多重检验 attempt_log 记 N，t 阈值 = max(2, √(2lnN))，per-factor-family | 全局统一 N | 防「挖过很多 value 把 momentum 门槛也抬高」 |
-| 三阈值生命周期：准入 IC>0.04、退出 IC<0.03、中间观察区 | 单阈值 | 准入/退出分开，月度重评估标记 under_review |
-| periods 默认 (1, 5, 10, 20) | 其他周期集 | §27.10 定稿 |
-| 因子侧注册 = FactorRegistry + metadata.json（代码即注册表，§62.3） | factor_registry.yaml 单文件（§27 旧案） | 与策略侧 alphaType JSON 双表各司其职（§65） |
+| pricing = 日频收盘价（前复权 qfq） | 后复权 / 分钟数据 | 前复权历史收益率可比，评估前向周期以交易日为准 |
+| alphalens 作为回测前顺序门控 | 与回测并行 / 直接进回测 | 评价为分钟级而全组合回测为小时级，先用 `IC>0.04 / IR>0.5 / t>2` 过滤噪声 |
+| alphalens 在方法体内 lazy import | 模块级强制导入 | 保持轻量模块解耦与可测试性 |
+| 产出三层落地：标量→`metadata.json` `eval` 块、时序→`factor_eval/{name}/`、HTML→`research/reports/` | 单一落点 | 标量服务门控决策，时序服务衰减诊断，HTML 服务人工复核 |
+| 多重检验 `attempt_log` 按因子族（`factor_family`）记 `N`，`t > max(2, √(2·ln N))` | 全局统一 `N` | 防止某类因子试错过多抬高另一类因子的准入门槛 |
+| 三阈值生命周期：准入 `IC > 0.04`、退出 `IC < 0.03`、中间观察区 | 单阈值 | 准入与退出留出缓冲区间，避免临界抖动频繁下线 |
+| `periods` 默认 `(1, 5, 10, 20)` | 其他周期集合 | 覆盖短、中、月频换手研究区间 |
+| 因子侧注册 = `FactorRegistry` + `metadata.json`（代码即注册表） | 独立 `factor_registry.yaml` 单文件 | 与策略侧 `alphaType` JSON 注册各司其职，消除代码与外部表同步漂移 |
 
 ## 实现要点
 
-```python
-pipe = FactorPipeline(data_api)
-raw = pipe.compute(expr="close / rolling_mean(close, 20) - 1",
-                   universe_fn=lambda d: data_api.get_universe(d),
-                   start="2020-01-01", end="2024-12-31")   # 开发期现算
-processed = pipe.preprocess(raw)        # MAD → z-score → 中性化（§60）
-result = pipe.evaluate(processed, periods=(1, 5, 10, 20))
-if result.gate_passed:
-    pipe.register(name="momentum_20d", expr="...", result=result)
-# 月度重评估：IC < 0.03 → under_review（§62.3/§62.4 接降级流程）
-```
+详见 [research/factor/evaluation.py](../../../../research/factor/evaluation.py)。
 
-门控公式：`t > max(2, sqrt(2*ln(N)))`（N=该因子族 attempt 数，含失败）。`to_al_prices` 的 `ffill(limit=5)` 是停牌边界坑在评价侧的处理。验证纪律：Adapter 四方法单测、3–5 只票集成、已知 IC 因子门控测试、直接调 alphalens API 对拍 IC/IR 一致。
-
-## 实施时定稿项
-
-- ~~factor_registry.yaml 与 alphaType 注册表的关系~~ 已定 → §62.3/§65（因子侧 FactorRegistry+metadata.json；策略侧 alphaType JSON 双表）（2026-10-10 回改）
-- ~~periods 默认取值~~ 已定 → §27（正文已定 (1,5,10,20)，清单笔误列入未决）（2026-10-10 回改）
-- ~~under_review 之后的降级/淘汰流程~~ 已定 → §62.3/§62.4（warning→降权/提前重训、exit→deprecated 不物理删除）（2026-10-10 回改）
-- `factor_eval/` Parquet 的具体列 schema（§27.4 仅定落点未定列）
+核心约定：
+- 表达式求值通过白名单 AST 节点（`_BIN_OPS` / `_UNARY_OPS` / `_EXPR_FUNCS`）安全解析，`delta` / `pct_change` 严格校验正整数滞后阶数 `_positive_periods`，禁止前视偏移。
+- `FactorPipeline.preprocess` 默认使用 `PIPELINE_STOCK_EVAL`（去极值 → 填充 → 标准化），并在元数据含 `industry` / `log_market_cap` 时于评估前先调用 `neutralize()`（alphalens 阶段不再重复中性化）。
+- `to_al_prices` 向前延伸 45 个日历日缓冲区计算前向收益，并以 `ffill(limit=5)` 有限度处理短期停牌。
+- 注册落盘：`save_factor_full` 写入因子目录并更新 `metadata.json`（含 `eval` / `attempts` / `attempt_log`），时序结果存 `$QUANT_DATA_ROOT/factor_eval/{name}/`，完整 HTML 报告存 `research/reports/{name}_{date}.html`。
