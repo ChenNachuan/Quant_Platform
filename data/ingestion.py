@@ -66,7 +66,7 @@ __all__ = [
     "write_asset",
     "raw_exists",
     "should_cross_check",
-    "TABLE_TO_ADAPTER_ASSET",
+    "TABLE_TO_ADAPTER_DATASET",
     "TABLE_TO_DQC_GROUP",
     "IngestOutcome",
     "cross_check_path",
@@ -428,25 +428,25 @@ def load_source_priority(
     cfg = yaml.safe_load(resolved.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError(f"{SOURCE_PRIORITY_PATH}: top level must be a mapping")
-    for asset_type, entry in cfg.items():
-        if asset_type == "cross_check":
+    for table, entry in cfg.items():
+        if table == "cross_check":
             continue
-        _validate_entry(str(asset_type), entry)
+        _validate_entry(str(table), entry)
     return cfg
 
 
-def _validate_entry(asset_type: str, entry: Any) -> None:
+def _validate_entry(table: str, entry: Any) -> None:
     if not isinstance(entry, dict):
-        raise ValueError(f"{asset_type}: entry must be a mapping")
+        raise ValueError(f"{table}: entry must be a mapping")
     if isinstance(entry.get("priority"), list):
-        _validate_table(asset_type, entry)
+        _validate_table(table, entry)
         return
     for sub, sub_entry in entry.items():
         if not isinstance(sub_entry, dict) or not isinstance(
             sub_entry.get("priority"), list
         ):
-            raise ValueError(f"{asset_type}.{sub}: needs a priority list")
-        _validate_table(f"{asset_type}.{sub}", sub_entry)
+            raise ValueError(f"{table}.{sub}: needs a priority list")
+        _validate_table(f"{table}.{sub}", sub_entry)
 
 
 def _validate_table(name: str, entry: dict) -> None:
@@ -476,8 +476,8 @@ def _lookup_key(cfg: dict, name: str) -> str | None:
     return None
 
 
-def _entry_for(cfg: dict, asset_type: str, sub_type: str | None) -> dict:
-    key = _lookup_key(cfg, asset_type)
+def _entry_for(cfg: dict, table: str, sub_type: str | None) -> dict:
+    key = _lookup_key(cfg, table)
     if key is not None:
         entry = cfg[key]
         if sub_type is not None:
@@ -485,15 +485,15 @@ def _entry_for(cfg: dict, asset_type: str, sub_type: str | None) -> dict:
             if sub_key is None:
                 raise KeyError(sub_type)
             entry = entry[sub_key]
-    elif asset_type == "reference" and sub_type is not None:
+    elif table == "reference" and sub_type is not None:
         sub_key = _lookup_key(cfg, sub_type)
         if sub_key is None:
             raise KeyError(sub_type)
         entry = cfg[sub_key]
     else:
-        raise KeyError(asset_type)
+        raise KeyError(table)
     if not isinstance(entry, dict) or not isinstance(entry.get("priority"), list):
-        raise ValueError(f"{asset_type}: per-table entry — pass sub_type")
+        raise ValueError(f"{table}: per-table entry — pass sub_type")
     return entry
 
 
@@ -511,38 +511,38 @@ def load_tolerances(
 
 
 def get_source_priority(
-    asset_type: str,
+    table: str,
     sub_type: str | None = None,
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    """返回 *asset_type* 按优先级排序的数据源列表（首位为主源）。"""
+    """返回 *table* 按优先级排序的数据源列表（首位为主源）。"""
     cfg = load_source_priority(path)
-    return list(_entry_for(cfg, asset_type, sub_type)["priority"])
+    return list(_entry_for(cfg, table, sub_type)["priority"])
 
 
 def get_primary_source(
-    asset_type: str,
+    table: str,
     sub_type: str | None = None,
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> str:
-    """返回允许写入 *asset_type* 资产层的唯一主源。"""
-    priority = get_source_priority(asset_type, sub_type, path=path)
+    """返回允许写入 *table* 资产层的唯一主源。"""
+    priority = get_source_priority(table, sub_type, path=path)
     if not priority:
-        raise ValueError(f"no source assigned for {asset_type}/{sub_type or '-'}")
+        raise ValueError(f"no source assigned for {table}/{sub_type or '-'}")
     return priority[0]
 
 
 def get_field_overrides(
-    asset_type: str,
+    table: str,
     sub_type: str | None = None,
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> dict[str, str]:
-    """返回 *asset_type* 的字段级数据源覆盖映射（无则返回 ``{}``）。"""
+    """返回 *table* 的字段级数据源覆盖映射（无则返回 ``{}``）。"""
     cfg = load_source_priority(path)
-    entry = _entry_for(cfg, asset_type, sub_type)
+    entry = _entry_for(cfg, table, sub_type)
     return dict(entry.get("field_override") or {})
 
 
@@ -572,13 +572,13 @@ class MismatchDetail:
 
 @dataclass
 class CrossCheckResult:
-    """单次 ``(trade_date, asset_type)`` 截面交叉校验结果。
+    """单次 ``(trade_date, table)`` 截面交叉校验结果。
 
     ``total_rows`` 为外连接总行数，``matched_rows`` 为双源共有行数；
     ``missing_in_primary`` 为仅备源存在的行数，``missing_in_secondary`` 为仅主源存在的行数。
     """
 
-    asset_type: str
+    table: str
     trade_date: str
     primary_source: str
     secondary_source: str
@@ -600,31 +600,31 @@ class CrossCheckResult:
 def cross_source_check(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
-    asset_type: str,
+    table: str,
     trade_date: str | date | None = None,
     tolerances: Mapping[str, float] | None = None,
     *,
     secondary_source: str | None = None,
 ) -> CrossCheckResult:
-    """对比同一资产类型经 Normalizer 标准化后的主备源截面。
+    """对比同一存储表经 Normalizer 标准化后的主备源截面。
 
     ``df_a`` 为主源数据，``df_b`` 为备源数据；按 ``[ticker, trade_date]``（无日期列时按 ``[ticker]``）外连接。
     依 :data:`NUMERIC_FIELDS` 与五级容差表逐列比较，超出容差或单边缺失判为不一致（双边均空视为一致）。
     """
-    if resolve_table_name(asset_type) == "cn_calendar":
+    if resolve_table_name(table) == "cn_calendar":
         return _cross_check_calendar(
             df_a,
             df_b,
-            asset_type=asset_type,
+            table=table,
             trade_date=trade_date,
             secondary_source=secondary_source,
         )
     if "ticker" not in df_a.columns or "ticker" not in df_b.columns:
         raise ValueError("both frames need a 'ticker' join column")
-    fields = NUMERIC_FIELDS.get(asset_type)
+    fields = NUMERIC_FIELDS.get(table)
     if fields is None:
         raise KeyError(
-            f"no NUMERIC_FIELDS entry for {asset_type!r} — define it in "
+            f"no NUMERIC_FIELDS entry for {table!r} — define it in "
             "data/ingestion.py before cross-checking it"
         )
     join_keys = (
@@ -711,11 +711,11 @@ def cross_source_check(
         )
 
     return CrossCheckResult(
-        asset_type=asset_type,
+        table=table,
         trade_date=_as_date_str(
             trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
         ),
-        primary_source=_primary_source_or(df_a, asset_type),
+        primary_source=_primary_source_or(df_a, table),
         secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
         total_rows=int(len(merged)),
         matched_rows=matched_rows,
@@ -738,7 +738,7 @@ def _cross_check_calendar(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
     *,
-    asset_type: str = "cn_calendar",
+    table: str = "cn_calendar",
     trade_date: str | date | None = None,
     secondary_source: str | None = None,
 ) -> CrossCheckResult:
@@ -786,11 +786,11 @@ def _cross_check_calendar(
             fallback_date = max(union_win) if union_win else win_end
 
     return CrossCheckResult(
-        asset_type=asset_type,
+        table=table,
         trade_date=_as_date_str(
             trade_date if trade_date is not None else fallback_date
         ),
-        primary_source=_primary_source_or(df_a, asset_type),
+        primary_source=_primary_source_or(df_a, table),
         secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
         total_rows=total_rows,
         matched_rows=matched_rows,
@@ -815,12 +815,12 @@ def _as_date_str(value: Any) -> str:
     return str(value) if value is not None else ""
 
 
-def _primary_source_or(df_a: pd.DataFrame, asset_type: str) -> str:
+def _primary_source_or(df_a: pd.DataFrame, table: str) -> str:
     explicit = df_a.attrs.get("source")
     if explicit:
         return str(explicit)
     try:
-        return get_primary_source(asset_type)
+        return get_primary_source(table)
     except (KeyError, ValueError):
         return "primary"
 
@@ -845,7 +845,7 @@ def respond(result: CrossCheckResult) -> ResponseLevel:
         logger.warning(
             "cross-check %s %s: no overlapping tickers between %s and %s "
             "(%d rows unmatched) — comparison inconclusive, not clean",
-            result.asset_type,
+            result.table,
             result.trade_date,
             result.primary_source,
             result.secondary_source,
@@ -862,7 +862,7 @@ def respond(result: CrossCheckResult) -> ResponseLevel:
         for f, d in sorted(result.mismatched_fields.items())
     )
     msg = (
-        f"cross-check {result.asset_type} {result.trade_date}: "
+        f"cross-check {result.table} {result.trade_date}: "
         f"{result.primary_source} vs {result.secondary_source} — "
         f"worst mismatch {result.mismatch_rate:.2%}"
         + (f"; {detail}" if detail else "; all fields matched")
@@ -884,7 +884,7 @@ def backfill_source_tag(backup: str) -> str:
 
 def write_asset(
     df: pd.DataFrame,
-    asset_type: str,
+    table: str,
     trade_date: str | date,
     source_tag: str,
     *,
@@ -900,9 +900,9 @@ def write_asset(
     path = (
         Path(target_path)
         if target_path is not None
-        else _landing_path(asset_type, trade_date, data_root)
+        else _landing_path(table, trade_date, data_root)
     )
-    merge_monthly = target_path is None and is_monthly_partition(asset_type)
+    merge_monthly = target_path is None and is_monthly_partition(table)
 
     if check_capacity(path.parent if path.parent.exists() else path) == "CRITICAL":
         raise DiskFullError(
@@ -940,15 +940,15 @@ def write_asset(
                         if sort_cols
                         else combined
                     )
-        table = pa.Table.from_pandas(frame_to_write, preserve_index=False)
-        meta = dict(table.schema.metadata or {})
+        pa_table = pa.Table.from_pandas(frame_to_write, preserve_index=False)
+        meta = dict(pa_table.schema.metadata or {})
         meta[b"source_tag"] = str(source_tag).encode("utf-8")
         meta[b"ingest_time"] = (
             datetime.now().isoformat(timespec="seconds").encode("utf-8")
         )
-        table = table.replace_schema_metadata(meta)
+        pa_table = pa_table.replace_schema_metadata(meta)
         try:
-            pq.write_table(table, tmp, compression="zstd")
+            pq.write_table(pa_table, tmp, compression="zstd")
             fd = os.open(tmp, os.O_RDONLY)
             try:
                 os.fsync(fd)
@@ -975,35 +975,35 @@ def write_asset(
 
 
 def _landing_path(
-    asset_type: str, trade_date: str | date, data_root: str | os.PathLike[str]
+    table: str, trade_date: str | date, data_root: str | os.PathLike[str]
 ) -> Path:
-    return partition_path(asset_type, trade_date, data_root)
+    return partition_path(table, trade_date, data_root)
 
 
 # --- 交叉校验触发判断 ---
 def raw_exists(
     source: str,
-    asset_type: str,
+    table: str,
     trade_date: str | date,
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> bool:
-    """检查 *source* 在 ``(asset_type, trade_date)`` 的原始落地文件是否存在（不解析 watermark）。"""
+    """检查 *source* 在 ``(table, trade_date)`` 的原始落地文件是否存在（不解析 watermark）。"""
     if isinstance(trade_date, str):
         trade_date = date.fromisoformat(trade_date)
-    return raw_path(source, asset_type, trade_date, data_root).exists()
+    return raw_path(source, table, trade_date, data_root).exists()
 
 
 def should_cross_check(
     source: str,
-    asset_type: str,
+    table: str,
     trade_date: str | date,
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> bool:
     """判断是否应触发交叉校验：仅当主源刚入库完成且全部备源原始批次均已落地时返回 ``True``。"""
     try:
-        priority = get_source_priority(asset_type)
+        priority = get_source_priority(table)
     except (KeyError, ValueError):
         # 未在仲裁配置中定义的资产类型（如 factor、裸 reference）
         return False
@@ -1013,13 +1013,12 @@ def should_cross_check(
     if not backups:
         return False
     return all(
-        raw_exists(backup, asset_type, trade_date, data_root=data_root)
-        for backup in backups
+        raw_exists(backup, table, trade_date, data_root=data_root) for backup in backups
     )
 
 
 # --- 规范表映射与单表/批量入库编排 ---
-TABLE_TO_ADAPTER_ASSET: dict[str, str] = _AliasedDict(
+TABLE_TO_ADAPTER_DATASET: dict[str, str] = _AliasedDict(
     {
         "cn_calendar": "calendar",
         "cn_stock_bars_daily": "stock",
@@ -1111,14 +1110,14 @@ def _already_ingested(
     return None
 
 
-def _resolve_adapter_asset(adapter: Any, canonical: str) -> str:
-    supported = list(adapter.list_asset_types())
+def _resolve_adapter_dataset(adapter: Any, canonical: str) -> str:
+    supported = list(adapter.list_datasets())
     if canonical in supported:
         return canonical
     legacy = CANONICAL_TO_LEGACY.get(canonical)
     if legacy and legacy in supported:
         return legacy
-    mapped = TABLE_TO_ADAPTER_ASSET.get(canonical)
+    mapped = TABLE_TO_ADAPTER_DATASET.get(canonical)
     if mapped and mapped in supported:
         return mapped
     raise ValueError(
@@ -1127,8 +1126,8 @@ def _resolve_adapter_asset(adapter: Any, canonical: str) -> str:
     )
 
 
-def _resolve_normalizer_asset(canonical: str) -> str:
-    return TABLE_TO_ADAPTER_ASSET.get(canonical, canonical)
+def _resolve_normalizer_dataset(canonical: str) -> str:
+    return TABLE_TO_ADAPTER_DATASET.get(canonical, canonical)
 
 
 def _load_raw_any(
@@ -1143,7 +1142,7 @@ def _load_raw_any(
     legacy = CANONICAL_TO_LEGACY.get(canonical)
     if legacy and legacy not in candidates:
         candidates.append(legacy)
-    mapped = TABLE_TO_ADAPTER_ASSET.get(canonical)
+    mapped = TABLE_TO_ADAPTER_DATASET.get(canonical)
     if mapped and mapped not in candidates:
         candidates.append(mapped)
     for key in candidates:
@@ -1177,9 +1176,9 @@ def _obtain_raw(
 
     adapter = get_adapter(source)
     try:
-        asset_arg = _resolve_adapter_asset(adapter, canonical)
+        dataset_arg = _resolve_adapter_dataset(adapter, canonical)
         wm = read_watermark(source, canonical, Path(data_root))
-        fetched = adapter.fetch(asset_arg, trade_date, watermark=wm)
+        fetched = adapter.fetch(dataset_arg, trade_date, watermark=wm)
     finally:
         adapter.close()
 
@@ -1213,12 +1212,12 @@ def _apply_field_overrides(
     from data.normalizers import get_normalizer
 
     out = df.copy()
-    norm_asset = _resolve_normalizer_asset(canonical)
+    norm_dataset = _resolve_normalizer_dataset(canonical)
     for ov_src, fields in by_source.items():
         ov_raw, _ = _obtain_raw(
             ov_src, canonical, trade_date, data_root=data_root, from_raw=from_raw
         )
-        ov_norm = get_normalizer(ov_src)(norm_asset, ov_raw)
+        ov_norm = get_normalizer(ov_src)(norm_dataset, ov_raw)
         join_keys = [
             c
             for c in ("ticker", "trade_date")
@@ -1239,12 +1238,12 @@ def _apply_field_overrides(
 
 
 def cross_check_path(
-    asset_type: str,
+    table: str,
     trade_date: str | date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """返回交叉校验结果 JSON 路径：``{data_root}/cross_check/{table}/{date}.json``。"""
-    canonical = resolve_table_name(asset_type)
+    canonical = resolve_table_name(table)
     return (
         Path(data_root)
         / "cross_check"
@@ -1260,7 +1259,7 @@ def save_cross_check_result(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """将交叉校验结果原子落盘至 ``cross_check/{table}/{date}.json``（同日多备源追加更新）。"""
-    path = cross_check_path(result.asset_type, result.trade_date, data_root)
+    path = cross_check_path(result.table, result.trade_date, data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     existing: dict[str, Any] = {}
@@ -1297,7 +1296,7 @@ def save_cross_check_result(
         },
     }
     payload = {
-        "asset_type": resolve_table_name(result.asset_type),
+        "table": resolve_table_name(result.table),
         "trade_date": result.trade_date,
         "primary_source": result.primary_source,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1325,7 +1324,7 @@ def run_cross_check_for_date(
     if len(priority) < 2:
         return {}
     primary_src, backups = priority[0], priority[1:]
-    norm_asset = _resolve_normalizer_asset(canonical)
+    norm_dataset = _resolve_normalizer_dataset(canonical)
 
     def _obtain_for_cross_check(src: str) -> pd.DataFrame:
         try:
@@ -1338,7 +1337,7 @@ def run_cross_check_for_date(
             raw, _ = _obtain_raw(
                 src, canonical, trade_date, data_root=data_root, from_raw=False
             )
-        return get_normalizer(src)(norm_asset, raw)
+        return get_normalizer(src)(norm_dataset, raw)
 
     unavailable_errors: tuple[type[Exception], ...] = (
         (FileNotFoundError, ValueError, ModuleNotFoundError, RuntimeError, OSError)
@@ -1446,7 +1445,7 @@ def ingest_table(
 
     last_error: Exception | None = None
     fallback_from: str | None = None
-    norm_asset = _resolve_normalizer_asset(canonical)
+    norm_dataset = _resolve_normalizer_dataset(canonical)
 
     for idx, src in enumerate(candidates):
         is_primary = src == primary_src
@@ -1455,7 +1454,7 @@ def ingest_table(
             raw_df, wm = _obtain_raw(
                 src, canonical, trade_date, data_root=data_root, from_raw=from_raw
             )
-            norm_df = get_normalizer(src)(norm_asset, raw_df)
+            norm_df = get_normalizer(src)(norm_dataset, raw_df)
             if is_primary:
                 norm_df = _apply_field_overrides(
                     norm_df,

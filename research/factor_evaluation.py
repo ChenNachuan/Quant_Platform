@@ -669,7 +669,7 @@ class FactorPipeline:
             end,
             freq="daily",
             adjust="forward",
-            asset_type="equity",
+            table_family="equity",
         )
 
     def _write_tearsheet(

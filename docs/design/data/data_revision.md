@@ -30,12 +30,12 @@ class FieldChange:
     abs_diff: float; rel_diff: float
 
 @dataclass
-class CorrectionRecord:   # 写入 corrections/{asset}/{date}.jsonl
-    asset_type: str; trade_date: date
+class CorrectionRecord:   # 写入 corrections/{table}/{date}.jsonl
+    table: str; trade_date: date
     detected_at: datetime
     changes: list[FieldChange]
 
-def detect_corrections(asset_type: str, lookback: int = 30) -> list[FieldChange]
+def detect_corrections(table: str, lookback: int = 30) -> list[FieldChange]
 def apply_corrections(changes: list[FieldChange]) -> list[CorrectionRecord]
 def assess_correction_impact(record: CorrectionRecord) -> str   # LOW | MEDIUM | HIGH
 def mark_factors_stale(record: CorrectionRecord) -> list[str]   # 受影响因子名
@@ -49,7 +49,7 @@ def mark_factors_stale(record: CorrectionRecord) -> list[str]   # 受影响因�
 | 决策 | 否决项 | 一句话理由 |
 |---|---|---|
 | 覆盖写入，不版本化 | 多版本共存 | 存储膨胀；平台永远用最新数据 |
-| 修正日志 `corrections/{asset}/{date}.jsonl` append | 只覆盖不记录 | 审计与影响追溯需要 |
+| 修正日志 `corrections/{table}/{date}.jsonl` append | 只覆盖不记录 | 审计与影响追溯需要 |
 | 每周全量重拉近 30 交易日逐行比对 | 信源的修正标记 | 数据源静默覆盖，无修正通知 |
 | 季度全量近 1 年兜底 | 只做周扫 | 覆盖长周期回溯修正 |
 | 比对容差 `CORRECTION_TOLERANCES` 四字段 | 精确相等 | 源侧浮点/口径微差会噪音告警 |

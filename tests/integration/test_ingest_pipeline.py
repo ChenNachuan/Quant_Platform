@@ -251,13 +251,13 @@ class TestNormalizerContract:
         assert list(out.columns) == UNIFIED_COLUMNS
 
     @pytest.mark.parametrize("source", ["akshare", "tushare", "amazingdata"])
-    def test_rejects_unknown_asset_type(self, source):
+    def test_rejects_unknown_dataset(self, source):
         raw = {
             "akshare": _AKSHARE_RAW,
             "tushare": _TUSHARE_RAW,
             "amazingdata": _AMAZING_RAW,
         }[source]
-        with pytest.raises(ValueError, match="unsupported asset_type"):
+        with pytest.raises(ValueError, match="unsupported dataset"):
             _NORMALIZERS[source]("futures", raw.copy())
 
 
@@ -367,7 +367,7 @@ class TestReviewRegressions:
 
 
 class TestRawLanding:
-    """S3: raw zstd landing at ``raw/{source}/{asset_type}/{date}.parquet``."""
+    """S3: raw zstd landing at ``raw/{source}/{table}/{date}.parquet``."""
 
     def test_raw_path_layout(self, tmp_path):
         from data.raw import raw_path
@@ -473,7 +473,7 @@ class TestWatermarkIdempotentRerun:
         write_watermark("akshare", "stock", "2025-03-15", tmp_path)
         assert read_watermark("akshare", "stock", tmp_path) == "2025-03-15"
 
-    def test_watermark_multi_asset_type(self, tmp_path):
+    def test_watermark_multi_table(self, tmp_path):
         from data.source_adapter import read_watermark, write_watermark
 
         write_watermark("akshare", "stock", "2025-03-14", tmp_path)
@@ -553,7 +553,7 @@ class TestWatermarkIdempotentRerun:
 
 
 class TestQuarantineSavePath:
-    """ac-4: quarantine/{asset_type}/{date}.parquet + .rejection.json."""
+    """ac-4: quarantine/{table}/{date}.parquet + .rejection.json."""
 
     def test_quarantine_path_layout(self, tmp_path):
         from data.quarantine import quarantine_path, rejection_path
@@ -569,7 +569,7 @@ class TestQuarantineSavePath:
         df = pd.DataFrame({"ticker": ["000001.SZ"], "close": [10.5]})
         meta = {
             "data_date": "2025-03-14",
-            "asset_type": "stock",
+            "table": "stock",
             "reject_time": "2025-03-14T16:00:00",
             "batch_status": "rejected",
             "total_rows": 100,
@@ -590,7 +590,7 @@ class TestQuarantineSavePath:
         df = pd.DataFrame({"x": [1]})
         meta = {
             "data_date": "2025-03-14",
-            "asset_type": "stock",
+            "table": "stock",
             "reject_time": "2025-03-14T16:00:00",
             "batch_status": "rejected",
             "total_rows": 100,
@@ -602,7 +602,7 @@ class TestQuarantineSavePath:
         loaded = json.loads(r_path.read_text(encoding="utf-8"))
         required = {
             "data_date",
-            "asset_type",
+            "table",
             "reject_time",
             "batch_status",
             "total_rows",
@@ -1097,7 +1097,7 @@ class TestDqcReportTables:
         assert report.main(["quarantine", "--data-root", str(tmp_path), "--json"]) == 0
         listing = json.loads(capsys.readouterr().out)
         assert listing[0]["data_date"] == "2024-01-03"
-        assert listing[0]["asset_type"] == "bars_daily"
+        assert listing[0]["table"] == "bars_daily"
         assert listing[0]["reject_reason"] == detail_reject["reject_reason"]
         assert "L10" in listing[0]["hard_rules_triggered"]
 
@@ -1140,11 +1140,11 @@ class TestDqcReportTables:
         df = _dqc_daily_frame()
 
         class _FakeAdapter:
-            def fetch(self, asset_type, trade_date, watermark=None):
+            def fetch(self, dataset, trade_date, watermark=None):
                 return FetchResult(
                     df=df.copy(),
                     source="fake",
-                    asset_type=asset_type,
+                    dataset=dataset,
                     trade_date=trade_date,
                     row_count=len(df),
                     watermark=None,
@@ -1159,7 +1159,7 @@ class TestDqcReportTables:
         monkeypatch.setattr(
             data.normalizers,
             "get_normalizer",
-            lambda source: lambda asset_type, raw: raw.copy(),
+            lambda source: lambda dataset, raw: raw.copy(),
         )
         rc = report.main(
             [
@@ -1201,7 +1201,7 @@ class TestDqcReportTables:
         monkeypatch.setattr(
             data.normalizers,
             "get_normalizer",
-            lambda source: lambda asset_type, raw: raw.copy(),
+            lambda source: lambda dataset, raw: raw.copy(),
         )
 
         rc = report.main(

@@ -1,6 +1,6 @@
 """隔离区管理 — 持久化被 DQC 拦截的批次并提供修复路径。
 
-存储格式：``quarantine/{asset_type}/{date}.parquet`` 与 ``.rejection.json``，供 T+30 自动清理或人工修复：
+存储格式：``quarantine/{table}/{date}.parquet`` 与 ``.rejection.json``，供 T+30 自动清理或人工修复：
 - 路径 A（上游源修复）：修复源站后强制重拉；
 - 路径 B（规则过严）：``load_quarantine`` 读出后由调用方传入校验器执行 ``recheck``；
 - 路径 C（放弃修复）：通过 ``cleanup_quarantine`` 按生命周期策略过期清理。
@@ -36,28 +36,28 @@ QUARANTINE_ROOT = "quarantine"
 
 
 def quarantine_path(
-    asset_type: str,
+    table: str,
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """返回隔离区 Parquet 文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
-    return Path(data_root) / QUARANTINE_ROOT / asset_type / f"{date_str}.parquet"
+    return Path(data_root) / QUARANTINE_ROOT / table / f"{date_str}.parquet"
 
 
 def rejection_path(
-    asset_type: str,
+    table: str,
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
     """返回拦截元数据 JSON 文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
-    return Path(data_root) / QUARANTINE_ROOT / asset_type / f"{date_str}.rejection.json"
+    return Path(data_root) / QUARANTINE_ROOT / table / f"{date_str}.rejection.json"
 
 
 def save_quarantine(
     df: pd.DataFrame,
-    asset_type: str,
+    table: str,
     trade_date: date,
     rejection_meta: dict[str, Any],
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
@@ -69,10 +69,10 @@ def save_quarantine(
     df : pd.DataFrame
         经标准化后被 DQC 拦截的数据帧。
     rejection_meta : dict
-        须包含 data_date、asset_type、reject_time、batch_status、total_rows、rows_would_drop、drop_rate、hard_rules_triggered。
+        须包含 data_date、table、reject_time、batch_status、total_rows、rows_would_drop、drop_rate、hard_rules_triggered。
     """
-    target = quarantine_path(asset_type, trade_date, data_root)
-    meta_path = rejection_path(asset_type, trade_date, data_root)
+    target = quarantine_path(table, trade_date, data_root)
+    meta_path = rejection_path(table, trade_date, data_root)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     tmp = target.with_name(target.name + ".tmp")
@@ -118,13 +118,13 @@ def save_quarantine(
 
 
 def load_quarantine(
-    asset_type: str,
+    table: str,
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
     """读取隔离区批次，返回 ``(df, rejection_meta)``，不存在时返回 ``None``。"""
-    target = quarantine_path(asset_type, trade_date, data_root)
-    meta_path = rejection_path(asset_type, trade_date, data_root)
+    target = quarantine_path(table, trade_date, data_root)
+    meta_path = rejection_path(table, trade_date, data_root)
     if not target.exists():
         return None
     df = pd.read_parquet(target)
@@ -140,12 +140,12 @@ def load_quarantine(
 def recheck(
     df: pd.DataFrame,
     validator: Any,
-    asset_type: str,
+    table: str,
     trade_date: date,
 ) -> dict[str, Any]:
     """使用调用方提供的 *validator* 重检隔离区批次，仅返回判定结果字典，不主动写资产层或删隔离文件。"""
     verdict = validator(df)
-    logger.info("recheck %s/%s: %s", asset_type, trade_date, verdict)
+    logger.info("recheck %s/%s: %s", table, trade_date, verdict)
     return verdict
 
 

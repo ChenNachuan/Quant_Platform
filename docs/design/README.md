@@ -71,6 +71,6 @@ docs/design/
 
 ## 数据存储与命名约定要点
 
-1. **顶层平级目录**：`$QUANT_DATA_ROOT/` 下 `asset/`（51 张原始与标准资产表）与 `factors/`（因子存储）同级；不再设独立 `ext/` 顶层，原扩展数据全部统一按 `{nation}_{asset_type}_{data_type}` 归入 `asset/`。
+1. **顶层平级目录**：`$QUANT_DATA_ROOT/` 下 `asset/`（51 张原始与标准资产表）与 `factors/`（因子存储）同级；不再设独立 `ext/` 顶层，原扩展数据全部统一按 `{nation}_{asset_class}_{data_type}` 归入 `asset/`。
 2. **单表独立目录**：取消 `cn_reference/` 等混放目录，避免 DuckDB `read_parquet` 跨表 Schema 冲突；详细字段以 [data/storage_schema.py](../../data/storage_schema.py) 为代码权威，人类可读字段字典见 [data/asset/README.md](data/asset/README.md)。
 3. **小截面按月合并**：`cn_stock_fundamental`、`cn_stock_daily_status`、`cn_etf_fundamental`、`cn_fund_nav` 等日频小截面表统一采用 `{month}.parquet` 按月分区，避免 `<1MB` 碎文件开销。

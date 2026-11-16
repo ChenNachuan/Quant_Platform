@@ -42,10 +42,10 @@ def _qualify_ticker(code: str) -> str:
     return f"{code}.{exchange}"
 
 
-def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
+def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将 AKShare 原始中文列名 DataFrame 转换为统一 ``bars_daily`` 格式。"""
-    if asset_type != "stock":
-        raise ValueError(f"unsupported asset_type: {asset_type!r}")
+    if dataset != "stock":
+        raise ValueError(f"unsupported dataset: {dataset!r}")
 
     df = raw_df.rename(columns=_COLUMN_MAP).copy()
 

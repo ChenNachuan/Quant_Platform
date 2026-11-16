@@ -20,7 +20,7 @@ import pandas as pd
 import requests
 
 from core.config import load_secrets
-from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter
+from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter, SourceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,9 @@ _RETRYABLE_BUSINESS_CODES = frozenset({4001, 5001, 5002, 5003})
 _AUTH_BUSINESS_CODES = frozenset({2001, 2003})
 _EMPTY_BUSINESS_CODES = frozenset({3001, 3002})
 
-_ASSET_TYPES = ["stock", "etf", "index", "futures", "option", "calendar"]
+_SUPPORTED_DATASETS = ["stock", "etf", "index", "futures", "option", "calendar"]
 
-_META_ASSET_TYPE_MAP: dict[str, str] = {
+_META_DATASET_MAP: dict[str, str] = {
     "stock": "a-share",
     "etf": "fund-etf",
     "index": "a-share-index",
@@ -96,7 +96,7 @@ class StraightFlushAdapter(SourceAdapter):
 
     requests_per_second = 5.0
 
-    _ASSET_TYPES = _ASSET_TYPES
+    _SUPPORTED_DATASETS = _SUPPORTED_DATASETS
 
     def __init__(
         self,
@@ -139,8 +139,8 @@ class StraightFlushAdapter(SourceAdapter):
             )
         return {"X-api-key": token}
 
-    def list_asset_types(self) -> list[str]:
-        return list(self._ASSET_TYPES)
+    def list_datasets(self) -> list[str]:
+        return list(self._SUPPORTED_DATASETS)
 
     def _request_json(
         self, path: str, params: dict[str, Any] | None = None
@@ -189,11 +189,11 @@ class StraightFlushAdapter(SourceAdapter):
             }
         raise ValueError(f"Fuyao API error {code}: {msg} (request_id={req_id})")
 
-    def _resolve_thscodes(self, asset_type: str) -> list[str]:
+    def _resolve_thscodes(self, dataset: str) -> list[str]:
         if self._symbols is not None:
             return list(self._symbols)
 
-        fuyao_type = _META_ASSET_TYPE_MAP[asset_type]
+        fuyao_type = _META_DATASET_MAP[dataset]
         codes: list[str] = []
         offset = 0
         while True:
@@ -217,19 +217,19 @@ class StraightFlushAdapter(SourceAdapter):
 
     def fetch(
         self,
-        asset_type: str,
+        dataset: SourceDataset | str,
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        if asset_type not in self._ASSET_TYPES:
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+        if dataset not in self._SUPPORTED_DATASETS:
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
-        if asset_type == "calendar":
+        if dataset == "calendar":
             df = self._fetch_calendar(trade_date)
         else:
             start_ms, end_ms = _shanghai_day_bounds_ms(trade_date)
-            thscodes = self._resolve_thscodes(asset_type)
-            if asset_type == "stock":
+            thscodes = self._resolve_thscodes(dataset)
+            if dataset == "stock":
                 df = self._fetch_batch_bars(
                     "/api/a-share/prices/historical-batch",
                     thscodes,
@@ -237,28 +237,28 @@ class StraightFlushAdapter(SourceAdapter):
                     end_ms,
                     adjust="none",  # 原始未复权价格
                 )
-            elif asset_type == "etf":
+            elif dataset == "etf":
                 df = self._fetch_batch_bars(
                     "/api/fund/market/historical-batch",
                     thscodes,
                     start_ms,
                     end_ms,
                 )
-            elif asset_type == "index":
+            elif dataset == "index":
                 df = self._fetch_batch_bars(
                     "/api/a-share-index/prices/historical-batch",
                     thscodes,
                     start_ms,
                     end_ms,
                 )
-            elif asset_type == "futures":
+            elif dataset == "futures":
                 df = self._fetch_single_daily(
                     "/api/futures/prices/daily",
                     thscodes,
                     start_ms,
                     end_ms,
                 )
-            elif asset_type == "option":
+            elif dataset == "option":
                 df = self._fetch_single_daily(
                     "/api/options/prices/daily",
                     thscodes,
@@ -266,12 +266,12 @@ class StraightFlushAdapter(SourceAdapter):
                     end_ms,
                 )
             else:  # pragma: no cover
-                raise ValueError(f"unsupported asset_type: {asset_type!r}")
+                raise ValueError(f"unsupported dataset: {dataset!r}")
 
         return FetchResult(
             df=df,
             source="straightflush",
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(df),
             watermark=trade_date.strftime("%Y%m%d"),

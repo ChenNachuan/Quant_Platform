@@ -5,7 +5,7 @@
 
 import re
 
-from core.types import AssetType
+from core.types import AssetClass, AssetType
 
 # --- ASSET_RULES：分资产交易规则 ---
 ASSET_RULES: dict[str, dict] = {
@@ -44,9 +44,10 @@ ASSET_RULES: dict[str, dict] = {
 }
 
 
-def get_asset_rules(asset_type: str) -> dict:
-    """查询 *asset_type* 对应交易规则；未知类型抛出 ``KeyError``（不做静默回退）。"""
-    return ASSET_RULES[asset_type]
+def get_asset_rules(asset_class: AssetClass | AssetType) -> dict:
+    """查询 *asset_class* 对应交易规则；未知类型抛出 ``KeyError``（不做静默回退）。"""
+    key = asset_class.value if isinstance(asset_class, AssetType) else asset_class
+    return ASSET_RULES[key]
 
 
 def is_stamp_tax_exempt_prefix(ticker: str) -> bool:

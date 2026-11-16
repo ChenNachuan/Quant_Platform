@@ -16,12 +16,12 @@
 ## 接口签名
 
 ```text
-quarantine/{asset_type}/{date}.parquet     # 拒收批次数据（normalize 后的 df）
-quarantine/{asset_type}/{date}.rejection.json
-  # data_date / asset_type / reject_time / batch_status / total_rows /
+quarantine/{table}/{date}.parquet          # 拒收批次数据（normalize 后的 df）
+quarantine/{table}/{date}.rejection.json
+  # data_date / table / reject_time / batch_status / total_rows /
   # rows_would_drop / drop_rate / hard_rules_triggered[]
-raw/{source}/{asset_type}/{date}.parquet                 # 原样，按日一文件（source → asset_type → date）
-normalizers/{source}_normalizer.py         # normalize(asset_type, raw_df) -> df   （~100 行/源）
+raw/{source}/{table}/{date}.parquet                      # 原样，按日一文件（source → table → date）
+normalizers/{source}_normalizer.py         # normalize(dataset, raw_df) -> df      （~100 行/源）
 ```
 
 修复三路径：
@@ -53,8 +53,8 @@ normalizers/{source}_normalizer.py         # normalize(asset_type, raw_df) -> df
 | 拒收数据落 quarantine 30 天 | 拒收即扔 | 可修复、可重验、可追责 |
 | raw 在 DQC **前**落盘 | DQC 通过后才存 raw | 保证据链 |
 | quarantine 存 normalize 后的 df | 存 raw | recheck 直接可跑 |
-| raw 分区 source → asset_type → date | 按合约分区 | 列名/类型不同不能混存；跨源对比要溯源；换源后旧 raw 完整 |
-| Normalizer 每源一个文件，只做格式转换 |  Adapter 内转换 | 源间差异隔离；DQC 按 asset_type 不感知源 |
+| raw 分区 source → table → date | 按合约分区 | 列名/类型不同不能混存；跨源对比要溯源；换源后旧 raw 完整 |
+| Normalizer 每源一个文件，只做格式转换 |  Adapter 内转换 | 源间差异隔离；DQC 按 dqc_group 不感知源 |
 | raw 保留 1 年 / quarantine 30 天 / asset 永久 | 都永久 | 1 年内的质量问题都该被发现了、 |
 
 ## 实现要点
@@ -63,7 +63,7 @@ normalizers/{source}_normalizer.py         # normalize(asset_type, raw_df) -> df
 
 核心约定:
 - save_raw 在 DQC之前,save_quarantine在DQC拒收时--两步保证无论通过还是拒收,原始数据都有落盘
-- Normalizer 签名统一为 normalize(asset_type,raw_df) ->df,只做列名映射和类型修正,不做清洗
+- Normalizer 签名统一为 normalize(dataset, raw_df) -> df,只做列名映射和类型修正,不做清洗
 - cleanup_raw 只删.parquet,不删.watermarks.json
 - cleanup_quarantine 只删 quarantine/下文件,不越界
 - 隔离区查询:python -m data.dqc.report quarantine

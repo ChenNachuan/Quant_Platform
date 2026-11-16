@@ -1,6 +1,6 @@
 """各数据源标准化器（仅做字段映射、单位换算与类型规范，不做 DQC 清洗）。
 
-各子模块暴露 ``normalize(asset_type, raw_df) -> df``，输出对齐统一的 ``bars_daily`` 表结构。
+各子模块暴露 ``normalize(dataset, raw_df) -> df``，输出对齐统一的 ``bars_daily`` 表结构。
 """
 
 from __future__ import annotations

@@ -45,7 +45,7 @@ class PriceAccessor:
 
 **复权公式**：`hfq = raw × adj`；`qfq = raw × adj / adj_latest`。returns 公式里基准日消掉，回测/实盘零差异。
 
-**日历存储**：`asset/cn_calendar/{exchange}.parquet` 单列 `trade_date: date`（对齐 `{nation}_{asset_type}_{data_type}`）。
+**日历存储**：`asset/cn_calendar/{exchange}.parquet` 单列 `trade_date: date`（对齐 `{nation}_{asset_class}_{data_type}`）。
 
 ## 关键决策
 

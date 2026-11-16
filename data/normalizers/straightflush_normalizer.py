@@ -22,7 +22,7 @@ from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
 
-_SUPPORTED_ASSET_TYPES = frozenset({"stock", "etf", "index", "calendar"})
+_SUPPORTED_DATASETS = frozenset({"stock", "etf", "index", "calendar"})
 
 _COLUMN_MAP: dict[str, str] = {
     "thscode": "ticker",
@@ -95,11 +95,11 @@ def _normalize_calendar(raw_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
+def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将扶摇原始列名与 ``date_ms`` 转换为统一 ``bars_daily`` 格式。"""
-    if asset_type not in _SUPPORTED_ASSET_TYPES:
-        raise ValueError(f"unsupported asset_type: {asset_type!r}")
-    if asset_type == "calendar":
+    if dataset not in _SUPPORTED_DATASETS:
+        raise ValueError(f"unsupported dataset: {dataset!r}")
+    if dataset == "calendar":
         return _normalize_calendar(raw_df)
 
     df = raw_df.copy()
@@ -125,7 +125,7 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
 
     if "ticker" in df.columns and len(df) > 0:
         df["ticker"] = df["ticker"].astype(str).map(_qualify_ticker)
-        if asset_type == "index":
+        if dataset == "index":
             existing_tickers = set(df["ticker"])
             df["ticker"] = df["ticker"].map(
                 lambda t: (

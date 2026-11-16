@@ -567,10 +567,10 @@ class TestOcrRegressions:
             )
 
 
-def test_numeric_fields_cover_the_multi_source_asset_types():
+def test_numeric_fields_cover_the_multi_source_tables():
     # The participating-field lists (§41 open item) must exist for every
     # asset table and preserve legacy aliases.
-    for asset_type in (
+    for table in (
         "bars_daily",
         "bars_minute",
         "fundamental",
@@ -581,7 +581,7 @@ def test_numeric_fields_cover_the_multi_source_asset_types():
         "cn_stock_fundamental_income",
         "option_basic",
     ):
-        assert asset_type in NUMERIC_FIELDS
+        assert table in NUMERIC_FIELDS
     assert "adjfactor" in NUMERIC_FIELDS["bars_daily"]
     assert "adjfactor" not in NUMERIC_FIELDS["bars_minute"]
     assert "adjfactor" in NUMERIC_FIELDS["cn_etf_bars_daily"]

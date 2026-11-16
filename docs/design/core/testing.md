@@ -40,7 +40,7 @@ def test_simbroker_matches_pandas() -> None: ...
 | FactorDAG | 拓扑序 | 环检测抛错；依赖先算 |
 | load_config | 覆盖合并 | 策略级覆盖全局同名键 |
 | run_job | 重试 | 失败 n 次后 status=FAILED |
-| ASSET_RULES | 查表 | 未知 asset_type 抛 KeyError |
+| ASSET_RULES | 查表 | 未知 asset_class 抛 KeyError |
 
 测试替身表：
 

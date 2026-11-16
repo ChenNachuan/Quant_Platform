@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 import requests
 
 from core.config import load_secrets
-from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter
+from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter, SourceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,8 @@ _DEFAULT_BASE_URL = "https://data.qdc-data.com"
 _DEFAULT_CLI_BIN = "qdc-cli"
 _DAY_MS = 86_400_000
 
-# 平台 asset_type -> (QDC sku, 默认子表名或 None)
-_ASSET_TO_SKU: dict[str, tuple[str, str | None]] = {
+# 平台 dataset -> (QDC sku, 默认子表名或 None)
+_DATASET_TO_SKU: dict[str, tuple[str, str | None]] = {
     "stock": ("cn_daily_full", None),
     "etf": ("cn_etf_1d", None),
     "index": ("cn_index_1d", None),
@@ -85,7 +85,7 @@ class QdcAdapter(SourceAdapter):
 
     requests_per_second = 5.0
 
-    _ASSET_TYPES = list(_ASSET_TO_SKU)
+    _SUPPORTED_DATASETS = list(_DATASET_TO_SKU)
 
     def __init__(
         self,
@@ -132,28 +132,28 @@ class QdcAdapter(SourceAdapter):
         self._cli_updated = False
 
     # ── 公共接口 ──────────────────────────────────────────────────────────
-    def list_asset_types(self) -> list[str]:
-        return list(self._ASSET_TYPES)
+    def list_datasets(self) -> list[str]:
+        return list(self._SUPPORTED_DATASETS)
 
     def fetch(
         self,
-        asset_type: str,
+        dataset: SourceDataset | str,
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        if asset_type not in _ASSET_TO_SKU:
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+        if dataset not in _DATASET_TO_SKU:
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         if self._mode == "cli":
-            df = self._fetch_cli(asset_type, trade_date)
+            df = self._fetch_cli(dataset, trade_date)
         else:
-            df = self._fetch_http(asset_type, trade_date)
+            df = self._fetch_http(dataset, trade_date)
 
         date_str = trade_date.strftime("%Y-%m-%d")
         return FetchResult(
             df=df,
             source="qdc",
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(df),
             watermark=date_str,
@@ -294,9 +294,9 @@ class QdcAdapter(SourceAdapter):
         self._run_cli_json(["get", sku, "--years", str(trade_date.year)])
         self._synced_keys.add(key)
 
-    def _fetch_cli(self, asset_type: str, trade_date: date) -> pd.DataFrame:
+    def _fetch_cli(self, dataset: str, trade_date: date) -> pd.DataFrame:
         data_root = self._resolve_cli_data_root()
-        sku, table = _ASSET_TO_SKU[asset_type]
+        sku, table = _DATASET_TO_SKU[dataset]
         subtable = table or "full"
 
         self._maybe_sync_cli(data_root, sku, subtable, trade_date)
@@ -388,8 +388,8 @@ class QdcAdapter(SourceAdapter):
             headers["X-Device"] = device
         return headers
 
-    def _fetch_http(self, asset_type: str, trade_date: date) -> pd.DataFrame:
-        sku, table = _ASSET_TO_SKU[asset_type]
+    def _fetch_http(self, dataset: str, trade_date: date) -> pd.DataFrame:
+        sku, table = _DATASET_TO_SKU[dataset]
         date_str = trade_date.strftime("%Y-%m-%d")
         params: dict[str, Any] = {
             "sku": sku,

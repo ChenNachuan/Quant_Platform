@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter
+from data.source_adapter import FETCH_TIMEOUT, FetchResult, SourceAdapter, SourceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -20,29 +20,29 @@ class AkshareAdapter(SourceAdapter):
 
     requests_per_second = 5.0
 
-    _ASSET_TYPES = ["stock"]
+    _SUPPORTED_DATASETS = ["stock"]
 
     def __init__(self, symbols: list[str] | None = None) -> None:
         self._symbols = symbols or ["000001"]
 
-    def list_asset_types(self) -> list[str]:
-        return list(self._ASSET_TYPES)
+    def list_datasets(self) -> list[str]:
+        return list(self._SUPPORTED_DATASETS)
 
     def fetch(
         self,
-        asset_type: str,
+        dataset: SourceDataset | str,
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        if asset_type not in self._ASSET_TYPES:
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+        if dataset not in self._SUPPORTED_DATASETS:
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         import akshare as ak
 
         date_str = trade_date.strftime("%Y%m%d")
         frames = []
 
-        if asset_type == "stock":
+        if dataset == "stock":
             for sym in self._symbols:
                 df = ak.stock_zh_a_hist(
                     symbol=sym,
@@ -55,7 +55,7 @@ class AkshareAdapter(SourceAdapter):
                 if df is not None and len(df) > 0:
                     frames.append(df)
         else:  # pragma: no cover
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         import pandas as pd
 
@@ -64,7 +64,7 @@ class AkshareAdapter(SourceAdapter):
         return FetchResult(
             df=combined,
             source="akshare",
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(combined),
             watermark=None,  # AKShare 不支持增量水位线

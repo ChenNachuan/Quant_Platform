@@ -34,13 +34,13 @@ class MismatchDetail:   # 按字段聚合（非逐 ticker 明细）
 
 @dataclass
 class CrossCheckResult:
-    asset_type: str; trade_date: str
+    table: str; trade_date: str
     primary_source: str; secondary_source: str
     total_rows: int; matched_rows: int
     mismatched_fields: dict[str, MismatchDetail]
     missing_in_primary: int; missing_in_secondary: int
 
-def cross_source_check(df_a, df_b, asset_type) -> CrossCheckResult: ...
+def cross_source_check(df_a, df_b, table) -> CrossCheckResult: ...
 def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 已到达
 ```
 
@@ -53,7 +53,7 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 | 项 | 定稿 |
 |---|---|
 | 频率 | 日频每天；分钟频每周抽 1 天；reference 每次更新；factor 不做 |
-| 结果落盘 | `cross_check/{asset_type}/{date}.json`（明细）+ `summary.parquet` |
+| 结果落盘 | `cross_check/{table}/{date}.json`（明细）+ `summary.parquet` |
 | <0.1% 不一致 | 静默记录 |
 | 0.1–1% | WARNING |
 | >1% | ERROR |
@@ -69,7 +69,7 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 |---|---|---|
 | 单源写 asset，备源只校验/补缺 | 多源混合写入 | 血缘清晰，问题可追到源 |
 | **不做自动主源选举** | 主源挂了自动切备源为主 | 静默换人是事故温床 |
-| `source_priority.yaml` 按 asset_type  | 硬编码优先级 | 字段级覆盖 |
+| `source_priority.yaml` 按 table 索引 | 硬编码优先级 | 字段级覆盖 |
 | 跨源对比在 Normalizer 后 | raw 对比 | raw 列名口径不同 |
 | 对比容差按字段类给 | 全局单一容差 | 价格/成交量/比率的误差量纲不同 |
 | 分级响应 + adjfactor 永远告警 | 不一致即拒收 | 跨源合理误差存在，硬拒频繁误杀 |

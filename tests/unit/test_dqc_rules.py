@@ -125,7 +125,7 @@ YAML_ASSET_MARK = {
 }
 
 # YAML file -> data.storage_schema.SCHEMA tables its frames are drawn from.
-# Rules load per asset (run_all_checks(df, date, asset_type)), so a rule's
+# Rules load per group (run_all_checks(df, date, dqc_group)), so a rule's
 # filter may only name columns the owning file's tables actually have.
 YAML_ASSET_TABLES = {
     "bars_daily.yaml": ["bars_daily"],

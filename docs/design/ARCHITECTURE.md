@@ -103,6 +103,7 @@ alphalens是回测前**筛选层门控**（快速 IC/分组，不建模成本/�
 | config_snapshot | `path@hash` 钉进运行记录 | [core/config.md](core/config.md)、[core/logging.md](core/logging.md) |
 | 运行记录 | logs/runs/ 三 schema（jobs / backtests / live） | [core/logging.md](core/logging.md) |
 | 资产规则 | ASSET_RULES 查表 | [core/asset_rules.md](core/asset_rules.md) |
+| 资产域命名 | 四域分离：`asset_class` / `table_family` / `dataset` / `table` + `dqc_group` | [core/types.md](core/types.md) |
 
 ## 6. 黄金样本与验证
 

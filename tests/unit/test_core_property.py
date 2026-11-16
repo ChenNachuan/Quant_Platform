@@ -98,20 +98,20 @@ class TestLoadConfigOverride:
 
 
 class TestAssetRulesLookup:
-    """Unknown asset_type raises KeyError — no silent fallback."""
+    """Unknown asset_class raises KeyError — no silent fallback."""
 
     @given(
-        asset_type=st.text(min_size=1, max_size=30).filter(
+        asset_class=st.text(min_size=1, max_size=30).filter(
             lambda s: s not in ASSET_RULES
         )
     )
-    def test_unknown_asset_type_raises_keyerror(self, asset_type):
+    def test_unknown_asset_class_raises_keyerror(self, asset_class):
         with pytest.raises(KeyError):
-            get_asset_rules(asset_type)
+            get_asset_rules(asset_class)
 
-    @given(asset_type=st.sampled_from(list(ASSET_RULES.keys())))
-    def test_known_asset_type_returns_rules(self, asset_type):
-        rules = get_asset_rules(asset_type)
+    @given(asset_class=st.sampled_from(list(ASSET_RULES.keys())))
+    def test_known_asset_class_returns_rules(self, asset_class):
+        rules = get_asset_rules(asset_class)
         assert isinstance(rules, dict)
         assert "lot_size" in rules
 
@@ -161,6 +161,7 @@ class TestRegistryDuplicateName:
     )
     def test_factor_registry_reregister_raises(self, name):
         _clear_registries()  # hypothesis runs many examples per call
+
         class First:
             pass
 
@@ -183,6 +184,7 @@ class TestRegistryDuplicateName:
     )
     def test_rule_registry_reregister_raises(self, name):
         _clear_registries()  # hypothesis runs many examples per call
+
         class First:
             pass
 
@@ -287,9 +289,9 @@ def test_factor_dag_cycle_detection(n):
     dag = FactorDAG()
     # Chain: f0 -> f1 -> ... -> f(n-1)
     for i in range(n):
-        dag.add_node(f"f{i}", depends_on=[f"f{i-1}"] if i > 0 else [])
+        dag.add_node(f"f{i}", depends_on=[f"f{i - 1}"] if i > 0 else [])
     # Introducing a cycle must raise.
-    dag.add_node("f0", depends_on=[f"f{n-1}"])  # noqa: F841
+    dag.add_node("f0", depends_on=[f"f{n - 1}"])  # noqa: F841
     with pytest.raises(ValueError):
         dag.topological_sort()
 

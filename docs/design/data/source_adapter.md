@@ -19,7 +19,7 @@
 class FetchResult:
     df: pd.DataFrame         # 数据源原始列名/原始值
     source: str              # "akshare" / "tushare" / "amazingdata" / "qdc" / "straightflush"
-    asset_type: str          # 传入值原样返回
+    dataset: str             # 传入值原样返回
     trade_date: date         # 业务日期（非下载日期）
     row_count: int           # len(df)，冗余但方便日志
     watermark: str | None    # 增量标记；不支持增量的源返回 None
@@ -28,10 +28,10 @@ class SourceAdapter(ABC):
     requests_per_second: float = 5.0   # 子类可覆盖
 
     @abstractmethod
-    def fetch(self, asset_type: str, trade_date: date,
+    def fetch(self, dataset: SourceDataset | str, trade_date: date,
               watermark: str | None = None) -> FetchResult: ...
     @abstractmethod
-    def list_asset_types(self) -> list[str]: ...
+    def list_datasets(self) -> list[str]: ...
     def health_check(self) -> bool: ...   # 默认：拉一天看能否成功
     def close(self): ...                  # 有连接池/Session 的源覆盖（如 ad.logout() / session.close()）
 ```

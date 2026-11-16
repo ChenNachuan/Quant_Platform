@@ -16,7 +16,7 @@ from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
 
-_SUPPORTED_ASSET_TYPES = frozenset({"stock", "etf", "index", "option", "calendar"})
+_SUPPORTED_DATASETS = frozenset({"stock", "etf", "index", "option", "calendar"})
 
 # AmazingData kline / fund_nav -> 统一列名
 _COLUMN_MAP: dict[str, str] = {
@@ -49,11 +49,11 @@ _FLOAT_COLS = frozenset(
 )
 
 
-def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
+def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将 AmazingData 原始 DataFrame（``stock``、``etf``、``index``、``option`` 或 ``calendar``）转换为统一格式。"""
-    if asset_type not in _SUPPORTED_ASSET_TYPES:
-        raise ValueError(f"unsupported asset_type: {asset_type!r}")
-    if asset_type == "calendar":
+    if dataset not in _SUPPORTED_DATASETS:
+        raise ValueError(f"unsupported dataset: {dataset!r}")
+    if dataset == "calendar":
         if raw_df.empty:
             return pd.DataFrame({"trade_date": pd.Series(dtype="object")})
         col = "trade_date" if "trade_date" in raw_df.columns else "cal_date"
@@ -89,7 +89,7 @@ def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
             if col in _FLOAT_COLS:
                 df[col] = df[col].astype("float64")
 
-    if asset_type == "index" and "volume" in df.columns and "ticker" in df.columns:
+    if dataset == "index" and "volume" in df.columns and "ticker" in df.columns:
         sh_mask = df["ticker"].astype(str).str.endswith(".SH")
         if sh_mask.any():
             df.loc[sh_mask, "volume"] = df.loc[sh_mask, "volume"] * 100

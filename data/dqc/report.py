@@ -61,7 +61,7 @@ DETAIL_COLUMNS = [
     "run_date",
     "run_time",
     "data_date",
-    "asset_type",
+    "table",
     "rule_id",
     "rule_name",
     "dimension",
@@ -77,7 +77,7 @@ DETAIL_COLUMNS = [
 SUMMARY_COLUMNS = [
     "run_time",
     "data_date",
-    "asset_type",
+    "table",
     "total_rows",
     "rows_dropped",
     "rows_flagged",
@@ -91,7 +91,7 @@ SUMMARY_COLUMNS = [
 ]
 QUARANTINE_COLUMNS = [
     "data_date",
-    "asset_type",
+    "table",
     "reject_time",
     "batch_status",
     "total_rows",
@@ -139,7 +139,7 @@ def build_detail_rows(
     soft_results: Sequence[Any],
     *,
     data_date: date,
-    asset_type: str,
+    table: str,
     batch_rejected: bool = False,
     run_time: datetime | None = None,
 ) -> list[dict]:
@@ -162,7 +162,7 @@ def build_detail_rows(
                 "run_date": when.date(),
                 "run_time": when,
                 "data_date": data_date,
-                "asset_type": asset_type,
+                "table": table,
                 "rule_id": result.rule_id,
                 "rule_name": result.rule_name,
                 "dimension": result.dimension,
@@ -185,7 +185,7 @@ def build_detail_rows(
 
 def build_summary_row(
     data_date: date,
-    asset_type: str,
+    table: str,
     *,
     total_rows: int,
     rows_dropped: int,
@@ -207,7 +207,7 @@ def build_summary_row(
     return {
         "run_time": run_time or _now(),
         "data_date": data_date,
-        "asset_type": asset_type,
+        "table": table,
         "total_rows": total,
         "rows_dropped": dropped,
         "rows_flagged": flagged,
@@ -224,6 +224,13 @@ def build_summary_row(
 # ── 追加与读取 ───────────────────────────────────────────────────────────
 
 
+def _normalize_legacy_table_col(df: pd.DataFrame) -> pd.DataFrame:
+    """兼容历史报告中的 ``asset_type`` 列，读取时统一规整为 ``table``。"""
+    if "table" not in df.columns and "asset_type" in df.columns:
+        return df.rename(columns={"asset_type": "table"})
+    return df
+
+
 def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
     """在 ``FileLock`` 保护下原子追加行到未注册的报告 Parquet 文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -234,7 +241,8 @@ def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
     tmp = path.with_name(path.name + ".tmp")
     with FileLock(path):
         if path.exists():
-            combined = pd.concat([pd.read_parquet(path), new_df], ignore_index=True)
+            existing = _normalize_legacy_table_col(pd.read_parquet(path))
+            combined = pd.concat([existing, new_df], ignore_index=True)
         else:
             combined = new_df
         try:
@@ -294,7 +302,7 @@ def load_detail(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFr
     files = sorted(root.glob("month=*/data.parquet"))
     if not files:
         return pd.DataFrame(columns=DETAIL_COLUMNS)
-    frames = [pd.read_parquet(f) for f in files]
+    frames = [_normalize_legacy_table_col(pd.read_parquet(f)) for f in files]
     return pd.concat(frames, ignore_index=True)[DETAIL_COLUMNS]
 
 
@@ -303,7 +311,7 @@ def load_summary(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataF
     path = summary_path(data_root)
     if not path.exists():
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
-    return pd.read_parquet(path)[SUMMARY_COLUMNS]
+    return _normalize_legacy_table_col(pd.read_parquet(path))[SUMMARY_COLUMNS]
 
 
 def load_quarantine_batches(
@@ -324,15 +332,18 @@ def load_quarantine_batches(
         row["data_date"] = str(
             row.get("data_date") or meta_file.name[: -len(".rejection.json")]
         )
-        row["asset_type"] = str(row.get("asset_type") or meta_file.parent.name)
+        row["table"] = str(
+            row.get("table") or meta.get("asset_type") or meta_file.parent.name
+        )
         batches.append(row)
-        seen.add((row["data_date"], row["asset_type"]))
+        seen.add((row["data_date"], row["table"]))
     for summary in load_summary(data_root).to_dict("records"):
         if summary.get("batch_status") != "rejected":
             continue
+        tbl = str(summary.get("table") or summary.get("asset_type") or "")
         key = (
             pd.Timestamp(summary["data_date"]).strftime("%Y-%m-%d"),
-            str(summary["asset_type"]),
+            tbl,
         )
         if key in seen:
             continue
@@ -340,7 +351,7 @@ def load_quarantine_batches(
         batches.append(
             {
                 "data_date": key[0],
-                "asset_type": key[1],
+                "table": key[1],
                 "reject_time": None,
                 "batch_status": "rejected",
                 "total_rows": summary["total_rows"],
@@ -352,14 +363,14 @@ def load_quarantine_batches(
                 "reject_reason": "(no quarantine record)",
             }
         )
-    return sorted(batches, key=lambda r: (r["data_date"], r["asset_type"]))
+    return sorted(batches, key=lambda r: (r["data_date"], r["table"]))
 
 
 # ── 参考数据注入 ─────────────────────────────────────────────────────────
 
 
 def build_reference_overrides(
-    data_root: str | os.PathLike[str], asset_type: str, data_date: date
+    data_root: str | os.PathLike[str], table: str, data_date: date
 ) -> dict:
     """从本地存储装配检查所需的参考数据 ``overrides``；缺失表保持缺省以触发 fail-closed。"""
     root = Path(data_root)
@@ -443,12 +454,12 @@ def build_reference_overrides(
             if "ticker" in prev.columns:
                 overrides["daily_tickers"] = sorted(set(prev["ticker"].astype(str)))
 
-    template = PARTITION_PATHS.get(asset_type)
+    template = PARTITION_PATHS.get(table)
     if template and ("{date}" in template or "{month}" in template):
-        target = partition_path(asset_type, data_date, root)
+        target = partition_path(table, data_date, root)
         if target.exists():
             stored = pd.read_parquet(target)
-            if is_monthly_partition(asset_type) and "trade_date" in stored.columns:
+            if is_monthly_partition(table) and "trade_date" in stored.columns:
                 td = pd.to_datetime(stored["trade_date"], errors="coerce").dt.date
                 stored = stored[td == data_date].reset_index(drop=True)
             if {"ticker", "adjfactor"} <= set(stored.columns):
@@ -482,8 +493,15 @@ def run_dashboard(
     ).fetchdf()
     lines.append("-- batch_status --")
     lines.append(by_status.to_string(index=False))
+    cols = {
+        r[0]
+        for r in con.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?)", [str(summary)]
+        ).fetchall()
+    }
+    tbl_expr = '"table"' if "table" in cols else 'asset_type AS "table"'
     recent = con.execute(
-        "SELECT data_date, asset_type, batch_status, total_rows, rows_dropped, "
+        f"SELECT data_date, {tbl_expr}, batch_status, total_rows, rows_dropped, "
         "rows_flagged, drop_rate, flag_rate, elapsed_seconds "
         "FROM read_parquet(?) ORDER BY data_date DESC, run_time DESC LIMIT ?",
         [str(summary), int(last)],
@@ -506,7 +524,7 @@ def run_dashboard(
 
 def reingest(
     source: str,
-    asset_type: str,
+    table: str,
     trade_date: date,
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
@@ -516,28 +534,37 @@ def reingest(
     from data.adapters import get_adapter
     from data.dqc.engine import ingest_with_dqc
     from data.dqc.severity import DQCBatchReject
+    from data.ingestion import TABLE_TO_DQC_GROUP
     from data.normalizers import get_normalizer
     from data.raw import save_raw
 
     adapter = get_adapter(source)
     try:
-        result = adapter.fetch(asset_type, trade_date)
+        result = adapter.fetch(table, trade_date)
     finally:
         adapter.close()
     raw_df = result.df
     if raw_df is None or raw_df.empty:
         print(
-            f"source {source} returned no rows for {asset_type} "
+            f"source {source} returned no rows for {table} "
             f"{trade_date.strftime('%Y-%m-%d')}",
             file=sys.stderr,
         )
         return 1
-    save_raw(raw_df, source, asset_type, trade_date, data_root)
-    df = get_normalizer(source)(asset_type, raw_df)
-    ref = build_reference_overrides(data_root, asset_type, trade_date)
+    save_raw(raw_df, source, table, trade_date, data_root)
+    df = get_normalizer(source)(table, raw_df)
+    ref = build_reference_overrides(data_root, table, trade_date)
     ref.update(overrides or {})
+    dqc_group = TABLE_TO_DQC_GROUP.get(table, table)
     try:
-        ingest_with_dqc(df, trade_date, asset_type, overrides=ref, data_root=data_root)
+        ingest_with_dqc(
+            df,
+            trade_date,
+            dqc_group,
+            table=table,
+            overrides=ref,
+            data_root=data_root,
+        )
     except DQCBatchReject as exc:
         print(f"batch rejected: {exc}", file=sys.stderr)
         return 1
@@ -546,7 +573,7 @@ def reingest(
 
 def revalidate(
     source: str,
-    asset_type: str,
+    table: str,
     start: date,
     end: date,
     *,
@@ -555,22 +582,24 @@ def revalidate(
 ) -> int:
     """按当前规则复核本地 raw 数据并仅写入 ``_dqc_results`` 明细表；存在拒收批次时返回 1。"""
     from data.dqc.engine import evaluate_batch
+    from data.ingestion import TABLE_TO_DQC_GROUP
     from data.normalizers import get_normalizer
     from data.raw import load_raw
 
     normalize = get_normalizer(source)
+    dqc_group = TABLE_TO_DQC_GROUP.get(table, table)
     rows: list[dict] = []
     checked = rejected = skipped = 0
     day = start
     while day <= end:
-        raw = load_raw(source, asset_type, day, data_root)
+        raw = load_raw(source, table, day, data_root)
         if raw is None:
             skipped += 1
         else:
-            df = normalize(asset_type, raw)
-            ref = build_reference_overrides(data_root, asset_type, day)
+            df = normalize(table, raw)
+            ref = build_reference_overrides(data_root, table, day)
             ref.update(overrides or {})
-            evaluation = evaluate_batch(df, day, asset_type, overrides=ref)
+            evaluation = evaluate_batch(df, day, dqc_group, overrides=ref)
             bad = evaluation.batch_status == "rejected"
             checked += 1
             rejected += int(bad)
@@ -579,7 +608,7 @@ def revalidate(
                     evaluation.hard_results,
                     evaluation.soft_results,
                     data_date=day,
-                    asset_type=asset_type,
+                    table=table,
                     batch_rejected=bad,
                 )
             )
@@ -606,7 +635,7 @@ def _print_quarantine(batches: list[dict]) -> None:
     for row in batches:
         triggered = ",".join(row.get("hard_rules_triggered") or []) or "-"
         print(
-            f"{row['data_date']} {row['asset_type']}: {row['batch_status']} "
+            f"{row['data_date']} {row['table']}: {row['batch_status']} "
             f"total={row['total_rows']} would_drop={row['rows_would_drop']} "
             f"drop_rate={row['drop_rate']} rules=[{triggered}] "
             f"reason={row['reject_reason']}"
@@ -638,7 +667,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "reingest", help="re-download one date and re-run the full ingest"
     )
     p.add_argument("--source", required=True, help="raw source name (akshare/...)")
-    p.add_argument("--asset", required=True, help="asset_type (bars_daily/...)")
+    p.add_argument(
+        "--table",
+        "--asset",
+        dest="table",
+        required=True,
+        help="table or DQC group (bars_daily/cn_stock_bars_daily/...)",
+    )
     p.add_argument("--date", required=True, help="YYYY-MM-DD")
     p.add_argument("--data-root", default=str(DATA_ROOT))
 
@@ -646,7 +681,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "revalidate", help="re-check local raw under current rules (report only)"
     )
     p.add_argument("--source", required=True, help="raw source name (akshare/...)")
-    p.add_argument("--asset", required=True, help="asset_type (bars_daily/...)")
+    p.add_argument(
+        "--table",
+        "--asset",
+        dest="table",
+        required=True,
+        help="table or DQC group (bars_daily/cn_stock_bars_daily/...)",
+    )
     p.add_argument("--start", required=True, help="YYYY-MM-DD")
     p.add_argument("--end", required=True, help="YYYY-MM-DD")
     p.add_argument("--data-root", default=str(DATA_ROOT))
@@ -670,7 +711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "reingest":
             return reingest(
                 args.source,
-                args.asset,
+                args.table,
                 _parse_date(args.date),
                 data_root=args.data_root,
             )
@@ -680,7 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError(f"end {end} precedes start {start}")
             return revalidate(
                 args.source,
-                args.asset,
+                args.table,
                 start,
                 end,
                 data_root=args.data_root,

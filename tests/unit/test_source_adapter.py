@@ -4,7 +4,7 @@ Covers every ac-1 row, plus seven regression tests for PR #50 review findings,
 plus full mock-backed unit suites for QdcAdapter and StraightFlushAdapter:
 
 * ``FetchResult`` dataclass fields and types
-* ``SourceAdapter`` ABC — four methods present (fetch / list_asset_types / health_check / close)
+* ``SourceAdapter`` ABC — four methods present (fetch / list_datasets / health_check / close)
 * Five subclasses (Akshare / Tushare / Amazingdata / Qdc / StraightFlush) run fetch
 * Hand-rolled decorators: rate_limit throttles, retry retries and gives up, timeout raises
 * Watermark ``read_watermark`` / ``write_watermark`` round-trip at ``raw/{source}/.watermarks.json``
@@ -69,13 +69,13 @@ class TestFetchResult:
         fr = FetchResult(
             df=df,
             source="akshare",
-            asset_type="stock",
+            dataset="stock",
             trade_date=date(2026, 1, 5),
             row_count=2,
             watermark=None,
         )
         assert fr.source == "akshare"
-        assert fr.asset_type == "stock"
+        assert fr.dataset == "stock"
         assert fr.trade_date == date(2026, 1, 5)
         assert fr.row_count == 2
         assert fr.watermark is None
@@ -85,7 +85,7 @@ class TestFetchResult:
         fr = FetchResult(
             df=pd.DataFrame(),
             source="tushare",
-            asset_type="stock",
+            dataset="stock",
             trade_date=date(2026, 1, 5),
             row_count=0,
             watermark="20260105",
@@ -99,7 +99,7 @@ class TestFetchResult:
 class TestSourceAdapterABC:
     def test_abstract_methods_present(self):
         assert hasattr(SourceAdapter, "fetch")
-        assert hasattr(SourceAdapter, "list_asset_types")
+        assert hasattr(SourceAdapter, "list_datasets")
         assert hasattr(SourceAdapter, "health_check")
         assert hasattr(SourceAdapter, "close")
 
@@ -112,25 +112,25 @@ class TestSourceAdapterABC:
 
     def test_default_close_is_noop(self):
         class Dummy(SourceAdapter):
-            def fetch(self, asset_type, trade_date, watermark=None):
+            def fetch(self, dataset, trade_date, watermark=None):
                 return FetchResult(
-                    pd.DataFrame(), "dummy", asset_type, trade_date, 0, None
+                    pd.DataFrame(), "dummy", dataset, trade_date, 0, None
                 )
 
-            def list_asset_types(self):
+            def list_datasets(self):
                 return ["stock"]
 
         d = Dummy()
         d.close()  # should not raise
 
-    def test_health_check_empty_asset_types(self):
+    def test_health_check_empty_datasets(self):
         class Dummy(SourceAdapter):
-            def fetch(self, asset_type, trade_date, watermark=None):
+            def fetch(self, dataset, trade_date, watermark=None):
                 return FetchResult(
-                    pd.DataFrame(), "dummy", asset_type, trade_date, 0, None
+                    pd.DataFrame(), "dummy", dataset, trade_date, 0, None
                 )
 
-            def list_asset_types(self):
+            def list_datasets(self):
                 return []
 
         d = Dummy()
@@ -140,10 +140,10 @@ class TestSourceAdapterABC:
         """Invariant (predates the PR #50 fixes): a raising probe = unhealthy."""
 
         class FailAdapter(SourceAdapter):
-            def fetch(self, asset_type, trade_date, watermark=None):
+            def fetch(self, dataset, trade_date, watermark=None):
                 raise RuntimeError("source down")  # non-retryable for fast test
 
-            def list_asset_types(self):
+            def list_datasets(self):
                 return ["stock"]
 
         a = FailAdapter()
@@ -262,7 +262,7 @@ class TestWatermark:
         write_watermark("akshare", "stock", "20260105", tmp_path)
         assert read_watermark("akshare", "stock", tmp_path) == "20260105"
 
-    def test_write_multiple_asset_types(self, tmp_path: Path):
+    def test_write_multiple_tables(self, tmp_path: Path):
         write_watermark("akshare", "stock", "20260105", tmp_path)
         write_watermark("akshare", "option", "offset_99", tmp_path)
         assert read_watermark("akshare", "stock", tmp_path) == "20260105"
@@ -316,9 +316,9 @@ class TestRegistry:
 # Adapters — minimal fetch & protocol behavior (mocked external APIs)
 # ---------------------------------------------------------------------------
 class TestAkshareAdapter:
-    def test_list_asset_types(self):
+    def test_list_datasets(self):
         a = AkshareAdapter()
-        assert a.list_asset_types() == ["stock"]
+        assert a.list_datasets() == ["stock"]
 
     def test_minimal_fetch(self):
         a = AkshareAdapter()
@@ -327,20 +327,20 @@ class TestAkshareAdapter:
             result = a.fetch("stock", date(2026, 1, 5))
         assert isinstance(result, FetchResult)
         assert result.source == "akshare"
-        assert result.asset_type == "stock"
+        assert result.dataset == "stock"
         assert result.row_count == 1
         assert result.watermark is None
 
-    def test_unsupported_asset_type_raises(self):
+    def test_unsupported_dataset_raises(self):
         a = AkshareAdapter()
         with pytest.raises(ValueError, match="unsupported"):
             a.fetch("option", date(2026, 1, 5))
 
 
 class TestTushareAdapter:
-    def test_list_asset_types(self):
+    def test_list_datasets(self):
         t = TushareAdapter(token="fake")
-        assert t.list_asset_types() == ["stock"]
+        assert t.list_datasets() == ["stock"]
 
     def test_minimal_fetch(self):
         t = TushareAdapter(token="fake")
@@ -354,16 +354,16 @@ class TestTushareAdapter:
         assert result.row_count == 1
         assert result.watermark == "20260105"
 
-    def test_unsupported_asset_type_raises(self):
+    def test_unsupported_dataset_raises(self):
         t = TushareAdapter(token="fake")
         with pytest.raises(ValueError, match="unsupported"):
             t.fetch("option", date(2026, 1, 5))
 
 
 class TestAmazingdataAdapter:
-    def test_list_asset_types(self):
+    def test_list_datasets(self):
         a = AmazingdataAdapter()
-        assert a.list_asset_types() == ["stock", "etf", "index", "calendar", "option"]
+        assert a.list_datasets() == ["stock", "etf", "index", "calendar", "option"]
 
     def test_requests_per_second(self):
         assert AmazingdataAdapter.requests_per_second == 2.0
@@ -414,7 +414,7 @@ class TestAmazingdataAdapter:
         mock_ad.logout.assert_called_once()
         assert a._ad is None
 
-    def test_unsupported_asset_type_raises(self):
+    def test_unsupported_dataset_raises(self):
         a = AmazingdataAdapter()
         with pytest.raises(ValueError, match="unsupported"):
             a.fetch("crypto", date(2026, 1, 5))
@@ -473,7 +473,7 @@ class TestAmazingdataAdapter:
         assert "-v" in cmd
         assert cmd[cmd.index("-v") + 1] == f"{tmp_path.resolve()}:/data"
         assert result.source == "amazingdata"
-        assert result.asset_type == "etf"
+        assert result.dataset == "etf"
         assert result.row_count == 1
         assert result.df["code"].iloc[0] == "510300.SH"
 
@@ -550,7 +550,7 @@ class TestAmazingdataAdapter:
         res = a.fetch("index", target_day)
         cmd = captured["cmd"]
         assert cmd[cmd.index("--tables") + 1] == "cn_stock_index_bars_daily"
-        assert res.asset_type == "index"
+        assert res.dataset == "index"
         assert res.row_count == 1
 
 
@@ -567,7 +567,7 @@ class TestQdcAdapter:
     def test_defaults_to_cli_mode(self, tmp_path: Path):
         q = QdcAdapter(secrets_path=tmp_path / "missing.env")
         assert q._mode == "cli"
-        assert q.list_asset_types() == [
+        assert q.list_datasets() == [
             "stock",
             "etf",
             "index",
@@ -804,7 +804,7 @@ class TestQdcAdapter:
 
         result = q.fetch("stock", date(2026, 1, 5))
         assert result.source == "qdc"
-        assert result.asset_type == "stock"
+        assert result.dataset == "stock"
         assert result.row_count == 2
         assert result.watermark == "2026-01-05"
         assert list(result.df["symbol"]) == ["000001.XSHE", "600519.XSHG"]
@@ -914,7 +914,7 @@ class TestQdcAdapter:
         mock_session.close.assert_called_once()
         assert q._session is None
 
-    def test_unsupported_asset_type_raises(self, tmp_path: Path):
+    def test_unsupported_dataset_raises(self, tmp_path: Path):
         q = QdcAdapter(secrets_path=tmp_path / "missing.env")
         with pytest.raises(ValueError, match="unsupported"):
             q.fetch("crypto", date(2026, 1, 5))
@@ -924,9 +924,9 @@ class TestQdcAdapter:
 # StraightFlushAdapter (Fuyao) tests
 # ---------------------------------------------------------------------------
 class TestStraightFlushAdapter:
-    def test_list_asset_types(self, tmp_path: Path):
+    def test_list_datasets(self, tmp_path: Path):
         s = StraightFlushAdapter(token="fake", secrets_path=tmp_path / "missing.env")
-        assert s.list_asset_types() == [
+        assert s.list_datasets() == [
             "stock",
             "etf",
             "index",
@@ -987,7 +987,7 @@ class TestStraightFlushAdapter:
 
         result = s.fetch("stock", date(2026, 1, 5))
         assert result.source == "straightflush"
-        assert result.asset_type == "stock"
+        assert result.dataset == "stock"
         assert result.row_count == 25
         assert result.watermark == "20260105"
         assert "thscode" in result.df.columns
@@ -1194,7 +1194,7 @@ class TestStraightFlushAdapter:
         mock_session.close.assert_called_once()
         assert s._session is None
 
-    def test_unsupported_asset_type_raises(self, tmp_path: Path):
+    def test_unsupported_dataset_raises(self, tmp_path: Path):
         s = StraightFlushAdapter(token="k", secrets_path=tmp_path / "missing.env")
         with pytest.raises(ValueError, match="unsupported"):
             s.fetch("crypto", date(2026, 1, 5))
@@ -1421,13 +1421,13 @@ class TestRegressionFix6HealthCheck:
     @staticmethod
     def _probe_adapter(probed: list):
         class Probe(SourceAdapter):
-            def fetch(self, asset_type, trade_date, watermark=None):
+            def fetch(self, dataset, trade_date, watermark=None):
                 probed.append(trade_date)
                 return FetchResult(
-                    pd.DataFrame(), "probe", asset_type, trade_date, 0, None
+                    pd.DataFrame(), "probe", dataset, trade_date, 0, None
                 )
 
-            def list_asset_types(self):
+            def list_datasets(self):
                 return ["stock"]
 
         return Probe()

@@ -65,14 +65,14 @@ def _change(
         new_value=new_value,
         abs_diff=abs_diff,
         rel_diff=rel_diff,
-        asset_type=ASSET,
+        table=ASSET,
         trade_date=D,
     )
 
 
 def _record(*changes: dr.FieldChange) -> dr.CorrectionRecord:
     return dr.CorrectionRecord(
-        asset_type=ASSET,
+        table=ASSET,
         trade_date=D,
         detected_at=datetime(2024, 6, 16, 2, 0, 0),
         changes=tuple(changes),
@@ -141,7 +141,7 @@ class TestCorrectionTolerances:
         """The flat change list has to carry its own location (apply groups on it)."""
         old, new = _frames("close", 10.0, 11.0)
         (change,) = dr.compare_frames(old, new, ASSET, D)
-        assert change.asset_type == ASSET
+        assert change.table == ASSET
         assert change.trade_date == D
         assert change.rel_diff == 0.1
 
@@ -200,7 +200,7 @@ class TestSeverityClassification:
         assert len(lines) == 1
         payload = json.loads(lines[0])
         assert payload["severity"] == "LOW"
-        assert payload["asset_type"] == ASSET
+        assert payload["table"] == ASSET
         assert payload["trade_date"] == str(D)
         assert payload["num_changes"] == 1
         assert payload["affected_tickers"] == ["000001.SZ"]
@@ -267,9 +267,9 @@ class TestApplyWriteOrder:
             order.append("log")
             return path
 
-        def ingest_recorder(source, asset_type, trade_date):
+        def ingest_recorder(source, table, trade_date):
             # Overwrite must never precede the audit record.
-            path = dr.correction_log_path(asset_type, trade_date, tmp_path)
+            path = dr.correction_log_path(table, trade_date, tmp_path)
             assert path.exists(), "correction log missing at daily_ingest time"
             assert path.read_text(encoding="utf-8").strip(), "correction log is empty"
             order.append("ingest")
@@ -279,27 +279,27 @@ class TestApplyWriteOrder:
         monkeypatch.setattr(
             data.ingestion,
             "get_primary_source",
-            lambda asset_type, *a, **k: "amazingdata",
+            lambda table, *a, **k: "amazingdata",
         )
 
         records = dr.apply_corrections([_change()], data_root=tmp_path)
 
         assert order == ["log", "ingest"]
         assert len(records) == 1
-        assert records[0].asset_type == ASSET
+        assert records[0].table == ASSET
         assert records[0].trade_date == D
 
     def test_apply_calls_the_full_daily_ingest_pipeline(self, monkeypatch, tmp_path):
         calls: list[tuple] = []
 
-        def ingest_recorder(source, asset_type, trade_date):
-            calls.append((source, asset_type, trade_date))
+        def ingest_recorder(source, table, trade_date):
+            calls.append((source, table, trade_date))
 
         monkeypatch.setattr(dr, "_daily_ingest", ingest_recorder)
         monkeypatch.setattr(
             data.ingestion,
             "get_primary_source",
-            lambda asset_type, *a, **k: "amazingdata",
+            lambda table, *a, **k: "amazingdata",
         )
 
         dr.apply_corrections([_change()], data_root=tmp_path)
@@ -312,7 +312,7 @@ class TestApplyWriteOrder:
         monkeypatch.setattr(
             data.ingestion,
             "get_primary_source",
-            lambda asset_type, *a, **k: "amazingdata",
+            lambda table, *a, **k: "amazingdata",
         )
 
         dr.apply_corrections(
@@ -334,7 +334,7 @@ class TestApplyWriteOrder:
         monkeypatch.setattr(
             data.ingestion,
             "get_primary_source",
-            lambda asset_type, *a, **k: "amazingdata",
+            lambda table, *a, **k: "amazingdata",
         )
 
         root = tmp_path / "nested" / "data_platform"
@@ -356,7 +356,7 @@ class TestApplyWriteOrder:
         try:
             dr.apply_corrections([orphan], data_root="unused")
         except ValueError as exc:
-            assert "asset_type" in str(exc)
+            assert "table" in str(exc)
         else:
             raise AssertionError("apply_corrections accepted a location-less change")
 
@@ -562,7 +562,7 @@ class TestCompareFramesCoverage:
         monkeypatch.setattr(
             data.ingestion,
             "get_primary_source",
-            lambda asset_type, *a, **k: "amazingdata",
+            lambda table, *a, **k: "amazingdata",
         )
 
         old = pd.DataFrame(
@@ -618,7 +618,7 @@ class TestDailyIngestGuard:
         monkeypatch.setattr(
             data.ingestion,
             "get_primary_source",
-            lambda asset_type, *a, **k: "amazingdata",
+            lambda table, *a, **k: "amazingdata",
         )
 
         with pytest.raises(RuntimeError, match="daily_ingest"):
@@ -636,7 +636,7 @@ class TestSourceAssetDomain:
     """find.1 — the storage table name is not the adapter/normalizer domain."""
 
     def test_bars_daily_translates_to_stock(self):
-        assert dr.STORAGE_TO_SOURCE_ASSET["bars_daily"] == "stock"
+        assert dr.STORAGE_TO_SOURCE_DATASET["bars_daily"] == "stock"
 
     def test_fetch_and_normalize_receive_the_translated_type(self, monkeypatch):
         seen: dict[str, str] = {}
@@ -645,8 +645,8 @@ class TestSourceAssetDomain:
             df = pd.DataFrame([{"ticker": "000001.SZ"}])
 
         class _Adapter:
-            def fetch(self, asset_type, trade_date):
-                seen["fetch"] = asset_type
+            def fetch(self, dataset, trade_date):
+                seen["fetch"] = dataset
                 return _Result()
 
             def close(self):
@@ -657,8 +657,8 @@ class TestSourceAssetDomain:
             return "tushare"
 
         def _normalize(source):
-            def normalize(asset_type, raw_df):
-                seen["normalize"] = asset_type
+            def normalize(dataset, raw_df):
+                seen["normalize"] = dataset
                 return raw_df
 
             return normalize
@@ -778,7 +778,7 @@ class TestDetectDataRoot:
             def range(self, start, end):
                 return [end]
 
-        def _local(asset_type, trade_date, data_root="data_platform"):
+        def _local(table, trade_date, data_root="data_platform"):
             seen["local_root"] = data_root
             return None
 
@@ -822,7 +822,7 @@ def _stub_scan(monkeypatch, fresh, local, compare=None):
         def range(self, start, end):
             return [D]
 
-    def _record_compare(old, new, asset_type, trade_date):
+    def _record_compare(old, new, table, trade_date):
         seen.append((old, new))
         return []
 
@@ -1008,7 +1008,7 @@ class TestStaleSinceKeepsEarliest:
     @staticmethod
     def _record_on(day: date) -> dr.CorrectionRecord:
         return dr.CorrectionRecord(
-            asset_type=ASSET,
+            table=ASSET,
             trade_date=day,
             detected_at=datetime(2024, 10, 1, 2, 0, 0),
             changes=(_change(),),

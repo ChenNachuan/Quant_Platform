@@ -79,8 +79,8 @@ class TestQdcNormalizer:
         assert out.loc[1, "suspend"] == True  # noqa: E712
         assert out.loc[1, "adjfactor"] == pytest.approx(8.45)
 
-    def test_rejects_unsupported_asset_type(self):
-        with pytest.raises(ValueError, match="unsupported asset_type"):
+    def test_rejects_unsupported_dataset(self):
+        with pytest.raises(ValueError, match="unsupported dataset"):
             normalize_qdc("futures", pd.DataFrame())
 
 
@@ -112,8 +112,8 @@ class TestStraightFlushNormalizer:
         assert (out["adjfactor"] == 1.0).all()
         BARS_DAILY_SCHEMA.validate(out)
 
-    def test_rejects_unsupported_asset_type(self):
-        with pytest.raises(ValueError, match="unsupported asset_type"):
+    def test_rejects_unsupported_dataset(self):
+        with pytest.raises(ValueError, match="unsupported dataset"):
             normalize_straightflush("futures", pd.DataFrame())
 
     def test_casts_integer_amount_to_float64_for_index_schema(self):

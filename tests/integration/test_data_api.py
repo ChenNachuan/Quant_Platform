@@ -595,9 +595,9 @@ class TestAdjustment:
 
 
 # ---------------------------------------------------------------------------
-# Table-family mapping (asset_type)
+# Table-family mapping (table_family)
 # ---------------------------------------------------------------------------
-class TestAssetTypeMapping:
+class TestTableFamilyMapping:
     def test_equity_maps_to_bars_daily(self):
         assert TABLE_MAP[("equity", "daily")] == "bars_daily"
         assert TABLE_MAP[("equity", "minute")] == "bars_minute"
@@ -612,7 +612,7 @@ class TestAssetTypeMapping:
         df = load_bars(
             start="2024-01-02",
             end="2024-01-02",
-            asset_type="futures",
+            table_family="futures",
             data_root=futures_root,
         )
         assert len(df) == 1
@@ -622,7 +622,7 @@ class TestAssetTypeMapping:
         df = load_bars(
             start="2024-01-02",
             end="2024-01-03",
-            asset_type="continuous",
+            table_family="continuous",
             data_root=continuous_root,
         )
         assert len(df) == 2
@@ -630,9 +630,9 @@ class TestAssetTypeMapping:
         assert df["ticker"].iloc[0] == "IF2406.CFFEX"
         assert "adjfactor" in df.columns
 
-    def test_invalid_asset_type_raises(self, asset_root):
+    def test_invalid_table_family_raises(self, asset_root):
         with pytest.raises(ValueError, match="no table"):
-            load_bars(asset_type="bond", data_root=asset_root)
+            load_bars(table_family="bond", data_root=asset_root)
 
     def test_invalid_freq_raises(self, asset_root):
         with pytest.raises(ValueError, match="unknown freq"):

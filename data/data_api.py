@@ -1,6 +1,6 @@
 """数据读取层 — 基于 DuckDB 的只读 SQL 查询接口（DataAPI）、``load_bars`` 及 alphalens 适配器。
 
-底层读取 Parquet 视图并按消费方约定整形；``asset_type`` 在 :func:`load_bars` 中表示表族（equity / futures / continuous），而非 :class:`core.types.AssetType`。
+底层读取 Parquet 视图并按消费方约定整形；``table_family`` 在 :func:`load_bars` 中表示表族（equity / futures / continuous），与 :class:`core.types.AssetType` 严格区分。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 import duckdb
 import pandas as pd
@@ -20,9 +20,21 @@ from data.storage_schema import TABLE_ALIASES
 logger = logging.getLogger(__name__)
 
 # --- 表族映射 ---
-# asset_type 在此表示存储表族而非 core.types.AssetType：
-# "equity" -> bars_daily / bars_minute；"futures" -> bars_daily_futures；"continuous" -> continuous
-TABLE_MAP: dict[tuple[str, str], str] = {
+#: 存储表族选择器字面量类型（仅用于 ``data_api`` 路由底层行情表，非交易规则资产类型）。
+TableFamily = Literal[
+    "equity",
+    "stock",
+    "etf",
+    "futures",
+    "continuous",
+    "cn_stock",
+    "cn_equity",
+    "cn_etf",
+    "cn_futures",
+    "cn_continuous",
+]
+
+TABLE_MAP: dict[tuple[TableFamily, str], str] = {
     ("equity", "daily"): "bars_daily",
     ("stock", "daily"): "bars_daily",
     ("etf", "daily"): "cn_etf_bars_daily",
@@ -89,21 +101,21 @@ def _base_freq(freq: str) -> str:
         ) from None
 
 
-def _resolve_table(asset_type: str, freq: str) -> str:
-    """解析 (*asset_type*, *freq*) 对应的存储表名。"""
+def _resolve_table(table_family: TableFamily | str, freq: str) -> str:
+    """解析 (*table_family*, *freq*) 对应的存储表名。"""
     base = _base_freq(freq)
-    key = (asset_type, base)
-    if key in TABLE_MAP:
-        return TABLE_MAP[key]
+    key = (table_family, base)
+    if key in TABLE_MAP:  # type: ignore[operator]
+        return TABLE_MAP[key]  # type: ignore[index]
     for (k_asset, k_freq), v in TABLE_MAP.items():
         if k_freq == base:
             legacy_or_alias = TABLE_ALIASES.get(v, "")
-            if asset_type in (v, legacy_or_alias):
+            if table_family in (v, legacy_or_alias):
                 return v
     valid = sorted(TABLE_MAP)
     raise ValueError(
-        f"no table for asset_type={asset_type!r} freq={freq!r}; "
-        f"valid (asset_type, base_freq) pairs: {valid}"
+        f"no table for table_family={table_family!r} freq={freq!r}; "
+        f"valid (table_family, base_freq) pairs: {valid}"
     ) from None
 
 
@@ -461,7 +473,7 @@ def load_bars(
     freq: str = "daily",
     fields: list[str] | None = None,
     adjust: str = "none",
-    asset_type: str = "equity",
+    table_family: TableFamily | str = "equity",
     *,
     data_root: str | Path = _DEFAULT_DATA_ROOT,
 ) -> pd.DataFrame:
@@ -474,9 +486,9 @@ def load_bars(
     freq : ``daily`` | ``minute`` | ``5min`` | ``60min``。
     fields : 指定输出数值列；``None`` 返回全部标准列。
     adjust : ``none`` | ``forward`` | ``backward``。
-    asset_type : 表族名称（``equity`` / ``futures`` / ``continuous`` 等）。
+    table_family : 表族名称（``equity`` / ``futures`` / ``continuous`` 等）。
     """
-    table = _resolve_table(asset_type, freq)
+    table = _resolve_table(table_family, freq)
     has_adj = table in (
         "bars_daily",
         "continuous",
@@ -543,7 +555,7 @@ def load_bars_chunked(
     freq: str = "daily",
     fields: list[str] | None = None,
     adjust: str = "none",
-    asset_type: str = "equity",
+    table_family: TableFamily | str = "equity",
     chunk_by: str = "month",
     *,
     data_root: str | Path = _DEFAULT_DATA_ROOT,
@@ -561,7 +573,7 @@ def load_bars_chunked(
             freq=freq,
             fields=fields,
             adjust=adjust,
-            asset_type=asset_type,
+            table_family=table_family,
             data_root=data_root,
         )
         if not df.empty:
@@ -603,7 +615,7 @@ def to_alphalens_prices(
         end,
         freq="daily",
         adjust="forward",
-        asset_type="equity",
+        table_family="equity",
         data_root=data_root,
     )
     if df.empty:

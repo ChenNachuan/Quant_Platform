@@ -104,16 +104,16 @@ def _straightflush_raw_stock(
 
 def _dummy_adapter(source: str, df_or_exc):
     adapter = MagicMock()
-    adapter.list_asset_types.return_value = ["stock", "calendar"]
+    adapter.list_datasets.return_value = ["stock", "calendar"]
 
-    def _fetch(asset_type: str, trade_date: date, watermark=None):
+    def _fetch(dataset: str, trade_date: date, watermark=None):
         if isinstance(df_or_exc, Exception):
             raise df_or_exc
         df = df_or_exc(trade_date) if callable(df_or_exc) else df_or_exc
         return FetchResult(
             df=df,
             source=source,
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(df),
             watermark=trade_date.strftime("%Y-%m-%d"),

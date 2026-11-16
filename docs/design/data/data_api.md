@@ -29,7 +29,7 @@ def load_bars(symbol: str | list[str] | None = None,
               freq: str = "daily",           # daily | minute | 5min | 60min
               fields: list[str] | None = None,
               adjust: str = "none",          # none | forward | backward
-              asset_type: str = "equity") -> pd.DataFrame
+              table_family: TableFamily = "equity") -> pd.DataFrame
     # 返回列：date, ticker, open, high, low, close, volume, amount, [adjfactor]
     # 按 (date, ticker) 排序
 

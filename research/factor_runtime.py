@@ -44,10 +44,10 @@ CacheKey = tuple[str, str, tuple[str, str], str]
 
 
 def _table_family() -> dict[str, tuple[str, str]]:
-    """运行时反转 ``data.data_api.TABLE_MAP``，映射表名到 ``(asset_type, freq)``。"""
+    """运行时反转 ``data.data_api.TABLE_MAP``，映射表名到 ``(table_family, freq)``。"""
     from data.data_api import TABLE_MAP
 
-    return {v: k for k, v in TABLE_MAP.items()}
+    return {v: (str(k[0]), k[1]) for k, v in TABLE_MAP.items()}
 
 
 def _default_table_loader(table_name: str, start: str, end: str) -> pd.DataFrame:
@@ -59,8 +59,8 @@ def _default_table_loader(table_name: str, start: str, end: str) -> pd.DataFrame
         raise ValueError(
             f"unknown data table {table_name!r}; expected one of {sorted(families)}"
         )
-    asset_type, freq = families[table_name]
-    return load_bars(start=start, end=end, freq=freq, asset_type=asset_type)
+    table_family, freq = families[table_name]
+    return load_bars(start=start, end=end, freq=freq, table_family=table_family)
 
 
 # ---------------------------------------------------------------------------

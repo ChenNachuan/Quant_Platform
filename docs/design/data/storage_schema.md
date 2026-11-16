@@ -7,7 +7,7 @@
 存储的**结构契约**：两层职责划分、52 张规范表 Schema、通用列约定、字段精度与演进规则。
 
 - **两层**：Parquet = 持久化唯一真相；DuckDB = 持久化 `catalog.duckdb` 视图与统计缓存引擎（基于 `read_parquet`，否决纯内存模式）。
-- **52 张规范表**：**47 张 A 股域表**（1 日历 + 36 股票 `cn_stock_*` + 5 独立 ETF `cn_etf_*` + 5 公募基金 `cn_fund_*`）+ **4 张期货表**（`cn_futures_*`）+ **1 张因子表**（`factor`）。原 `ext/` 取消独立顶层，全部按 `{nation}_{asset_type}_{data_type}` 落入 `asset/`。
+- **52 张规范表**：**47 张 A 股域表**（1 日历 + 36 股票 `cn_stock_*` + 5 独立 ETF `cn_etf_*` + 5 公募基金 `cn_fund_*`）+ **4 张期货表**（`cn_futures_*`）+ **1 张因子表**（`factor`）。原 `ext/` 取消独立顶层，全部按 `{nation}_{asset_class}_{data_type}` 落入 `asset/`。
 - **单目录单 Schema**：每张表独立占一个扁平目录，消除共用目录导致 DuckDB `read_parquet` 视图列冲突问题（原 `cn_reference/` 下表已下沉至独立目录）。
 - **精度与演进**：一开始选上限类型（DOUBLE/INT64），Schema 只增列不改类型/列名（新增列须同时设 `nullable=True, required=False`）。
 
@@ -19,7 +19,7 @@
 
 > [打开 Archify 交互图](../.diagrams/03-storage-topology.html)
 
-扁平一层，资产与数据类型编码在文件夹前缀 `{nation}_{asset_type}_{data_type}`：
+扁平一层，资产与数据类型编码在文件夹前缀 `{nation}_{asset_class}_{data_type}`：
 
 ```text
 $QUANT_DATA_ROOT/
@@ -57,9 +57,9 @@ $QUANT_DATA_ROOT/
 │   ├── cn_futures_contract_specs/contract_specs.parquet
 │   └── cn_futures_continuous/{symbol}.parquet
 │
-├── factors/{nation}_{asset_type}_{data_type}/{name}_v{version}/{year}.parquet   # 与 asset/ 同级
-├── raw/{source}/{asset_type}/{date}.parquet
-├── quarantine/{asset_type}/{date}.parquet
+├── factors/{nation}_{asset_class}_{data_type}/{name}_v{version}/{year}.parquet  # 与 asset/ 同级
+├── raw/{source}/{table}/{date}.parquet
+├── quarantine/{table}/{date}.parquet
 ├── dqc/
 ├── cross_check/
 └── manifest/
@@ -209,7 +209,7 @@ $QUANT_DATA_ROOT/
 | Parquet + DuckDB catalog | ClickHouse | 单机轻量化、零外部依赖 |
 | 持久化 `catalog.duckdb` | 纯内存模式 | 视图和统计缓存避免重建 |
 | 原 `ext/` 取消并全部落入 `asset/` | 独立 `ext/` 顶层 | 统一规范命名、纳入 Pandera 契约并直接入 DuckDB 视图 |
-| 每表独立扁平目录 `{nation}_{asset_type}_{data_type}/` | 共用 `cn_reference/` 等混合目录 | 防止 `read_parquet('dir/*.parquet')` 跨 Schema 冲突 |
+| 每表独立扁平目录 `{nation}_{asset_class}_{data_type}/` | 共用 `cn_reference/` 等混合目录 | 防止 `read_parquet('dir/*.parquet')` 跨 Schema 冲突 |
 | 股票日频小截面按 `{month}.parquet` 分区 | 按日小文件 | 避免 <1MB 碎文件导致 footer 与打开开销过高 |
 | ETF 独立建表、#29 事件拆为 8 张表 | 与股票混表或宽泛大 JSON 事件表 | 避免 ETF 净值/份额字段为空冗余，保持单表强 Schema 与高压缩比 |
 | 价格 DOUBLE；volume INT64；只增列不改名 | float32 / 显式版本重构 | 避免精度问题与历史数据全量重写；`union_by_name` 原生向后兼容 |

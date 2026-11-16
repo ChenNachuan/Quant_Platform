@@ -47,10 +47,10 @@ _NUMERIC_COLS = (
 )
 
 
-def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
+def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将 Tushare 原始 DataFrame（``stock``）转换为统一 ``bars_daily`` 格式并完成单位换算。"""
-    if asset_type != "stock":
-        raise ValueError(f"unsupported asset_type: {asset_type!r}")
+    if dataset != "stock":
+        raise ValueError(f"unsupported dataset: {dataset!r}")
 
     df = raw_df.copy()
     if _SUSPEND_COALESCE_PRIMARY in df.columns and "suspend" in df.columns:

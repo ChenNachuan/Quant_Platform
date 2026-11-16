@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import numpy as np
 import pandas as pd
@@ -48,8 +48,10 @@ from data.storage_ops import (
 from data.storage_schema import SCHEMA
 
 __all__ = [
+    "DqcRuleGroup",
     "RULES_DIR",
     "RULE_VERSION",
+    "DQC_RULE_FILES",
     "CheckResult",
     "BatchEvaluation",
     "run_all_checks",
@@ -62,8 +64,13 @@ logger = logging.getLogger(__name__)
 
 RULES_DIR: Path = Path(__file__).resolve().parent / "rules"
 
-# asset_type -> 规则文件名映射
-ASSET_RULE_FILES: dict[str, str] = {
+#: DQC 规则集分组字面量类型。
+DqcRuleGroup = Literal[
+    "bars_daily", "bars_minute", "fundamental", "factor", "reference"
+]
+
+# dqc_group -> 规则文件名映射
+DQC_RULE_FILES: dict[str, str] = {
     "bars_daily": "bars_daily.yaml",
     "bars_minute": "bars_minute.yaml",
     "fundamental": "fundamental.yaml",
@@ -136,12 +143,12 @@ class BatchEvaluation:
 # ── 规则加载与执行 ───────────────────────────────────────────────────────
 
 
-def _load_rules(asset_type: str) -> list[dict]:
+def _load_rules(dqc_group: DqcRuleGroup | str) -> list[dict]:
     try:
-        fname = ASSET_RULE_FILES[asset_type]
+        fname = DQC_RULE_FILES[dqc_group]
     except KeyError:
         raise KeyError(
-            f"unknown asset_type {asset_type!r}; known: {sorted(ASSET_RULE_FILES)}"
+            f"unknown dqc_group {dqc_group!r}; known: {sorted(DQC_RULE_FILES)}"
         ) from None
     with open(RULES_DIR / fname, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
@@ -289,31 +296,31 @@ def _build_result(
 def run_all_checks(
     df: pd.DataFrame,
     data_date: date,
-    asset_type: str,
+    dqc_group: DqcRuleGroup | str,
     *,
     overrides: dict | None = None,
     cross_df: pd.DataFrame | None = None,
 ) -> tuple[list[CheckResult], list[CheckResult]]:
-    """执行指定 *asset_type* 的全部规则，返回 ``(hard_results, soft_results)``。
+    """执行指定 *dqc_group* 的全部规则，返回 ``(hard_results, soft_results)``。
 
     外部参考数据通过 *overrides* 注入；跨表规则（K06–K08）仅在传入 *cross_df* 时运行。
     """
     overrides = dict(overrides or {})
     hard: list[CheckResult] = []
     soft: list[CheckResult] = []
-    for rule in _load_rules(asset_type):
+    for rule in _load_rules(dqc_group):
         fn_path = rule.get("function") or ""
         if fn_path.startswith(CROSS_FUNCTION_PREFIX):
             if cross_df is None:
                 continue
-            if asset_type == "bars_daily":
+            if dqc_group == "bars_daily":
                 daily_df, minute_df = df, cross_df
-            elif asset_type == "bars_minute":
+            elif dqc_group == "bars_minute":
                 daily_df, minute_df = cross_df, df
             else:
                 raise ValueError(
                     f"cross rules need bars_daily/bars_minute frames, "
-                    f"got asset_type={asset_type!r}"
+                    f"got dqc_group={dqc_group!r}"
                 )
             raw = _evaluate_cross_check(rule, daily_df, minute_df, overrides)
         elif rule["type"] == "column_check":
@@ -351,7 +358,7 @@ def _expand_to_partitions(df: pd.DataFrame, mask: pd.Series) -> pd.Series:
 def evaluate_batch(
     df: pd.DataFrame,
     data_date: date,
-    asset_type: str,
+    dqc_group: DqcRuleGroup | str,
     *,
     overrides: dict | None = None,
     cross_df: pd.DataFrame | None = None,
@@ -364,7 +371,7 @@ def evaluate_batch(
     """
     config = batch_config or BatchRejectConfig()
     hard_results, soft_results = run_all_checks(
-        df, data_date, asset_type, overrides=overrides, cross_df=cross_df
+        df, data_date, dqc_group, overrides=overrides, cross_df=cross_df
     )
 
     # 第 2 步：收集行级 HARD drop 行（partition 粒度扩展至整组）
@@ -400,7 +407,7 @@ def evaluate_batch(
                 rate,
                 thr,
                 data_date,
-                asset_type,
+                dqc_group,
             )
             warnings.append(f"escalated_alarm:{r.rule_id}")
             continue
@@ -429,7 +436,7 @@ def evaluate_batch(
             flagged_rate,
             config.soft_alarm_rate,
             data_date,
-            asset_type,
+            dqc_group,
         )
         warnings.append("soft_alarm")
 
@@ -454,7 +461,7 @@ def evaluate_batch(
 def _reject_batch(
     df: pd.DataFrame,
     data_date: date,
-    asset_type: str,
+    table: str,
     rows_to_drop: pd.Series,
     hard_results: list[CheckResult],
     *,
@@ -466,7 +473,7 @@ def _reject_batch(
     triggered = [r.rule_id for r in hard_results if r.failing_count]
     detail = {
         "data_date": data_date.strftime("%Y-%m-%d"),
-        "asset_type": asset_type,
+        "table": table,
         "reject_time": datetime.now().isoformat(timespec="seconds"),
         "batch_status": "rejected",
         "total_rows": int(len(df)),
@@ -475,10 +482,10 @@ def _reject_batch(
         "hard_rules_triggered": triggered,
         "reject_reason": reason,
     }
-    save_quarantine(df, asset_type, data_date, detail, data_root)
+    save_quarantine(df, table, data_date, detail, data_root)
     logger.error("DQC batch rejected (%s): %s", reason, detail)
     raise DQCBatchReject(
-        f"batch {detail['data_date']} {asset_type} rejected: {reason} "
+        f"batch {detail['data_date']} {table} rejected: {reason} "
         f"(drop_rate={drop_rate:.4f}, rows_would_drop={detail['rows_would_drop']}"
         f"/{detail['total_rows']})",
         detail=detail,
@@ -488,7 +495,7 @@ def _reject_batch(
 def ingest_with_dqc(
     df: pd.DataFrame,
     data_date: date,
-    asset_type: str,
+    dqc_group: DqcRuleGroup | str,
     *,
     table: str | None = None,
     overrides: dict | None = None,
@@ -504,13 +511,13 @@ def ingest_with_dqc(
     并写入 Parquet（普通按日期覆盖，月度分区表执行 upsert），随后记录 DQC 报告。
     """
     config = batch_config or BatchRejectConfig()
-    table = table or asset_type
+    table = table or str(dqc_group)
     started = time.monotonic()
     run_time = datetime.now(timezone.utc).replace(tzinfo=None)
     evaluation = evaluate_batch(
         df,
         data_date,
-        asset_type,
+        dqc_group,
         overrides=overrides,
         cross_df=cross_df,
         batch_config=config,
@@ -523,13 +530,13 @@ def ingest_with_dqc(
         hard_results,
         soft_results,
         data_date=data_date,
-        asset_type=asset_type,
+        table=table,
         batch_rejected=rejected,
         run_time=run_time,
     )
     summary_row = report.build_summary_row(
         data_date,
-        asset_type,
+        table,
         total_rows=len(df),
         rows_dropped=evaluation.rows_would_drop,
         rows_flagged=evaluation.flagged_count,
@@ -547,7 +554,7 @@ def ingest_with_dqc(
         _reject_batch(
             df,
             data_date,
-            asset_type,
+            table,
             rows_to_drop,
             hard_results,
             reason=evaluation.reject_reason,
@@ -585,7 +592,7 @@ def ingest_with_dqc(
     report.append_summary(summary_row, data_root=data_root)
     logger.info(
         "DQC ingest ok: %s %s rows %d -> %d, drop_rate %.4f, flagged_rate %.4f",
-        asset_type,
+        table,
         data_date,
         len(df),
         len(df_clean),

@@ -32,7 +32,7 @@ __all__ = [
     "SEVERITY_LOW",
     "SEVERITY_MEDIUM",
     "SEVERITY_HIGH",
-    "STORAGE_TO_SOURCE_ASSET",
+    "STORAGE_TO_SOURCE_DATASET",
     "FieldChange",
     "CorrectionRecord",
     "detect_corrections",
@@ -75,8 +75,8 @@ SEVERITY_HIGH = "HIGH"
 # 触发告警日志的最低严重级别集合（过滤 LOW 级噪音）
 ALERT_SEVERITIES = frozenset({SEVERITY_MEDIUM, SEVERITY_HIGH})
 
-# 存储表名到适配器/标准化器源域资产类型的映射（仅覆盖已接入的统一日线表）
-STORAGE_TO_SOURCE_ASSET: dict[str, str] = {
+# 存储表名到适配器/标准化器数据集名的映射（仅覆盖已接入的统一日线表）
+STORAGE_TO_SOURCE_DATASET: dict[str, str] = {
     "bars_daily": "stock",
 }
 
@@ -86,7 +86,7 @@ STORAGE_TO_SOURCE_ASSET: dict[str, str] = {
 
 @dataclass(frozen=True)
 class FieldChange:
-    """单个标的单个字段超出容差的变更记录（含定位用的 ``asset_type`` 与 ``trade_date``）。"""
+    """单个标的单个字段超出容差的变更记录（含定位用的 ``table`` 与 ``trade_date``）。"""
 
     ticker: str
     field: str
@@ -94,15 +94,15 @@ class FieldChange:
     new_value: float
     abs_diff: float
     rel_diff: float
-    asset_type: str = ""
+    table: str = ""
     trade_date: date | None = None
 
 
 @dataclass(frozen=True)
 class CorrectionRecord:
-    """单个 ``(asset_type, trade_date)`` 的聚合修订记录，按行追加写入 ``corrections/{asset_type}/{date}.jsonl``。"""
+    """单个 ``(table, trade_date)`` 的聚合修订记录，按行追加写入 ``corrections/{table}/{date}.jsonl``。"""
 
-    asset_type: str
+    table: str
     trade_date: date
     detected_at: datetime
     changes: tuple[FieldChange, ...] = ()
@@ -112,13 +112,13 @@ class CorrectionRecord:
 
 
 def correction_log_path(
-    asset_type: str,
+    table: str,
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Path:
-    """返回修订审计日志路径：``{data_root}/corrections/{asset_type}/{date}.jsonl``。"""
+    """返回修订审计日志路径：``{data_root}/corrections/{table}/{date}.jsonl``。"""
     date_str = trade_date.strftime("%Y-%m-%d")
-    return Path(data_root) / CORRECTIONS_ROOT / asset_type / f"{date_str}.jsonl"
+    return Path(data_root) / CORRECTIONS_ROOT / table / f"{date_str}.jsonl"
 
 
 def impact_log_path(
@@ -136,37 +136,37 @@ def _now() -> datetime:
     return datetime.now()
 
 
-def _source_asset_type(asset_type: str) -> str:
-    """将存储表名转换到适配器/标准化器认可的源域资产类型。"""
+def _source_dataset(table: str) -> str:
+    """将存储表名转换到适配器/标准化器认可的数据集名。"""
     try:
-        return STORAGE_TO_SOURCE_ASSET[asset_type]
+        return STORAGE_TO_SOURCE_DATASET[table]
     except KeyError:
         raise ValueError(
-            f"no source asset type for storage table {asset_type!r} "
-            f"(mapped: {sorted(STORAGE_TO_SOURCE_ASSET)}); add its entry to "
-            "STORAGE_TO_SOURCE_ASSET before scanning it"
+            f"no source dataset for storage table {table!r} "
+            f"(mapped: {sorted(STORAGE_TO_SOURCE_DATASET)}); add its entry to "
+            "STORAGE_TO_SOURCE_DATASET before scanning it"
         ) from None
 
 
-def _fetch_normalized(asset_type: str, trade_date: date) -> Any:
+def _fetch_normalized(table: str, trade_date: date) -> Any:
     """从主数据源重拉单日数据并经过标准化器处理（I/O 测试接缝）。"""
     from data.adapters import get_adapter
     from data.ingestion import get_primary_source
     from data.normalizers import get_normalizer
 
-    source = get_primary_source(asset_type)  # 存储域主数据源
-    source_asset_type = _source_asset_type(asset_type)  # 适配器域资产类型
+    source = get_primary_source(table)  # 存储域主数据源
+    source_dataset = _source_dataset(table)  # 适配器域数据集名
     adapter = get_adapter(source)
     try:
-        result = adapter.fetch(source_asset_type, trade_date)
+        result = adapter.fetch(source_dataset, trade_date)
         # get_normalizer() 直接返回 normalize 可调用对象
-        return get_normalizer(source)(source_asset_type, result.df)
+        return get_normalizer(source)(source_dataset, result.df)
     finally:
         adapter.close()
 
 
 def _load_local(
-    asset_type: str,
+    table: str,
     trade_date: date,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
 ) -> Any:
@@ -176,23 +176,20 @@ def _load_local(
     from data.storage_ops import is_monthly_partition, partition_path
 
     try:
-        path = partition_path(asset_type, trade_date, data_root)
+        path = partition_path(table, trade_date, data_root)
     except NotImplementedError as exc:
-        raise NotImplementedError(
-            f"no date-partitioned layout for {asset_type!r}"
-        ) from exc
+        raise NotImplementedError(f"no date-partitioned layout for {table!r}") from exc
 
     if not path.exists():
         legacy_path = (
-            Path(data_root)
-            / f"asset/{asset_type}/{trade_date.strftime('%Y-%m-%d')}.parquet"
+            Path(data_root) / f"asset/{table}/{trade_date.strftime('%Y-%m-%d')}.parquet"
         )
         if legacy_path.exists():
             path = legacy_path
         else:
             return None
     df = pd.read_parquet(path)
-    if is_monthly_partition(asset_type) and "trade_date" in df.columns:
+    if is_monthly_partition(table) and "trade_date" in df.columns:
         td = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
         df = df[td == trade_date].reset_index(drop=True)
         if df.empty:
@@ -206,31 +203,33 @@ def _no_rows(frame: Any) -> bool:
 
 
 def _post_dqc_baseline(
-    df: Any, asset_type: str, trade_date: date, data_root: str | os.PathLike[str]
+    df: Any, table: str, trade_date: date, data_root: str | os.PathLike[str]
 ) -> Any:
     """对新拉取数据运行只读 DQC 评估并剔除会被拦截的行，使新旧基线口径一致（不写入数据湖）。"""
     from data.dqc.engine import evaluate_batch
     from data.dqc.report import build_reference_overrides
+    from data.ingestion import TABLE_TO_DQC_GROUP
 
+    dqc_group = TABLE_TO_DQC_GROUP.get(table, table)
     evaluation = evaluate_batch(
         df,
         trade_date,
-        asset_type,
-        overrides=build_reference_overrides(data_root, asset_type, trade_date),
+        dqc_group,
+        overrides=build_reference_overrides(data_root, table, trade_date),
     )
     if evaluation.batch_status == "rejected":
         return None
     return df.loc[~evaluation.rows_to_drop]
 
 
-def _foreign_fields(asset_type: str) -> set[str]:
+def _foreign_fields(table: str) -> set[str]:
     """获取由其他数据源覆盖接管的字段集合，比对前剔除以避免误报。"""
     from data.ingestion import get_field_overrides, get_primary_source
 
-    primary = get_primary_source(asset_type)
+    primary = get_primary_source(table)
     return {
         field
-        for field, source in get_field_overrides(asset_type).items()
+        for field, source in get_field_overrides(table).items()
         if source != primary
     }
 
@@ -258,7 +257,7 @@ def _jsonable(value: float) -> float | None:
 def compare_frames(
     df_old: Any,
     df_new: Any,
-    asset_type: str,
+    table: str,
     trade_date: date,
 ) -> list[FieldChange]:
     """按 :data:`CORRECTION_TOLERANCES` 逐行比对两份标准化 DataFrame。
@@ -309,7 +308,7 @@ def compare_frames(
                         new_value=float("nan") if new_missing else float(new_raw),
                         abs_diff=abs(float(present)),
                         rel_diff=TOTAL_CHANGE_REL_DIFF,
-                        asset_type=asset_type,
+                        table=table,
                         trade_date=trade_date,
                     )
                 )
@@ -328,7 +327,7 @@ def compare_frames(
                     new_value=new_value,
                     abs_diff=abs_diff,
                     rel_diff=_rel_diff(old_value, new_value),
-                    asset_type=asset_type,
+                    table=table,
                     trade_date=trade_date,
                 )
             )
@@ -336,7 +335,7 @@ def compare_frames(
 
 
 def detect_corrections(
-    asset_type: str,
+    table: str,
     lookback: int = 30,
     *,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
@@ -347,21 +346,21 @@ def detect_corrections(
     cal = TradingCalendar("sse", data_root=data_root)
     end = cal.prev(date.today())
     start = cal.prev(end, lookback)
-    drop_fields = _foreign_fields(asset_type)
+    drop_fields = _foreign_fields(table)
     changes: list[FieldChange] = []
     for trade_date in cal.range(start, end):
-        fresh = _fetch_normalized(asset_type, trade_date)
-        local = _load_local(asset_type, trade_date, data_root)
+        fresh = _fetch_normalized(table, trade_date)
+        local = _load_local(table, trade_date, data_root)
         if _no_rows(fresh) or _no_rows(local):
             continue
-        fresh = _post_dqc_baseline(fresh, asset_type, trade_date, data_root)
+        fresh = _post_dqc_baseline(fresh, table, trade_date, data_root)
         if _no_rows(fresh):
             continue
         changes.extend(
             compare_frames(
                 local.drop(columns=drop_fields, errors="ignore"),
                 fresh.drop(columns=drop_fields, errors="ignore"),
-                asset_type,
+                table,
                 trade_date,
             )
         )
@@ -374,17 +373,17 @@ def detect_corrections(
 def _group_changes(
     changes: Sequence[FieldChange], detected_at: datetime
 ) -> list[CorrectionRecord]:
-    """按 ``(asset_type, trade_date)`` 分组聚合变更记录并保持原有顺序。"""
+    """按 ``(table, trade_date)`` 分组聚合变更记录并保持原有顺序。"""
     buckets: dict[tuple[str, date], list[FieldChange]] = {}
     for change in changes:
-        if not change.asset_type or change.trade_date is None:
+        if not change.table or change.trade_date is None:
             raise ValueError(
-                f"FieldChange needs asset_type and trade_date to be applied: {change!r}"
+                f"FieldChange needs table and trade_date to be applied: {change!r}"
             )
-        buckets.setdefault((change.asset_type, change.trade_date), []).append(change)
+        buckets.setdefault((change.table, change.trade_date), []).append(change)
     return [
         CorrectionRecord(
-            asset_type=key[0],
+            table=key[0],
             trade_date=key[1],
             detected_at=detected_at,
             changes=tuple(items),
@@ -397,7 +396,7 @@ def _append_correction_log(
     record: CorrectionRecord, data_root: str | os.PathLike[str]
 ) -> Path:
     """逐条追加写入修订 JSONL 日志（目录不存在时自动创建）。"""
-    path = correction_log_path(record.asset_type, record.trade_date, data_root)
+    path = correction_log_path(record.table, record.trade_date, data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         for change in record.changes:
@@ -405,7 +404,7 @@ def _append_correction_log(
                 json.dumps(
                     {
                         "detected_at": record.detected_at.isoformat(),
-                        "asset_type": record.asset_type,
+                        "table": record.table,
                         "trade_date": str(record.trade_date),
                         "ticker": change.ticker,
                         "field": change.field,
@@ -421,7 +420,7 @@ def _append_correction_log(
     return path
 
 
-def _daily_ingest(source: str, asset_type: str, trade_date: date) -> None:
+def _daily_ingest(source: str, table: str, trade_date: date) -> None:
     """延迟导入并调用完整入库流水线覆盖写入；不可用时抛 ``RuntimeError``（禁止绕过 DQC 直接写 Parquet）。"""
     try:
         from data.ingestion import daily_ingest
@@ -433,7 +432,7 @@ def _daily_ingest(source: str, asset_type: str, trade_date: date) -> None:
             "pipeline (QUANT-40 daily_ingest) before applying corrections."
         ) from exc
 
-    daily_ingest(source=source, asset_type=asset_type, trade_date=trade_date)
+    daily_ingest(source=source, table=table, trade_date=trade_date)
 
 
 def apply_corrections(
@@ -449,13 +448,13 @@ def apply_corrections(
     for record in records:
         _append_correction_log(record, data_root)  # 1. 先记录审计日志
         _daily_ingest(
-            source=get_primary_source(record.asset_type),
-            asset_type=record.asset_type,
+            source=get_primary_source(record.table),
+            table=record.table,
             trade_date=record.trade_date,
         )  # 2. 再覆盖写入
         logger.warning(
             "Correction applied: %s %s, %d field(s) changed",
-            record.asset_type,
+            record.table,
             record.trade_date,
             len(record.changes),
         )
@@ -472,7 +471,7 @@ def _classify(record: CorrectionRecord) -> tuple[str, str, dict[str, Any]]:
     max_rel_diff = max((c.rel_diff for c in changes), default=0.0)
     impact: dict[str, Any] = {
         "trade_date": str(record.trade_date),
-        "asset_type": record.asset_type,
+        "table": record.table,
         "num_changes": len(changes),
         "max_rel_diff": max_rel_diff,
         "affected_tickers": sorted({c.ticker for c in changes}),
@@ -525,7 +524,7 @@ def mark_factors_stale(
     if not factors_dir.is_dir():
         return []
 
-    touched = {record.asset_type}
+    touched = {record.table}
     affected: list[str] = []
     for meta_path in sorted(factors_dir.glob("*/v*/metadata.json")):
         try:

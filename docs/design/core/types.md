@@ -21,6 +21,21 @@
 | `ASSET_RULES` 相关类型 | 多资产规则值 | [asset_rules.md](asset_rules.md) |
 | 配置 dataclass（BacktestConfig 等） | 加载后的类型载体 | [config.md](config.md) |
 | `QualityFlag` | DQC行级位掩码枚举 | [../data/dqc_severity.md](../data/dqc_severity.md) |
+| `AssetClass` | 交易规则资产类别 `Literal` | [asset_rules.md](asset_rules.md) |
+
+## 命名约定（四域语义分离）
+
+为避免早期 `asset_type` 在不同层含义混杂，平台按职责采用四个精确命名与静态字面量类型：
+
+| 域 / 入口 | 参数 / 属性名 | 类型 | 取值示例 | 含义 |
+|---|---|---|---|---|
+| `core/asset_rules.py`、`execution/` | `asset_class` | `AssetClass \| AssetType` | `stock` / `etf` / `fund` | 交易规则类型（费率、手数、涨跌停） |
+| `data/data_api.py`、`research/` | `table_family` | `TableFamily` | `equity` / `futures` / `continuous` | 研究端表族选择器 |
+| `data/source_adapter.py`、`adapters/`、`normalizers/` | `dataset` | `SourceDataset` | `stock` / `calendar` / `index` / `etf` | 数据源拉取与标准化数据集名 |
+| `data/ingestion.py`、`raw.py`、`quarantine.py`、`data_revision.py` | `table` | `str`（`SCHEMA` 规范名或别名） | `cn_stock_bars_daily` / `bars_daily` | 资产存储表名与审计路径分区 |
+| `data/dqc/engine.py` | `dqc_group` | `DqcRuleGroup` | `bars_daily` / `bars_minute` / `fundamental` / `factor` / `reference` | DQC 规则集名 |
+
+注：`research/alpha_type.py` 标签维度 `TAG_DIMENSIONS["asset_type"]` 与 `Factor.asset_types` 描述因子适用标的类别，保留原语义命名。
 
 ## 关键决策
 

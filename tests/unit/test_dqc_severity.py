@@ -111,7 +111,7 @@ def _fake_result(rule_id: str, df: pd.DataFrame, failing, severity_name: str = "
 def _fake_runner(hard=(), soft=()):
     """A run_all_checks replacement returning prebuilt results."""
 
-    def run(df, data_date, asset_type, *, overrides=None, cross_df=None):
+    def run(df, data_date, dqc_group, *, overrides=None, cross_df=None):
         return list(hard), list(soft)
 
     return run
@@ -232,7 +232,7 @@ def test_hard_drop_rate_above_valve_rejects_batch(tmp_path, monkeypatch):
     detail = excinfo.value.detail
     assert detail["batch_status"] == "rejected"
     assert detail["data_date"] == "2024-01-03"
-    assert detail["asset_type"] == "bars_daily"
+    assert detail["table"] == "bars_daily"
     assert detail["total_rows"] == 20
     assert detail["rows_would_drop"] == 8
     assert detail["drop_rate"] == 0.4

@@ -13,7 +13,7 @@ DQC 的**运行时**：何时跑、跑多快、失败了怎么办、结果怎么
 |---|---|
 | run_date / run_time | 执行日 / 执行时刻 |
 | data_date | 被检数据的业务日 |
-| asset_type | bars_daily 等 5 类 |
+| table | 规范存储表名（或直接调用传入的 `dqc_group`） |
 | rule_id / rule_name / dimension / severity | 规则标识（dimension=四维之一） |
 | action_taken | pass / drop / flag / reject_batch |
 | total_rows / failing_rows / failing_rate | 规模与失败率 |
@@ -24,7 +24,7 @@ DQC 的**运行时**：何时跑、跑多快、失败了怎么办、结果怎么
 
 | 字段 | 含义 |
 |---|---|
-| run_time / data_date / asset_type | 执行时刻 / 业务日 / 资产 |
+| run_time / data_date / table | 执行时刻 / 业务日 / 存储表名 |
 | total_rows / rows_dropped / rows_flagged / rows_clean | 行数账目 |
 | drop_rate / flag_rate | 失败率 |
 | batch_status | accepted / rejected / accepted_with_warnings |
@@ -38,8 +38,8 @@ DQC 的**运行时**：何时跑、跑多快、失败了怎么办、结果怎么
 ```text
 python -m data.dqc.report dashboard          # CLI + DuckDB 看板，不建 Web
 python -m data.dqc.report quarantine         # 隔离区查询（见 quarantine_raw.md）
-python -m data.dqc.engine reingest --asset X --date D    # 重下载+全重跑+覆盖写
-python -m data.dqc.engine revalidate --asset X --start S --end E  # 只重验不重下载
+python -m data.dqc.report reingest --source S --table X --date D       # 重下载+全重跑+覆盖写（保留 --asset 兼容别名）
+python -m data.dqc.report revalidate --source S --table X --start S --end E  # 只重验不重下载
 ```
 
 ## 关键决策

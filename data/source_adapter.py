@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import pandas as pd
 from core.config import DATA_ROOT
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FetchResult",
+    "SourceDataset",
     "SourceAdapter",
     "FetchTimeoutError",
     "read_watermark",
@@ -71,6 +72,18 @@ class FetchTimeoutError(TimeoutError):
     """单次拉取超过 ``FETCH_TIMEOUT`` 时抛出。"""
 
 
+#: 数据源适配器与标准化器的数据集标识字面量类型。
+SourceDataset = Literal[
+    "stock",
+    "etf",
+    "index",
+    "convertible",
+    "futures",
+    "option",
+    "calendar",
+]
+
+
 # --- FetchResult ---
 @dataclass
 class FetchResult:
@@ -78,7 +91,7 @@ class FetchResult:
 
     df: pd.DataFrame
     source: str
-    asset_type: str
+    dataset: SourceDataset | str
     trade_date: date
     row_count: int
     watermark: str | None
@@ -177,8 +190,8 @@ def _watermark_path(source: str, data_root: Path) -> Path:
     return data_root / "raw" / source / WATERMARK_FILENAME
 
 
-def read_watermark(source: str, asset_type: str, data_root: Path) -> str | None:
-    """读取指定 ``source / asset_type`` 的水位线字符串，缺失或损坏时返回 ``None``。"""
+def read_watermark(source: str, table: str, data_root: Path) -> str | None:
+    """读取指定 ``source / table`` 的水位线字符串，缺失或损坏时返回 ``None``。"""
     path = _watermark_path(source, data_root)
     if not path.exists():
         return None
@@ -187,14 +200,12 @@ def read_watermark(source: str, asset_type: str, data_root: Path) -> str | None:
     except (json.JSONDecodeError, OSError):
         logger.warning("corrupt watermark file %s — treating as absent", path)
         return None
-    value = data.get(asset_type)
+    value = data.get(table)
     return str(value) if value is not None else None
 
 
-def write_watermark(
-    source: str, asset_type: str, watermark: str, data_root: Path
-) -> None:
-    """原子持久化 ``source / asset_type`` 水位线（幂等安全）。"""
+def write_watermark(source: str, table: str, watermark: str, data_root: Path) -> None:
+    """原子持久化 ``source / table`` 水位线（幂等安全）。"""
     path = _watermark_path(source, data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {}
@@ -203,7 +214,7 @@ def write_watermark(
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             logger.warning("corrupt watermark file %s — overwriting", path)
-    data[asset_type] = watermark
+    data[table] = watermark
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
@@ -223,15 +234,15 @@ class SourceAdapter(ABC):
     @abstractmethod
     def fetch(
         self,
-        asset_type: str,
+        dataset: SourceDataset | str,
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        """拉取指定交易日与资产类型的原始数据，返回保留源站列与值的 :class:`FetchResult`。"""
+        """拉取指定交易日与数据集的原始数据，返回保留源站列与值的 :class:`FetchResult`。"""
 
     @abstractmethod
-    def list_asset_types(self) -> list[str]:
-        """返回该适配器支持拉取的资产类型列表。"""
+    def list_datasets(self) -> list[str]:
+        """返回该适配器支持拉取的数据集列表。"""
 
     def _latest_trade_date(self) -> date:
         """获取最近已发生的交易日（优先查交易所日历并截断至今日，防止探测未来交易日；失败则回退今日）。"""
@@ -267,12 +278,12 @@ class SourceAdapter(ABC):
 
     def health_check(self) -> bool:
         """执行一次真实探测拉取以验证数据源可用性。"""
-        asset_types = self.list_asset_types()
-        if not asset_types:
+        datasets = self.list_datasets()
+        if not datasets:
             return False
         try:
             trade_date = self._latest_trade_date()
-            result = self.fetch(asset_types[0], trade_date)
+            result = self.fetch(datasets[0], trade_date)
             return result is not None
         except Exception:
             return False

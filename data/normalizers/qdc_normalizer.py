@@ -16,7 +16,7 @@ from data.normalizers import UNIFIED_COLUMNS
 
 __all__ = ["normalize"]
 
-_SUPPORTED_ASSET_TYPES = frozenset({"stock", "etf", "index", "convertible"})
+_SUPPORTED_DATASETS = frozenset({"stock", "etf", "index", "convertible"})
 
 _EXCHANGE_SUFFIX_MAP: dict[str, str] = {
     ".XSHG": ".SH",
@@ -74,10 +74,10 @@ def _normalize_qdc_ticker(value: str) -> str:
     return f"{val}.{exchange}"
 
 
-def normalize(asset_type: str, raw_df: pd.DataFrame) -> pd.DataFrame:
+def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     """将 QDC 原始列名、交易所后缀与毫秒时间戳转换为统一 ``bars_daily`` 格式。"""
-    if asset_type not in _SUPPORTED_ASSET_TYPES:
-        raise ValueError(f"unsupported asset_type: {asset_type!r}")
+    if dataset not in _SUPPORTED_DATASETS:
+        raise ValueError(f"unsupported dataset: {dataset!r}")
 
     df = raw_df.copy()
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from core.config import load_secrets
-from data.source_adapter import FetchResult, SourceAdapter
+from data.source_adapter import FetchResult, SourceAdapter, SourceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class TushareAdapter(SourceAdapter):
 
     requests_per_second = 5.0
 
-    _ASSET_TYPES = ["stock"]
+    _SUPPORTED_DATASETS = ["stock"]
 
     def __init__(
         self, token: str | None = None, secrets_path: str | Path = "config/.env"
@@ -52,28 +52,28 @@ class TushareAdapter(SourceAdapter):
             _read_tushare_secrets(self._secrets_path).get("TUSHARE_TOKEN", "").strip()
         )
 
-    def list_asset_types(self) -> list[str]:
-        return list(self._ASSET_TYPES)
+    def list_datasets(self) -> list[str]:
+        return list(self._SUPPORTED_DATASETS)
 
     def fetch(
         self,
-        asset_type: str,
+        dataset: SourceDataset | str,
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        if asset_type not in self._ASSET_TYPES:
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+        if dataset not in self._SUPPORTED_DATASETS:
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         import tushare as ts
 
         pro = ts.pro_api(self._resolve_token())
         date_str = trade_date.strftime("%Y%m%d")
 
-        if asset_type == "stock":
+        if dataset == "stock":
             df = pro.daily(trade_date=date_str)
             df = self._enrich_stock_daily(pro, df, date_str)
         else:  # pragma: no cover
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         if df is None:
             df = pd.DataFrame()
@@ -81,7 +81,7 @@ class TushareAdapter(SourceAdapter):
         return FetchResult(
             df=df,
             source="tushare",
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(df),
             watermark=date_str,  # 以最近成功交易日作为水位线

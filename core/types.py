@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum, IntEnum, IntFlag
+from typing import Literal
 
 
 class AssetType(str, Enum):
@@ -14,6 +15,10 @@ class AssetType(str, Enum):
     BOND = "bond"  # V2 预留
     FUTURES = "futures"  # V3 预留
     OPTION = "option"  # V4 预留
+
+
+#: 交易规则域资产分类字面量类型（对应 :class:`AssetType` 取值）。
+AssetClass = Literal["stock", "etf", "fund", "bond", "futures", "option"]
 
 
 # 权益类资产集合，用于 data_api 等层统一归并映射

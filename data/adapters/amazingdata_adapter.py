@@ -26,7 +26,7 @@ import pandas as pd
 
 import core.config as core_config
 from data.raw import raw_path
-from data.source_adapter import FetchResult, SourceAdapter
+from data.source_adapter import FetchResult, SourceAdapter, SourceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ _DEFAULT_CONTAINER_SCRIPT = "/scripts/ingestion/amazing_pull.py"
 _DEFAULT_CONTAINER_DATA_ROOT = "/data"
 _DEFAULT_DOCKER_TIMEOUT = 300
 
-_ASSET_TO_TABLE: dict[str, str] = {
+_DATASET_TO_TABLE: dict[str, str] = {
     "calendar": "cn_calendar",
     "stock": "cn_stock_bars_daily",
     "etf": "cn_etf_bars_daily",
@@ -53,7 +53,7 @@ class AmazingdataAdapter(SourceAdapter):
 
     requests_per_second = 2.0  # 受限于并发连接数
 
-    _ASSET_TYPES = ["stock", "etf", "index", "calendar", "option"]
+    _SUPPORTED_DATASETS = ["stock", "etf", "index", "calendar", "option"]
 
     def __init__(
         self,
@@ -112,34 +112,34 @@ class AmazingdataAdapter(SourceAdapter):
             self._ad = AmazingData()
         return self._ad
 
-    def list_asset_types(self) -> list[str]:
-        return list(self._ASSET_TYPES)
+    def list_datasets(self) -> list[str]:
+        return list(self._SUPPORTED_DATASETS)
 
     def fetch(
         self,
-        asset_type: str,
+        dataset: SourceDataset | str,
         trade_date: date,
         watermark: str | None = None,
     ) -> FetchResult:
-        if asset_type not in self._ASSET_TYPES:
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+        if dataset not in self._SUPPORTED_DATASETS:
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         if self._should_use_docker():
-            return self._fetch_via_docker(asset_type, trade_date)
+            return self._fetch_via_docker(dataset, trade_date)
 
         ad = self._ensure_client()
         date_str = trade_date.strftime("%Y-%m-%d")
 
-        if asset_type == "stock":
+        if dataset == "stock":
             df = self._fetch_stock(ad, date_str)
-        elif asset_type == "option":
+        elif dataset == "option":
             df = self._fetch_option(ad, date_str)
-        elif asset_type in ("etf", "index", "calendar"):
+        elif dataset in ("etf", "index", "calendar"):
             raise ValueError(
-                f"direct SDK fetch for {asset_type!r} requires docker bridge mode"
+                f"direct SDK fetch for {dataset!r} requires docker bridge mode"
             )
         else:  # pragma: no cover
-            raise ValueError(f"unsupported asset_type: {asset_type!r}")
+            raise ValueError(f"unsupported dataset: {dataset!r}")
 
         if df is None:
             df = pd.DataFrame()
@@ -147,7 +147,7 @@ class AmazingdataAdapter(SourceAdapter):
         return FetchResult(
             df=df,
             source="amazingdata",
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(df),
             watermark=date_str,
@@ -184,8 +184,8 @@ class AmazingdataAdapter(SourceAdapter):
             cmd.extend(["--local-path", self._explicit_local_path])
         return cmd
 
-    def _fetch_via_docker(self, asset_type: str, trade_date: date) -> FetchResult:
-        table = _ASSET_TO_TABLE[asset_type]
+    def _fetch_via_docker(self, dataset: str, trade_date: date) -> FetchResult:
+        table = _DATASET_TO_TABLE[dataset]
         date_str = trade_date.strftime("%Y-%m-%d")
         data_root = self._resolve_data_root()
         cmd = self._build_docker_command(table, date_str, data_root)
@@ -230,7 +230,7 @@ class AmazingdataAdapter(SourceAdapter):
         return FetchResult(
             df=df,
             source="amazingdata",
-            asset_type=asset_type,
+            dataset=dataset,
             trade_date=trade_date,
             row_count=len(df),
             watermark=date_str,

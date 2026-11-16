@@ -30,7 +30,7 @@ uv run pytest tests/golden/   # 需先准备黄金样本落盘基线
 
 # 运行单个测试
 uv run pytest tests/unit/test_core_asset_rules.py
-uv run pytest tests/unit/test_core_asset_rules.py::test_unknown_asset_type_raises
+uv run pytest tests/unit/test_core_asset_rules.py::TestGetAssetRules::test_unknown_raises_key_error
 
 # 代码检查与格式化（提交前必须通过）
 uv run ruff check .
@@ -114,14 +114,14 @@ $QUANT_DATA_ROOT/
 │   ├── cn_fund_{basic,managers,nav,dividend,portfolio}/...          # 场外 .OF 与场内 LOF 公募基金
 │   └── cn_futures_{bars_daily,tick_l2,contract_specs,continuous}/...
 ├── factors/cn_stock_factors/{name}_v{version}/{year}.parquet + metadata.json   # 与 asset/ 同级
-├── raw/{source}/{asset_type}/{date}.parquet         # 原始落盘（保留 1 年）
-├── quarantine/{asset_type}/{date}.parquet           # 隔离区（T+30 清理）
+├── raw/{source}/{table}/{date}.parquet              # 原始落盘（保留 1 年）
+├── quarantine/{table}/{date}.parquet                # 隔离区（T+30 清理）
 ├── dqc/ · cross_check/ · manifest/                  # DQC 报告、交叉校验、落盘清单
 └── logs/runs/{jobs,backtests,live}.jsonl            # 运行记录（仓库根目录 logs/ 亦不入 Git）
 ```
 
 - **两层契约**：Parquet 为唯一持久化真相；DuckDB 持久化 `catalog.duckdb` 视图与统计缓存，不引入 ClickHouse。
-- **单目录单 Schema**：取消 `cn_reference/` 等混放目录及 `ext/` 顶层，所有资产表平铺于 `asset/{nation}_{asset_type}_{data_type}/`；旧短名（`bars_daily` 等 10 个）通过 `data/storage_schema.py::LEGACY_TO_CANONICAL` 透明兼容。
+- **单目录单 Schema**：取消 `cn_reference/` 等混放目录及 `ext/` 顶层，所有资产表平铺于 `asset/{nation}_{asset_class}_{data_type}/`；旧短名（`bars_daily` 等 10 个）通过 `data/storage_schema.py::LEGACY_TO_CANONICAL` 透明兼容。
 - **价格与复权**：表内仅存未复权价格与累计 `adjfactor`；前复权 `qfq = raw × adj / adj_latest`、后复权 `hfq = raw × adj` 均在读时派生，绝不落盘；分钟线与 Tick 表不冗余存 `adjfactor`。
 - **多源仲裁**：当前 4 个激活源为 `tushare`、`qdc`（QDCData）、`amazingdata`、`straightflush`（同花顺扶摇）；`akshare` 已移出默认优先级列表（仅作历史兼容/测试）。`config/source_priority.yaml` 指定每张表唯一主写源，备源仅交叉校验与补缺（`source_tag` 写入 Parquet metadata）。
 

@@ -198,7 +198,7 @@ def check_price_limit(order: dict, prev_close: float, config: dict) -> str | Non
 def _asset_rules_for(ticker: str) -> dict:
     """按标的前缀查询资产规则，未知前缀直接报错。"""
     prefix = ticker[:2]
-    asset_type = ASSET_PREFIXES.get(prefix)
-    if asset_type is None:
+    asset_class = ASSET_PREFIXES.get(prefix)
+    if asset_class is None:
         raise ValueError(f"unknown ticker prefix {prefix!r} in {ticker!r}")
-    return get_asset_rules(asset_type.value)
+    return get_asset_rules(asset_class)
