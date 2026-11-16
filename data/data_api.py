@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator, Literal
 
@@ -19,7 +21,7 @@ from data.storage_schema import TABLE_ALIASES
 
 logger = logging.getLogger(__name__)
 
-# --- 表族映射 ---
+# --- 表族与参数枚举 ---
 #: 存储表族选择器字面量类型（仅用于 ``data_api`` 路由底层行情表，非交易规则资产类型）。
 TableFamily = Literal[
     "equity",
@@ -33,6 +35,37 @@ TableFamily = Literal[
     "cn_futures",
     "cn_continuous",
 ]
+
+#: 标准化行情频率字面量类型。
+BarFreq = Literal["daily", "minute", "5min", "60min"]
+
+#: 复权口径字面量类型。
+AdjustMode = Literal["none", "forward", "backward"]
+
+
+@dataclass(frozen=True)
+class BarsMeta:
+    """``load_bars`` / ``load_bars_result`` 返回的行情口径与数据血缘元数据。"""
+
+    table: str
+    table_family: str
+    freq: str
+    adjust: str
+    start: str
+    end: str
+    as_of: str | None
+    rows: int
+    tickers: int
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class BarsResult:
+    """携带结构化元数据 :class:`BarsMeta` 的 ``load_bars_result`` 返回容器。"""
+
+    data: pd.DataFrame
+    meta: BarsMeta
+
 
 TABLE_MAP: dict[tuple[TableFamily, str], str] = {
     ("equity", "daily"): "bars_daily",
@@ -101,7 +134,7 @@ def _base_freq(freq: str) -> str:
         ) from None
 
 
-def _resolve_table(table_family: TableFamily | str, freq: str) -> str:
+def _resolve_table(table_family: TableFamily | str, freq: BarFreq | str) -> str:
     """解析 (*table_family*, *freq*) 对应的存储表名。"""
     base = _base_freq(freq)
     key = (table_family, base)
@@ -171,7 +204,7 @@ class DataAPI:
             # 部分 DuckDB 版本不支持 statement_timeout，仍保留 [COST] 耗时日志
             logger.debug("statement_timeout not supported in this DuckDB build")
 
-    # --- 视图注册 ---
+    # --- 视图注册与表血缘 ---
     def register_views(self) -> None:
         """为 ``data_root`` 下每个含 ``*.parquet`` 的直接子目录创建或替换视图（启用 ``union_by_name``，关闭 Hive 分区）。"""
         if not self._root.exists():
@@ -204,6 +237,43 @@ class DataAPI:
                     f"CREATE OR REPLACE VIEW {alias_name} AS SELECT * FROM {view_name}"
                 )
         self._views_registered = True
+
+    def _resolve_table_dir(self, table: str) -> Path | None:
+        """定位 *table*（或其别名）下含 Parquet 文件的实际目录。"""
+        if not self._root.exists():
+            return None
+        for candidate_name in (table, TABLE_ALIASES.get(table)):
+            if not candidate_name:
+                continue
+            candidate = self._root / candidate_name
+            if candidate.is_dir() and any(candidate.glob("*.parquet")):
+                return candidate
+        return None
+
+    def read_source_tags(self, table: str) -> str | None:
+        """读取 *table* 底层 Parquet 文件元数据中去重后的 ``source_tag``（无记录返回 ``None``）。"""
+        table_dir = self._resolve_table_dir(table)
+        if table_dir is None:
+            return None
+        glob = _sql_literal(str(table_dir / "*.parquet"))
+        sql = (
+            f"SELECT DISTINCT value FROM parquet_kv_metadata({glob}) "
+            "WHERE CAST(key AS VARCHAR) = 'source_tag'"
+        )
+        rows, _ = self._run(sql, lambda c: c.fetchall())
+        tags = sorted(
+            {
+                (
+                    bytes(val).decode("utf-8", errors="replace")
+                    if isinstance(val, (bytes, bytearray, memoryview))
+                    else str(val)
+                ).strip()
+                for (val,) in rows
+                if val is not None
+            }
+            - {""}
+        )
+        return ",".join(tags) if tags else None
 
     # --- 查询执行 ---
     def _run(self, sql: str, fetch, profile: bool = False):
@@ -466,18 +536,67 @@ def _apply_adjustment(
     return m.drop(columns=drop_cols)
 
 
+def _format_as_of(df: pd.DataFrame, freq: str) -> str | None:
+    """提取结果集最大时间截断点并格式化为 ISO 字符串；空表返回 ``None``。"""
+    if df.empty or "date" not in df.columns:
+        return None
+    max_val = df["date"].max()
+    if pd.isna(max_val):
+        return None
+    if isinstance(max_val, (pd.Timestamp, datetime)):
+        return (
+            max_val.date().isoformat()
+            if freq == "daily"
+            else max_val.isoformat(timespec="seconds")
+        )
+    if isinstance(max_val, date):
+        return max_val.isoformat()
+    return str(max_val)
+
+
+def _build_bars_meta(
+    df: pd.DataFrame,
+    *,
+    table: str,
+    table_family: str,
+    freq: str,
+    adjust: str,
+    start: str,
+    end: str,
+    source: str | None,
+) -> BarsMeta:
+    """根据查询参数、结果集与 Parquet 元数据构建不可变 :class:`BarsMeta`。"""
+    tickers = (
+        int(df["ticker"].nunique()) if not df.empty and "ticker" in df.columns else 0
+    )
+    return BarsMeta(
+        table=table,
+        table_family=str(table_family),
+        freq=str(freq),
+        adjust=str(adjust),
+        start=start,
+        end=end,
+        as_of=_format_as_of(df, str(freq)),
+        rows=len(df),
+        tickers=tickers,
+        source=source,
+    )
+
+
 def load_bars(
     symbol: str | list[str] | None = None,
     start: str = _DEFAULT_START,
     end: str = _DEFAULT_END,
-    freq: str = "daily",
+    freq: BarFreq = "daily",
     fields: list[str] | None = None,
-    adjust: str = "none",
+    adjust: AdjustMode = "none",
     table_family: TableFamily | str = "equity",
     *,
     data_root: str | Path = _DEFAULT_DATA_ROOT,
 ) -> pd.DataFrame:
     """从存储层加载行情 Bar，按 ``(date, ticker)`` 升序返回标准列及可选 ``adjfactor``。
+
+    同时将 :class:`BarsMeta` 挂载到 ``df.attrs["meta"]``，以便在不破坏历史调用方的情况下核验复权口径与数据血缘。
 
     Parameters
     ----------
@@ -533,6 +652,8 @@ def load_bars(
         if adjust != "none" and not df.empty:
             df = _apply_adjustment(df, api, table, adjust)
 
+        source = api.read_source_tags(table)
+
     if drop_adj_after and "adjfactor" in df.columns:
         df = df.drop(columns=["adjfactor"])
 
@@ -545,16 +666,52 @@ def load_bars(
         df = df[[*ordered, *extras]]
         df = df.sort_values(["date", "ticker"]).reset_index(drop=True)
 
+    # 所有 DataFrame 变形完成后挂载元数据，防止中间切片/排序丢失 attrs
+    df.attrs["meta"] = _build_bars_meta(
+        df,
+        table=table,
+        table_family=table_family,
+        freq=freq,
+        adjust=adjust,
+        start=start,
+        end=end,
+        source=source,
+    )
     return df
+
+
+def load_bars_result(
+    symbol: str | list[str] | None = None,
+    start: str = _DEFAULT_START,
+    end: str = _DEFAULT_END,
+    freq: BarFreq = "daily",
+    fields: list[str] | None = None,
+    adjust: AdjustMode = "none",
+    table_family: TableFamily | str = "equity",
+    *,
+    data_root: str | Path = _DEFAULT_DATA_ROOT,
+) -> BarsResult:
+    """加载行情 Bar 并返回携带结构化 :class:`BarsMeta` 的 :class:`BarsResult`。"""
+    df = load_bars(
+        symbol=symbol,
+        start=start,
+        end=end,
+        freq=freq,
+        fields=fields,
+        adjust=adjust,
+        table_family=table_family,
+        data_root=data_root,
+    )
+    return BarsResult(data=df, meta=df.attrs["meta"])
 
 
 def load_bars_chunked(
     symbol: str | list[str] | None = None,
     start: str = _DEFAULT_START,
     end: str = _DEFAULT_END,
-    freq: str = "daily",
+    freq: BarFreq = "daily",
     fields: list[str] | None = None,
-    adjust: str = "none",
+    adjust: AdjustMode = "none",
     table_family: TableFamily | str = "equity",
     chunk_by: str = "month",
     *,
@@ -582,8 +739,6 @@ def load_bars_chunked(
 
 def _date_chunks(start: str, end: str) -> list[tuple[str, str]]:
     """将 ``[start, end]`` 切分为自然月区间列表。"""
-    from datetime import date, timedelta
-
     s = date.fromisoformat(start)
     e = date.fromisoformat(end)
     chunks: list[tuple[str, str]] = []

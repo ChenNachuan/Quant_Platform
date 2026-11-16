@@ -16,8 +16,10 @@ T1 schema is exercised on the write path before the read path under test.
 from __future__ import annotations
 
 import time
+from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pandas as pd
 import pytest
@@ -26,9 +28,14 @@ from data.data_api import (
     ALPHALENS_PERIODS,
     ALPHALENS_QUANTILES,
     TABLE_MAP,
+    AdjustMode,
+    BarFreq,
+    BarsMeta,
+    BarsResult,
     DataAPI,
     load_bars,
     load_bars_chunked,
+    load_bars_result,
     to_alphalens_factor,
     to_alphalens_prices,
 )
@@ -857,3 +864,100 @@ class TestPerformance:
 
         assert len(df) == 5 * 20  # 5 ETFs × 20 days
         assert elapsed < 1.0, f"load_bars took {elapsed:.3f}s (budget: 1s)"
+
+
+# ---------------------------------------------------------------------------
+# BarFreq / AdjustMode enums & BarsMeta / BarsResult (DataMeta)
+# ---------------------------------------------------------------------------
+class TestBarsMetaAndResult:
+    def test_literal_enums_cover_contract_values(self):
+        assert set(get_args(BarFreq)) == {"daily", "minute", "5min", "60min"}
+        assert set(get_args(AdjustMode)) == {"none", "forward", "backward"}
+
+    def test_load_bars_attaches_bars_meta_on_attrs(self, asset_root):
+        df = load_bars(
+            symbol=["600519.SH", "000001.SZ"],
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="forward",
+            data_root=asset_root,
+        )
+        meta = df.attrs["meta"]
+        assert isinstance(meta, BarsMeta)
+        assert meta == BarsMeta(
+            table="bars_daily",
+            table_family="equity",
+            freq="daily",
+            adjust="forward",
+            start="2024-01-02",
+            end="2024-01-04",
+            as_of="2024-01-04",
+            rows=6,
+            tickers=2,
+            source=None,
+        )
+        with pytest.raises(FrozenInstanceError):
+            meta.adjust = "none"  # type: ignore[misc]
+
+    def test_load_bars_empty_window_attaches_zero_meta(self, asset_root):
+        df = load_bars(
+            start="2025-01-01",
+            end="2025-01-10",
+            data_root=asset_root,
+        )
+        assert df.empty
+        meta = df.attrs["meta"]
+        assert meta.rows == 0
+        assert meta.tickers == 0
+        assert meta.as_of is None
+        assert meta.table == "bars_daily"
+
+    def test_load_bars_result_intraday_meta(self, minute_root):
+        result = load_bars_result(
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="5min",
+            data_root=minute_root,
+        )
+        assert isinstance(result, BarsResult)
+        assert result.meta is result.data.attrs["meta"]
+        assert result.meta.table == "bars_minute"
+        assert result.meta.freq == "5min"
+        assert result.meta.rows == 1
+        assert result.meta.tickers == 1
+        assert result.meta.as_of == "2024-01-02T09:30:00"
+
+    def test_source_tag_read_single_multiple_and_aliased_dir(self, tmp_path):
+        root = tmp_path / "asset"
+        canonical_dir = root / "cn_stock_bars_daily"
+        canonical_dir.mkdir(parents=True)
+
+        d1, d2 = date(2024, 1, 2), date(2024, 1, 3)
+        write_parquet_atomic(
+            pd.DataFrame([_bars_daily_row("600519.SH", d1)]),
+            canonical_dir / "2024-01-02.parquet",
+            table="cn_stock_bars_daily",
+            source_tag="straightflush",
+        )
+        single = load_bars_result(
+            start="2024-01-02",
+            end="2024-01-03",
+            table_family="equity",
+            data_root=root,
+        )
+        assert single.meta.table == "bars_daily"
+        assert single.meta.source == "straightflush"
+
+        write_parquet_atomic(
+            pd.DataFrame([_bars_daily_row("600519.SH", d2)]),
+            canonical_dir / "2024-01-03.parquet",
+            table="cn_stock_bars_daily",
+            source_tag="akshare:backfill",
+        )
+        multi = load_bars_result(
+            start="2024-01-02",
+            end="2024-01-03",
+            table_family="equity",
+            data_root=root,
+        )
+        assert multi.meta.source == "akshare:backfill,straightflush"
