@@ -45,10 +45,10 @@
 
 - **凭证管理（红线 8）**：CLI 登录凭据由本机 `qdc-cli login` 持久化管理（不走 API Key）；如额外启用在线 HTTP REST 通道（`mode="http"`），API 密钥（`QDC_API_KEY`、`QDC_DEVICE`）与可选环境变量（`QDC_EMAIL`、`QDC_PASSWORD`）统一存放于本地 `config/.env`（已被 `.gitignore` 忽略），由 [`core.config.load_secrets()`](../../../core/config.py#L44-L57) 读取，**严禁在代码、文档、配置文件、配置快照或日志中明文写入真实邮箱、密码或 API Key**。
 - **适配器与落盘契约**：由 [`QdcAdapter`](../../../data/adapters/qdc_adapter.py) 与 [`qdc_normalizer`](../../../data/normalizers/qdc_normalizer.py) 提供接入：默认采用 **`qdc-cli` 模式**（自动读取 `qdc-cli config` 的 `download_root/QDCData/` 并按年懒加载 `qdc-cli get <sku> --years <YYYY>`，也可用 `QDC_DATA_DIR` / `local_dir` 直接指定本地目录，不消耗在线 API 行数额度），同时保留可选 `mode="http"` 通道（`/v1/query` Parquet 游标分页、`requests_per_second = 5.0`）；批量历史迁移落盘遵循绑定契约 [`QDC_ingestion_contract.md`](../../design/data/QDC_ingestion_contract.md)（`qdc-m1-v1`）清洗落盘至 `$QUANT_DATA_ROOT`（参见 [`storage_schema.md`](../../design/data/storage_schema.md) 与 [`config/settings.toml`](../../../config/settings.toml)）。
-- **三层存储结构**：
-  - **Schema 层**（`$QUANT_DATA_ROOT/asset/{nation}_{asset_type}_{data_type}/`）：通过 `pandera` 校验的标准化表（batch-1 覆盖 `bars_daily`、`fundamental`、`industry`、`corporate_actions` 等），并注册至 `$QUANT_DATA_ROOT/catalog.duckdb`。
-  - **Ext 层**（`$QUANT_DATA_ROOT/ext/<dataset>/<subtable>/<volume>.parquet`）：Schema 暂未容纳但须留痕的扩展源表（财务三表/指标、预期、评级、股本、ST/停复牌、回购/增减持/质押/解禁、指数成分等）。
-  - **Manifest 层**（`$QUANT_DATA_ROOT/manifest/<table>.json` 与 `ext_<dataset>_<subtable>.json`）：逐源分卷统计 `rows_in = rows_out + rejected` 与校验摘要供对账。
+- **落盘与质检结构（v2 现状 vs M1–M6 契约预留）**：
+  - **资产层（已实现，`$QUANT_DATA_ROOT/asset/{nation}_{asset_class}_{data_type}/`）**：v2 架构已取消独立 `ext/` 顶层，原扩展源表统一并入 `asset/` 下的 51 张规范表（经 `pandera` 校验并注册至 `$QUANT_DATA_ROOT/catalog.duckdb`）。
+  - **质检与隔离层（已实现）**：实际入库流水线由 [`data/dqc/engine.py`](../../../data/dqc/engine.py) 与 [`data/quarantine.py`](../../../data/quarantine.py) 输出 `dqc/` 报告、HARD 拒收明细隔离（`quarantine/{table}/{date}.parquet` + `.rejection.json`）与多源交叉校验结果（`cross_check/{table}/{date}.json`）。
+  - **Manifest 汇总层（`$QUANT_DATA_ROOT/manifest/<table>.json`，契约预留 / 代码尚未实现）**：[`QDC_ingestion_contract.md`](../../design/data/QDC_ingestion_contract.md) 中为未来 M2–M6 全量历史灌数设计的逐表对账统计视图（`rows_in = rows_out + rejected`）；实施时直接复用 DQC 拒收计数，而非独立质量系统。
 - **核心字段归一规则**：
   - **代码后缀转换**：QDC `symbol`（`.XSHG`/`.XSHE`/`.XBSE`）按 `XSHG → SH`、`XSHE → SZ`、`XBSE → BJ` 转为平台 `ticker`；裸 6 位代码按 [`core/asset_rules.py`](../../../core/asset_rules.py) 的 `PREFIX_RULES` 推导交易所，未映射前缀整行拒收并在 manifest 计数。
   - **时间与单位换算**：行情 `ts` 按 `Asia/Shanghai` 转为 `DATE` 并断言无 `NaT`（`crypto` 保留 `UTC`）；`cn_tick` 的 `volume` 为整数手须 `× 100` 转股；`cn_cb_*` 的 `volume` 为手（1 手 = 10 张）；`cn_tick_l2` 价格为万分之一元须 `÷ 10000` 转元。

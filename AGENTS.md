@@ -116,7 +116,7 @@ $QUANT_DATA_ROOT/
 ├── factors/cn_stock_factors/{name}_v{version}/{year}.parquet + metadata.json   # 与 asset/ 同级
 ├── raw/{source}/{table}/{date}.parquet              # 原始落盘（保留 1 年）
 ├── quarantine/{table}/{date}.parquet                # 隔离区（T+30 清理）
-├── dqc/ · cross_check/ · manifest/                  # DQC 报告、交叉校验、落盘清单
+├── dqc/ · cross_check/ · manifest/                  # DQC 报告、交叉校验、落盘清单（manifest/ 仅 QDC 契约预留，代码未实现）
 └── logs/runs/{jobs,backtests,live}.jsonl            # 运行记录（仓库根目录 logs/ 亦不入 Git）
 ```
 

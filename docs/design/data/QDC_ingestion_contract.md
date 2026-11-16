@@ -93,6 +93,10 @@ L/manifest/ext_<dataset>_<subtable>.json
 }
 ```
 
+> **与 DQC 引擎及 `quarantine/` 的关系（设计接缝说明）**：
+> - **实现状态**：截至 v2，本契约描述的 `manifest/`（以及历史过渡 `ext/` 顶层）**尚未在 Python 代码中实现**；现行入库流水线统一运行 [`data/dqc/engine.py`](../../../data/dqc/engine.py) 与 [`data/quarantine.py`](../../../data/quarantine.py)，真实落盘产物为 `$QUANT_DATA_ROOT/dqc/` 与 `$QUANT_DATA_ROOT/quarantine/{table}/`。
+> - **职责分工（明细 vs 汇总，而非两套质量系统）**：`manifest.rejections[]` 是后续实施 M2–M6 大规模 QDC 历史灌数时，对 DQC 拒收结果的**逐表逐分卷汇总视图**（只记录 `rows_in / rows_out / rejected` 计数与拒收原因桶，供 M6 对账）。被 HARD 拒收的数据帧与 `.rejection.json` 明细仍统一走 `quarantine/{table}/{date}.parquet`；实施 `manifest` 写入时直接复用 `ingest_with_dqc` 的 `BatchEvaluation` 与拒收计数，不另建独立质检/隔离机制。
+
 规则：
 
 - `volumes[]` 逐**源分卷**记 `rows_in / rows_out / rejected`，三者恒等 `rows_in = rows_out + rejected`。
@@ -129,7 +133,7 @@ L/manifest/ext_<dataset>_<subtable>.json
 
 **R3 整型转换。** `DOUBLE → int64` 前断言逐值整数；非整数**拒收**，不截断。适用于 `volume`、`total_shares`、`float_shares`。
 
-**R4 拒收不静默。** 任何拒收都进 manifest `rejections[]`，带 `reason`、行数、（可得时）样本键。禁止静默丢行。
+**R4 拒收不静默。** 任何拒收均需可审计记录（现行流水线落 `dqc/` 报告与 `quarantine/{table}/` 明细；实施 M2–M6 对账后同步汇总入 manifest `rejections[]`，带 `reason`、行数及样本键），禁止静默丢行。
 
 **R5 值域断言。** schema 的 `gt0/ge0/nullable/isin` 约束落盘前自检（pandera 读回兜底）；违反 → 拒收计数，**不改 schema、不改值**。
 

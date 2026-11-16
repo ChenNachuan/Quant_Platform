@@ -62,7 +62,7 @@ $QUANT_DATA_ROOT/
 ├── quarantine/{table}/{date}.parquet
 ├── dqc/
 ├── cross_check/
-└── manifest/
+└── manifest/                                   # QDC M1–M6 对账汇总预留目录（代码尚未实现；拒收明细走 quarantine/ 与 dqc/）
 ```
 
 分区策略：
