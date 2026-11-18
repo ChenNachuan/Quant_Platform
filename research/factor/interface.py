@@ -5,9 +5,10 @@
 - ``"factor:xxx"`` → 上游因子，从因子存储读取或上游计算
 - 其他前缀 → 显式抛出 ``ValueError``，禁止静默回退
 
-``depends_on()`` 是输入依赖的静态声明（非事件订阅）。``compute()`` 必须返回严格三列长表
-``DataFrame[date, ticker, {factor_name}]`` 的原始因子值；去极值、填充、标准化与中性化由
-``PostProcessor`` 在消费侧完成。元数据直接声明为类属性（代码即注册表）。
+``depends_on()`` 是输入依赖的静态声明（非事件订阅）。``compute()`` 默认返回严格三列长表
+``DataFrame[date, ticker, {factor_name}]`` 的原始因子值，声明了 ``output_columns`` 的多列因子
+返回 ``DataFrame[date, ticker, *output_columns]``；去极值、填充、标准化与中性化由 ``PostProcessor``
+在消费侧完成。元数据直接声明为类属性（代码即注册表）。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Iterable
 
 import pandas as pd
+from data.storage_schema import FACTOR_FREQUENCY_CHOICES
 
 # ---------------------------------------------------------------------------
 # 因子分类
@@ -35,6 +37,9 @@ DEFAULT_CATEGORY: str = "custom"
 
 #: 全部合法的 ``category`` 取值。
 VALID_CATEGORIES: frozenset[str] = frozenset(FACTOR_CATEGORIES) | {DEFAULT_CATEGORY}
+
+#: 合法的因子计算/存储频率枚举（来自 storage_schema；``"tick"`` 仅作契约占位）。
+FREQUENCY_CHOICES: tuple[str, ...] = FACTOR_FREQUENCY_CHOICES
 
 # ---------------------------------------------------------------------------
 # 依赖前缀契约
@@ -133,11 +138,28 @@ def extract_factor_meta(
 _OUTPUT_KEY_COLS: tuple[str, ...] = ("date", "ticker")
 
 
-def validate_output(factor_name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """校验 ``df`` 严格匹配三列长表契约 ``[date, ticker, {factor_name}]``，不符则抛出 ``ValueError``。"""
-    expected = [*_OUTPUT_KEY_COLS, factor_name]
+def resolved_output_columns(factor: Factor | type[Factor] | str) -> tuple[str, ...]:
+    """解析因子的输出值列名元组：``output_columns`` 非空时返回之，否则回退为 ``(factor.name,)``。"""
+    if isinstance(factor, str):
+        return (factor,)
+    cols = getattr(factor, "output_columns", ())
+    if cols:
+        return tuple(cols)
+    return (factor.name,)
+
+
+def validate_output(factor: Factor | str, df: pd.DataFrame) -> pd.DataFrame:
+    """校验 ``df`` 符合因子输出契约（前两列固定为 ``['date', 'ticker']``，其余列集合匹配声明输出列）。"""
+    value_cols = resolved_output_columns(factor)
+    expected_prefix = list(_OUTPUT_KEY_COLS)
+    expected_set = set(_OUTPUT_KEY_COLS) | set(value_cols)
     actual = list(df.columns)
-    if actual != expected:
+    if (
+        actual[:2] != expected_prefix
+        or len(actual) != len(expected_set)
+        or set(actual) != expected_set
+    ):
+        expected = [*_OUTPUT_KEY_COLS, *value_cols]
         raise ValueError(f"compute() must return columns {expected}, got {actual}")
     return df
 
@@ -163,8 +185,11 @@ class Factor(ABC):
     #: 因子类别，须属于 ``VALID_CATEGORIES``。
     category: str = DEFAULT_CATEGORY
 
-    #: 计算频率（如 ``"daily"``、``"minute"``）。
+    #: 计算频率，须属于 ``FREQUENCY_CHOICES``（``"tick"`` 仅作占位）。
     frequency: str = "daily"
+
+    #: 显式多列输出声明；为空元组时默认回退为单列 ``(name,)``。
+    output_columns: tuple[str, ...] = ()
 
     #: 适用的数据表资产类型（不可变元组，避免子类共享可变默认值）。
     asset_types: tuple[str, ...] = ("equity",)
@@ -198,6 +223,36 @@ class Factor(ABC):
                 f"expected one of {sorted(VALID_CATEGORIES)}"
             )
 
+        frequency = getattr(cls, "frequency", "daily")
+        if not isinstance(frequency, str) or frequency not in FREQUENCY_CHOICES:
+            raise ValueError(
+                f"invalid frequency {frequency!r} on {cls.__name__}; "
+                f"expected one of {FREQUENCY_CHOICES}"
+            )
+
+        output_columns = getattr(cls, "output_columns", ())
+        if not isinstance(output_columns, (tuple, list)):
+            raise ValueError(
+                f"output_columns on {cls.__name__} must be a tuple or list, "
+                f"got {type(output_columns).__name__}"
+            )
+        seen_cols: set[str] = set()
+        for col in output_columns:
+            if not isinstance(col, str) or not col.strip() or col != col.strip():
+                raise ValueError(
+                    f"invalid output column {col!r} on {cls.__name__}: "
+                    "expected non-empty string without leading/trailing whitespace"
+                )
+            if col in _OUTPUT_KEY_COLS:
+                raise ValueError(
+                    f"output_columns on {cls.__name__} cannot contain reserved column {col!r}"
+                )
+            if col in seen_cols:
+                raise ValueError(
+                    f"duplicate column {col!r} in output_columns on {cls.__name__}"
+                )
+            seen_cols.add(col)
+
     # -- 抽象 IO 契约 -------------------------------------------------------
 
     @abstractmethod
@@ -210,6 +265,7 @@ class Factor(ABC):
         """计算原始因子值。
 
         输入 ``data`` 为 ``depends_on()`` 各依赖名到对应 DataFrame 的映射；
-        输出必须为严格三列长表 ``[date, ticker, {factor_name}]``（原始未清洗值）。
+        输出必须包含前导键列 ``[date, ticker]`` 及 ``output_columns``（默认 ``[{factor_name}]``）
+        的原始未清洗值。
         """
         ...

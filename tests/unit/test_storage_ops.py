@@ -1330,6 +1330,55 @@ class TestBackupScript:
         assert "OK — counts match" in result.stdout
 
 
+class TestFactorMultiColAndMinuteAtomicWrite:
+    """Issue #87 rulings: atomic writes for multi-column & minute factors."""
+
+    def test_write_parquet_atomic_multi_column_minute_factor(self, tmp_path):
+        import pyarrow.parquet as pq
+
+        target = tmp_path / "2024-01.parquet"
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02 09:31:00", "2024-01-02 09:32:00"]),
+                "ticker": ["000001.SZ", "000001.SZ"],
+                "ofi_1m": [1.0, 2.0],
+                "ofi_5m": [3.0, 4.0],
+            }
+        )
+        write_parquet_atomic(
+            df,
+            target,
+            table="factor",
+            value_column=("ofi_1m", "ofi_5m"),
+            frequency="minute",
+            source_tag="factor_compute",
+            coerce_timestamps="us",
+            allow_truncated_timestamps=True,
+        )
+        schema = pq.read_schema(target)
+        assert str(schema.field("date").type) == "timestamp[us]"
+        back = pd.read_parquet(target)
+        assert list(back.columns) == ["date", "ticker", "ofi_1m", "ofi_5m"]
+        assert len(back) == 2
+
+    def test_write_parquet_atomic_tick_factor_raises(self, tmp_path):
+        df = pd.DataFrame(
+            {
+                "date": ["2024-01-02 09:31:00"],
+                "ticker": ["000001.SZ"],
+                "tick_f": [1.0],
+            }
+        )
+        with pytest.raises(NotImplementedError, match="placeholder"):
+            write_parquet_atomic(
+                df,
+                tmp_path / "2024-01.parquet",
+                table="factor",
+                value_column="tick_f",
+                frequency="tick",
+            )
+
+
 # ---------------------------------------------------------------------------
 # Monthly partitioning + atomic upsert (§47.14)
 # ---------------------------------------------------------------------------

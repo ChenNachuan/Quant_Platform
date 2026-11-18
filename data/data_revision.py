@@ -526,7 +526,11 @@ def mark_factors_stale(
 
     touched = {record.table}
     affected: list[str] = []
-    for meta_path in sorted(factors_dir.glob("*/v*/metadata.json")):
+    meta_paths = sorted(
+        set(factors_dir.glob("*/*/v*/metadata.json"))
+        | set(factors_dir.glob("*/v*/metadata.json"))
+    )
+    for meta_path in meta_paths:
         try:
             meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

@@ -164,13 +164,35 @@ def build_feature_matrix(
             name = spec.get("name")
             if not name:
                 raise ValueError(f"spec[{i}] source=factor requires 'name'")
-            df = load_factor(name, start, end, base_dir=factor_base_dir)
+            freq = spec.get("frequency")
+            if freq is not None and freq != "daily":
+                df = load_factor(
+                    name, start, end, base_dir=factor_base_dir, frequency=freq
+                )
+            else:
+                df = load_factor(name, start, end, base_dir=factor_base_dir)
             if df.empty:
                 raise ValueError(
                     f"factor {name!r} returned no data for [{start}, {end}]"
                 )
+            value_cols = [c for c in df.columns if c not in ("date", "ticker")]
+            target_col = spec.get("column")
+            if target_col is not None:
+                if target_col not in value_cols:
+                    raise ValueError(
+                        f"spec[{i}] column {target_col!r} not in factor {name!r} columns {value_cols}"
+                    )
+                src_col = target_col
+            elif name in value_cols:
+                src_col = name
+            elif len(value_cols) == 1:
+                src_col = value_cols[0]
+            else:
+                raise ValueError(
+                    f"spec[{i}] factor {name!r} has multiple columns {value_cols}; specify 'column'"
+                )
             col_name = f"feat_{i}"
-            df = df.rename(columns={name: col_name})
+            df = df.rename(columns={src_col: col_name})
             if transform and transform != "none":
                 df[col_name] = transform_bars(df, col_name, transform)
             frames.append(df[["date", "ticker", col_name]])

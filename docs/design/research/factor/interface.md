@@ -7,7 +7,7 @@
 因子的抽象定义与 IO 契约：`Factor` ABC + `depends_on()` 依赖声明 + `compute()` 统一输出 + `validate_output()` 严格契约校验。只定义「一个因子是什么」；计算调度在 [runtime.md](runtime.md)，落盘在 [storage.md](storage.md)，评价在 [evaluation.md](evaluation.md)，治理在 [governance.md](governance.md)，后处理在 [post_processor.md](../post_processor.md)。
 
 - 输入：`data: dict[str, pd.DataFrame]` —— `depends_on()` 声明的每个依赖名映射到对应 DataFrame（裸表名经 `load_bars()` 加载，`"factor:xxx"` 经 `FactorDAG` 传入）。
-- 输出：严格三列长表 `DataFrame[date, ticker, {factor_name}]` 的**原始因子值**（去极值/填充/标准化/中性化由消费侧 `PostProcessor` 完成）。
+- 输出：前导键列固定为 `["date", "ticker"]`，默认三列长表 `DataFrame[date, ticker, {factor_name}]`；若声明 `output_columns` 则为 `DataFrame[date, ticker, *output_columns]` 的**原始因子值**（去极值/填充/标准化/中性化由消费侧 `PostProcessor` 完成）。
 - 不属于本模块：EventBrick / UFormula / DataPlugin（不引入外部公式引擎或 C++ 数据插件）。
 
 ## 接口签名
@@ -15,20 +15,24 @@
 ```python
 FACTOR_CATEGORIES: tuple[str, ...] = ("time_series", "cross_section", "event", "alternative")
 DEFAULT_CATEGORY: str = "custom"
+FREQUENCY_CHOICES: tuple[str, ...] = ("daily", "minute", "tick")  # "tick" 仅作契约占位
 FACTOR_DEP_PREFIX: str = "factor:"
 
 def parse_dependency(dep: str) -> tuple[str, str]: ...
     # 裸表名 → ("table", name)；"factor:xxx" → ("factor", "xxx")；未知前缀/空值抛 ValueError
 def factor_meta(cls: type) -> dict[str, Any]: ...
 def extract_factor_meta(factors: Iterable[type] | None = None) -> list[dict[str, Any]]: ...
-def validate_output(factor_name: str, df: pd.DataFrame) -> pd.DataFrame: ...
-    # 严格校验列序等于 ["date", "ticker", factor_name]
+def resolved_output_columns(factor: Factor | type[Factor] | str) -> tuple[str, ...]: ...
+    # output_columns 非空时返回之，否则回退为 (factor.name,)
+def validate_output(factor: Factor | str, df: pd.DataFrame) -> pd.DataFrame: ...
+    # 校验前两列固定为 ["date", "ticker"]，值列集合等于 resolved_output_columns(factor)
 
 class Factor(ABC):
     name: str                                  # {type}_{semantic}_{params} 全小写 snake_case
     description: str = ""
     category: str = DEFAULT_CATEGORY           # 须属于 VALID_CATEGORIES
-    frequency: str = "daily"
+    frequency: str = "daily"                   # 须属于 FREQUENCY_CHOICES
+    output_columns: tuple[str, ...] = ()       # 为空时回退为 (name,)；禁止 "date"/"ticker"/重复列
     asset_types: tuple[str, ...] = ("equity",) # 不可变元组，避免子类共享可变默认值
     version: str = "1.0"                       # compute() 逻辑变更时递增
 
@@ -44,7 +48,7 @@ class Factor(ABC):
 | 写法 | 含义 |
 |---|---|
 | `"bars_daily"`（无冒号裸表名） | 原始数据表，经 `DataAPI` / `load_bars()` 加载 |
-| `"factor:momentum_20d"` | 上游因子，从因子存储读取或由 `FactorDAG` 上游计算 |
+| `"factor:momentum_20d"` | 上游因子全量宽表 `DataFrame[date, ticker, *output_columns]`（不支持 `"factor:foo.col"` 列投影语法） |
 
 四类基础因子（`FACTOR_CATEGORIES`）：`time_series`（单标的时序运算）/ `cross_section`（截面排名、中性化）/ `event`（财报、解禁等事件表输入）/ `alternative`（情绪、资金流等另类数据）。
 
@@ -64,6 +68,6 @@ class Factor(ABC):
 详见 [research/factor/interface.py](../../../../research/factor/interface.py)。
 
 核心约定：
-- `__init_subclass__` 读取 `cls.__dict__.get("name")`（防止误继承父类标识），强制匹配 `{type}_{semantic}_{params}` 正则 `_NAME_RE` 与合法 `category`。
+- `__init_subclass__` 读取 `cls.__dict__.get("name")`（防止误继承父类标识），强制校验 `{type}_{semantic}_{params}` 正则 `_NAME_RE`、合法 `category`、合法 `frequency`（`FREQUENCY_CHOICES`）以及 `output_columns`（非空字符串、无空白、非 `"date"`/`"ticker"`、无重复）。
 - `parse_dependency` 对未识别前缀显式抛出 `ValueError`，禁止静默回退。
-- `validate_output` 校验精确三列 `["date", "ticker", factor_name]`，后续若放宽多列宽表与分频率根目录的演进方案见仓库 Issue #87。
+- `validate_output` 校验前两列固定为 `["date", "ticker"]` 且其余值列集合等于 `resolved_output_columns(factor)`，保留零改单列因子与多列宽表因子双兼容。

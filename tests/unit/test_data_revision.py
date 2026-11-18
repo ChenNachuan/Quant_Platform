@@ -994,8 +994,14 @@ class TestForeignOverrideFields:
 class TestStaleSinceKeepsEarliest:
     """find.6 — a later correction must not window out an earlier staleness."""
 
-    def _mark(self, root: Path, stale_since, record) -> str:
-        out = root / "factors" / "mom_20d" / "v1.0"
+    def _mark(
+        self, root: Path, stale_since, record, *, freq: str | None = "daily"
+    ) -> str:
+        out = (
+            root / "factors" / freq / "mom_20d" / "v1.0"
+            if freq
+            else root / "factors" / "mom_20d" / "v1.0"
+        )
         out.mkdir(parents=True)
         meta = {"factor_name": "mom_20d", "depends_on": ["bars_daily"]}
         if stale_since is not None:
@@ -1024,4 +1030,10 @@ class TestStaleSinceKeepsEarliest:
 
     def test_no_prior_marker_is_set_from_the_record(self, tmp_path):
         fresh = self._mark(tmp_path, None, self._record_on(date(2024, 6, 14)))
+        assert fresh == "2024-06-14"
+
+    def test_legacy_unprefixed_factor_dir_still_marked(self, tmp_path):
+        fresh = self._mark(
+            tmp_path, None, self._record_on(date(2024, 6, 14)), freq=None
+        )
         assert fresh == "2024-06-14"

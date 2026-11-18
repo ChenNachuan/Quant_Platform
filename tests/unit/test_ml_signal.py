@@ -456,6 +456,56 @@ class TestBuildFeatureMatrix:
         with pytest.raises(ValueError, match="no data"):
             build_feature_matrix(specs, start="2024-01-02", end="2024-01-04")
 
+    def test_multi_column_factor_and_frequency_forwarding(self, monkeypatch):
+        import datetime
+
+        seen_kwargs: list[dict] = []
+        factor_df = pd.DataFrame(
+            {
+                "date": [datetime.datetime(2024, 1, 2, 9, 31)],
+                "ticker": ["A"],
+                "ofi_1m": [0.25],
+                "ofi_5m": [0.75],
+            }
+        )
+
+        def mock_load_factor(name, start, end, version="1.0", base_dir="", **kwargs):
+            seen_kwargs.append({"name": name, **kwargs})
+            return factor_df.copy()
+
+        monkeypatch.setattr("research.factor.storage.load_factor", mock_load_factor)
+
+        # Multi-column factor without 'column' must raise
+        with pytest.raises(ValueError, match="multiple columns"):
+            build_feature_matrix(
+                [
+                    {
+                        "source": "factor",
+                        "name": "multi_ofi",
+                        "frequency": "minute",
+                        "transform": "none",
+                    }
+                ],
+                start="2024-01-02",
+                end="2024-01-02",
+            )
+
+        res = build_feature_matrix(
+            [
+                {
+                    "source": "factor",
+                    "name": "multi_ofi",
+                    "column": "ofi_5m",
+                    "frequency": "minute",
+                    "transform": "none",
+                }
+            ],
+            start="2024-01-02",
+            end="2024-01-02",
+        )
+        assert seen_kwargs[-1] == {"name": "multi_ofi", "frequency": "minute"}
+        assert res["feat_0"].item() == pytest.approx(0.75)
+
 
 # ---------------------------------------------------------------------------
 # transform_bars (ac-2)

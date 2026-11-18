@@ -62,7 +62,8 @@ class MLFactor(Factor, ABC):
 详见 [research/factor/runtime.py](../../../../research/factor/runtime.py)。
 
 核心约定：
-- 默认表加载器 `_default_table_loader` 反转 `data.data_api.TABLE_MAP`，将裸表名路由至 `load_bars(start, end, freq, table_family)`。
+- 默认表加载器 `_default_table_loader` 从 `data.data_api.TableFamily` 映射表族与频率，将裸表名路由至 `load_bars(start, end, freq, table_family)`。
+- `"factor:foo"` 依赖向 `compute(data)` 注入完整宽表 `DataFrame[date, ticker, *output_columns]`（不引入 `"factor:foo.col"` 列投影语法）；`compute_factor` 通过 `validate_output(factor, ...)` 校验多列与单列输出。
 - 所有装配输入与输出经 `_canonicalise` 按 `(date, ticker)` 稳定排序（`mergesort`），保证结果与缓存路径、执行顺序无关。
 - `compute_depends_hash` 对每个输入 DataFrame 的列 schema 与 `pd.util.hash_pandas_object` 做值敏感哈希，上游修正会立即触发缓存失效。
 - `MLFactor.compute()` 负责按 `model_path` 加载或触发 `train()` 后调用 `predict()`，同层内于常规因子并行池之后串行执行。

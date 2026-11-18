@@ -170,17 +170,18 @@ def normalize_missing_floats(df: pd.DataFrame, table: str) -> pd.DataFrame:
 _FIXED_FACTOR_COLUMNS = ("ticker", "date")
 
 
-def _resolve_schema(table: str, value_column: str | None = None):
-    """解析 *table* 对应的 Pandera Schema；factor 表支持指定 ``value_column``（禁止与保留列冲突）。"""
+def _resolve_schema(
+    table: str,
+    value_column: str | Sequence[str] | None = None,
+    *,
+    frequency: str = "daily",
+):
+    """解析 *table* 对应的 Pandera Schema；factor 表支持指定 ``value_column``（单/多列）与 ``frequency``。"""
     if table not in SCHEMA:
         raise KeyError(f"unknown table {table!r}; known: {sorted(SCHEMA)}")
-    if table == "factor" and value_column is not None:
-        if value_column in _FIXED_FACTOR_COLUMNS:
-            raise ValueError(
-                f"factor value_column {value_column!r} collides with a fixed "
-                f"column; factor_schema would silently overwrite it"
-            )
-        return factor_schema(value_column)
+    if table == "factor" and (value_column is not None or frequency != "daily"):
+        cols = value_column if value_column is not None else "value"
+        return factor_schema(cols, frequency=frequency)
     return SCHEMA[table]
 
 
@@ -236,7 +237,11 @@ def _write_frame_to_tmp(
     meta[b"source_tag"] = str(source_tag).encode("utf-8")
     meta[b"ingest_time"] = datetime.now().isoformat(timespec="seconds").encode("utf-8")
     table = table.replace_schema_metadata(meta)
-    pq.write_table(table, tmp, compression=kwargs.get("compression", "zstd"))
+    write_opts: dict[str, Any] = {"compression": kwargs.get("compression", "zstd")}
+    for opt in ("coerce_timestamps", "allow_truncated_timestamps"):
+        if opt in kwargs:
+            write_opts[opt] = kwargs[opt]
+    pq.write_table(table, tmp, **write_opts)
 
 
 # --- 原子写入（lock -> tmp -> rename） ---
@@ -245,7 +250,8 @@ def write_parquet_atomic(
     path: str | os.PathLike[str],
     *,
     table: str,
-    value_column: str | None = None,
+    value_column: str | Sequence[str] | None = None,
+    frequency: str = "daily",
     check_disk: bool = True,
     source_tag: str | None = None,
     **parquet_kwargs: Any,
@@ -257,7 +263,7 @@ def write_parquet_atomic(
     异常路径自动清理残留 ``.tmp``；factor 表可通过 ``value_column`` 指定值列名。
     """
     target = Path(path)
-    schema = _resolve_schema(table, value_column=value_column)
+    schema = _resolve_schema(table, value_column=value_column, frequency=frequency)
 
     # 按已解析 Schema 将浮点列中的 None 转为 NaN，避免全空列变成 object 类型
     prepared = _normalize_for_schema(df, schema)
@@ -314,7 +320,8 @@ def upsert_parquet_atomic(
     *,
     table: str,
     partition_dates: Sequence[date | datetime | str] | None = None,
-    value_column: str | None = None,
+    value_column: str | Sequence[str] | None = None,
+    frequency: str = "daily",
     check_disk: bool = True,
     source_tag: str | None = None,
     **parquet_kwargs: Any,
@@ -325,7 +332,7 @@ def upsert_parquet_atomic(
     按 ``(trade_date, ticker)`` 排序并经 Schema 校验后执行 ``tmp -> fsync -> os.replace`` 原子提交。
     """
     target = Path(path)
-    schema = _resolve_schema(table, value_column=value_column)
+    schema = _resolve_schema(table, value_column=value_column, frequency=frequency)
     prepared = _normalize_for_schema(df, schema)
     validated = schema.validate(prepared)
 

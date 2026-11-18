@@ -23,10 +23,12 @@ from research.factor.governance import (
     transition_lifecycle,
 )
 from research.factor.interface import (
+    FREQUENCY_CHOICES,
     Factor,
     extract_factor_meta,
     factor_meta,
     parse_dependency,
+    resolved_output_columns,
     validate_output,
 )
 from research.factor.runtime import (
@@ -51,6 +53,7 @@ __all__ = [
     "EXIT_IC_THRESHOLD",
     "EvalResult",
     "Factor",
+    "FREQUENCY_CHOICES",
     "FactorDAG",
     "FactorPipeline",
     "GATE_IC_MIN",
@@ -75,6 +78,7 @@ __all__ = [
     "parse_dependency",
     "plot_factor_report",
     "redundancy_tier",
+    "resolved_output_columns",
     "save_factor_append",
     "save_factor_full",
     "transition_lifecycle",

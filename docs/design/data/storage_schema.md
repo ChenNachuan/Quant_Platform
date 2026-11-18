@@ -57,7 +57,7 @@ $QUANT_DATA_ROOT/
 │   ├── cn_futures_contract_specs/contract_specs.parquet
 │   └── cn_futures_continuous/{symbol}.parquet
 │
-├── factors/{nation}_{asset_class}_{data_type}/{name}_v{version}/{year}.parquet  # 与 asset/ 同级
+├── factors/{freq}/{name}/v{version}/{partition}.parquet  # 与 asset/ 同级（daily={year}，minute={YYYY-MM}，tick 占位）
 ├── raw/{source}/{table}/{date}.parquet
 ├── quarantine/{table}/{date}.parquet
 ├── dqc/
@@ -70,7 +70,7 @@ $QUANT_DATA_ROOT/
 - **日频小截面表**（`{month}.parquet`）：按自然月一文件 `YYYY-MM.parquet`（按 `trade_date` / `nav_date` 原子合并写入，避免 <1MB 碎文件）。
 - **低频财报 / 持仓 / 权重 / 公司事件流水**（`{year}.parquet`）：按年分区 `YYYY.parquet`。
 - **静态主表 / 全量小事件表**：单表全量一文件（或 `cn_calendar` 按 `{exchange}.parquet`、连续合约按 `{symbol}.parquet`）。
-- **因子**：`factors/cn_stock_factors/{name}_v{version}/{year}.parquet` 年分区 + `metadata.json`。
+- **因子**：`factors/{freq}/{name}/v{version}/{partition}.parquet` + `metadata.json`（`daily` 年分区 `{year}.parquet`、`minute` 月分区 `{YYYY-MM}.parquet`、`tick` 仅枚举/路径占位）。
 
 ## 52 张表总览
 
@@ -187,7 +187,7 @@ $QUANT_DATA_ROOT/
 | `cn_futures_tick_l2` | `asset/cn_futures_tick_l2/{date}.parquet` | 日 | 28 列：5 档盘口（20 列）+ 8 基础列；PK(`ticker`, `trade_date`, `datetime`) |
 | `cn_futures_contract_specs` | `asset/cn_futures_contract_specs/contract_specs.parquet` | 全量 | 12 列：乘数、最小变动价位、交割月、限价与保证金率；PK(`ticker`) |
 | `cn_futures_continuous` | `asset/cn_futures_continuous/{symbol}.parquet` | 按品种 | 11 列：主连行情 + `dominant_contract` + 换月累积 `adjfactor`；无 `close_adj`；PK(`trade_date`) |
-| `factor` | `factors/cn_stock_factors/{name}_v{version}/{year}.parquet` | 年 | 3 列：`ticker`/`date`/`{name}(Y)`；版本目录 + `metadata.json`，无 `quality_flag` |
+| `factor` | `factors/{freq}/{name}/v{version}/{partition}.parquet` | 按频率（日=年，分=月） | `date` + `ticker` + `*output_columns`（空元组回落 `{name}`）；`daily` 为 `date32`，`minute` 为 `timestamp[us]`，`tick` 占位；含 `metadata.json`，无 `quality_flag` |
 
 ## 通用约定
 

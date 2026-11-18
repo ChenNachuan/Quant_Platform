@@ -114,13 +114,17 @@ def frame(rows):
     return pd.DataFrame(rows, columns=["date", "ticker", "mom_20d"])
 
 
-def year_path(base: Path, name: str, version: str, year: str) -> Path:
-    return base / name / f"v{version}" / f"{year}.parquet"
+def year_path(
+    base: Path, name: str, version: str, year: str, frequency: str = "daily"
+) -> Path:
+    return base / frequency / name / f"v{version}" / f"{year}.parquet"
 
 
-def read_meta(base: Path, name: str, version: str) -> dict:
+def read_meta(base: Path, name: str, version: str, frequency: str = "daily") -> dict:
     return json.loads(
-        (base / name / f"v{version}" / "metadata.json").read_text(encoding="utf-8")
+        (base / frequency / name / f"v{version}" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
     )
 
 
@@ -179,7 +183,7 @@ class TestSaveFactorAppend:
 
         save_factor_append(factor, result, base_dir=str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert sorted(p.name for p in out.glob("*.parquet")) == [
             "2019.parquet",
             "2020.parquet",
@@ -251,7 +255,7 @@ class TestSaveFactorFull:
         save_factor_full(factor, wide, base_dir=str(tmp_path))
         save_factor_full(factor, narrow, base_dir=str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         # 2019/2021 stale files are gone — the directory is exactly `narrow`
         assert sorted(p.name for p in out.glob("*.parquet")) == ["2020.parquet"]
         stored = pd.read_parquet(out / "2020.parquet")
@@ -318,7 +322,7 @@ class TestSaveFactorFull:
         save_factor_full(factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path))
         save_factor_full(factor, frame([]), str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert list(out.glob("*.parquet")) == []
         assert read_meta(tmp_path, "mom_20d", "1.0")["row_count"] == 0
 
@@ -346,7 +350,7 @@ class TestRejectedWriteLeavesNoDirectory:
         with pytest.raises(ValueError, match="columns"):
             save(factor, bad, base_dir=str(tmp_path))
 
-        assert not (tmp_path / "mom_20d" / "v1.0").exists()
+        assert not (tmp_path / "daily" / "mom_20d" / "v1.0").exists()
         with pytest.raises(FileNotFoundError):
             load_factor("mom_20d", "20200101", "20201231", base_dir=str(tmp_path))
 
@@ -408,7 +412,7 @@ class TestDateContract:
         with pytest.raises(Exception):
             save(factor, result, base_dir=str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert not out.exists() or not list(out.glob("*.parquet"))
 
     def test_unparseable_date_is_rejected(self, tmp_path):
@@ -421,8 +425,8 @@ class TestDateContract:
         with pytest.raises(Exception):
             save_factor_full(factor, result, base_dir=str(tmp_path))
 
-        assert not (tmp_path / "mom_20d" / "v1.0").exists() or not list(
-            (tmp_path / "mom_20d" / "v1.0").glob("*.parquet")
+        assert not (tmp_path / "daily" / "mom_20d" / "v1.0").exists() or not list(
+            (tmp_path / "daily" / "mom_20d" / "v1.0").glob("*.parquet")
         )
 
 
@@ -446,7 +450,7 @@ class TestYearPartition:
 
         save_factor_full(factor, result, base_dir=str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert sorted(p.name for p in out.glob("*.parquet")) == ["2024.parquet"]
         assert on_disk_dates(tmp_path, "mom_20d", "1.0", "2024") == [
             dt.date(2024, 12, 31)
@@ -465,7 +469,7 @@ class TestYearPartition:
 
         save_factor_full(factor, result, base_dir=str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert sorted(p.name for p in out.glob("*.parquet")) == [
             "2019.parquet",
             "2020.parquet",
@@ -485,7 +489,7 @@ class TestYearPartition:
 
         save_factor_append(factor, result, base_dir=str(tmp_path))
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert sorted(p.name for p in out.glob("*.parquet")) == [
             "2024.parquet",
             "2025.parquet",
@@ -535,7 +539,7 @@ class TestCrashSafeWrites:
             ),
             str(tmp_path),
         )
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         before = {p.name: p.read_bytes() for p in out.glob("*.parquet")}
         assert sorted(before) == ["2019.parquet", "2020.parquet", "2021.parquet"]
 
@@ -583,7 +587,7 @@ class TestCrashSafeWrites:
             factor, frame([("20200102", "000001.SZ", 20.0)]), str(tmp_path)
         )
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert sorted(p.name for p in out.glob("*.parquet")) == ["2020.parquet"]
 
     def test_failed_write_leaves_no_tmp_and_no_partial_target(
@@ -601,7 +605,7 @@ class TestCrashSafeWrites:
                 factor, frame([("20200102", "000001.SZ", 1.0)]), str(tmp_path)
             )
 
-        out = tmp_path / "mom_20d" / "v1.0"
+        out = tmp_path / "daily" / "mom_20d" / "v1.0"
         assert not list(out.glob("*.tmp"))
         assert not list(out.glob("*.parquet"))
 
@@ -706,7 +710,7 @@ class TestMetadata:
             assert len(loaded) == 1
             assert loaded["mom_20d"].item() == 3.5
             assert (
-                tmp_path / "factors" / "mom_20d" / "v1.0" / "metadata.json"
+                tmp_path / "factors" / "daily" / "mom_20d" / "v1.0" / "metadata.json"
             ).is_file()
 
     def test_depends_hash_tracks_the_declaration(self, tmp_path):
@@ -893,4 +897,206 @@ class TestLoadFactorMatrix:
         with pytest.raises(FileNotFoundError):
             load_factor_matrix(
                 ["mom_20d"], "20200101", "20201231", "1.0", str(tmp_path)
+            )
+
+
+# ---------------------------------------------------------------------------
+# Multi-column output & frequency-partitioned storage (Issue #87)
+# ---------------------------------------------------------------------------
+
+
+class MultiOfiDaily(Factor):
+    name = "multi_ofi"
+    description = "Multi-column OFI"
+    category = "time_series"
+    frequency = "daily"
+    output_columns = ("ofi_1d", "ofi_5d")
+    version = "1.0"
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):  # pragma: no cover
+        raise NotImplementedError
+
+
+class MinuteMicro(Factor):
+    name = "min_micro"
+    description = "Minute microstructure factor"
+    category = "time_series"
+    frequency = "minute"
+    output_columns = ("micro_a", "micro_b")
+    version = "1.0"
+
+    def depends_on(self):
+        return ["bars_minute"]
+
+    def compute(self, data):  # pragma: no cover
+        raise NotImplementedError
+
+
+class TickPlaceholder(Factor):
+    name = "tick_micro"
+    frequency = "tick"
+
+    def depends_on(self):
+        return ["tick"]
+
+    def compute(self, data):  # pragma: no cover
+        raise NotImplementedError
+
+
+class TestMultiColumnAndFrequencyStorage:
+    def test_dir_template_derived_from_storage_schema(self):
+        from data.storage_schema import PARTITION_PATHS
+        from research.factor.storage import _FACTOR_DIR_TEMPLATE
+
+        assert PARTITION_PATHS["factor"].startswith("factors/")
+        assert _FACTOR_DIR_TEMPLATE == "{freq}/{name}/v{version}"
+
+    def test_multi_column_save_load_and_matrix_roundtrip(self, tmp_path):
+        multi = MultiOfiDaily()
+        mom = Mom20D()
+        df_multi = pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-03"],
+                "ticker": ["000001.SZ", "000002.SZ"],
+                "ofi_1d": [0.1, 0.2],
+                "ofi_5d": [1.1, 1.2],
+            }
+        )
+        save_factor_full(multi, df_multi, base_dir=str(tmp_path))
+        save_factor_append(
+            multi,
+            pd.DataFrame(
+                {
+                    "date": ["2024-01-03", "2024-01-04"],
+                    "ticker": ["000002.SZ", "000003.SZ"],
+                    "ofi_1d": [9.9, 0.3],
+                    "ofi_5d": [9.9, 1.3],
+                }
+            ),
+            base_dir=str(tmp_path),
+        )
+
+        meta = read_meta(tmp_path, "multi_ofi", "1.0")
+        assert meta["frequency"] == "daily"
+        assert meta["output_columns"] == ["ofi_1d", "ofi_5d"]
+        assert meta["row_count"] == 3
+
+        full = load_factor(
+            "multi_ofi", "2024-01-01", "2024-01-31", base_dir=str(tmp_path)
+        )
+        assert list(full.columns) == ["date", "ticker", "ofi_1d", "ofi_5d"]
+        assert len(full) == 3
+        assert full.loc[full["ticker"] == "000002.SZ", "ofi_1d"].item() == 0.2
+
+        sub = load_factor(
+            "multi_ofi",
+            "2024-01-01",
+            "2024-01-31",
+            base_dir=str(tmp_path),
+            columns=["ofi_5d"],
+        )
+        assert list(sub.columns) == ["date", "ticker", "ofi_5d"]
+
+        with pytest.raises(ValueError, match="does not contain"):
+            load_factor(
+                "multi_ofi",
+                "2024-01-01",
+                "2024-01-31",
+                base_dir=str(tmp_path),
+                columns=["missing"],
+            )
+
+        save_factor_full(
+            mom,
+            frame([("20240102", "000001.SZ", 5.0)]),
+            base_dir=str(tmp_path),
+        )
+        wide = load_factor_matrix(
+            ["mom_20d", "multi_ofi"], "2024-01-01", "2024-01-31", base_dir=str(tmp_path)
+        )
+        assert list(wide.columns) == ["date", "ticker", "mom_20d", "ofi_1d", "ofi_5d"]
+        assert len(wide) == 3
+
+    def test_minute_monthly_partitions_timestamp_us_and_bounds(self, tmp_path):
+        import pyarrow.parquet as pq
+
+        fac = MinuteMicro()
+        df = pd.DataFrame(
+            {
+                "date": [
+                    "2024-01-31 09:31:00",
+                    "2024-01-31 14:55:00",
+                    "2024-02-01 09:31:00",
+                ],
+                "ticker": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "micro_a": [1.0, 2.0, 3.0],
+                "micro_b": [10.0, 20.0, 30.0],
+            }
+        )
+        save_factor_full(fac, df, base_dir=str(tmp_path))
+
+        out = tmp_path / "minute" / "min_micro" / "v1.0"
+        assert sorted(p.name for p in out.glob("*.parquet")) == [
+            "2024-01.parquet",
+            "2024-02.parquet",
+        ]
+        schema = pq.read_schema(out / "2024-01.parquet")
+        assert "date" in schema.names
+        assert "datetime" not in schema.names
+        assert str(schema.field("date").type) == "timestamp[us]"
+
+        meta = read_meta(tmp_path, "min_micro", "1.0", frequency="minute")
+        assert meta["frequency"] == "minute"
+        assert meta["output_columns"] == ["micro_a", "micro_b"]
+
+        day_read = load_factor(
+            "min_micro",
+            "2024-01-31",
+            "2024-01-31",
+            base_dir=str(tmp_path),
+            frequency="minute",
+        )
+        assert len(day_read) == 2
+
+        sub_read = load_factor(
+            "min_micro",
+            "2024-01-31 10:00:00",
+            "2024-01-31 15:00:00",
+            base_dir=str(tmp_path),
+            frequency="minute",
+        )
+        assert len(sub_read) == 1
+        assert sub_read["micro_a"].item() == 2.0
+
+    def test_tick_storage_operations_raise_not_implemented(self, tmp_path):
+        fac = TickPlaceholder()
+        df = pd.DataFrame(
+            {
+                "date": ["2024-01-02 09:30:00.500000"],
+                "ticker": ["000001.SZ"],
+                "tick_micro": [1.0],
+            }
+        )
+        with pytest.raises(NotImplementedError, match="placeholder"):
+            save_factor_full(fac, df, base_dir=str(tmp_path))
+        with pytest.raises(NotImplementedError, match="placeholder"):
+            save_factor_append(fac, df, base_dir=str(tmp_path))
+        with pytest.raises(NotImplementedError, match="placeholder"):
+            load_factor(
+                "tick_micro",
+                "2024-01-01",
+                "2024-01-31",
+                base_dir=str(tmp_path),
+                frequency="tick",
+            )
+        with pytest.raises(NotImplementedError, match="placeholder"):
+            load_factor_matrix(
+                ["tick_micro"],
+                "2024-01-01",
+                "2024-01-31",
+                base_dir=str(tmp_path),
+                frequency="tick",
             )

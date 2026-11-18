@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -318,10 +318,15 @@ def diagnose_factor(df: pd.DataFrame, factor_name: str) -> dict[str, Any]:
 def plot_factor_report(
     factor_values: pd.DataFrame,
     returns: pd.DataFrame,
-    factor_name: str,
+    factor_name: str | Sequence[str],
     n_groups: int = N_QUANTILE_GROUPS,
 ) -> None:
     """生成 2×2 因子评估报告图（IC 序列、累计 IC、截面分布直方图、分位累计收益），保存至 ``research/reports/{factor_name}_tearsheet.png``。"""
+    if not isinstance(factor_name, str):
+        for col in factor_name:
+            plot_factor_report(factor_values, returns, col, n_groups=n_groups)
+        return
+
     import matplotlib.pyplot as plt
 
     merged = factor_values.merge(returns, on=["date", "ticker"])

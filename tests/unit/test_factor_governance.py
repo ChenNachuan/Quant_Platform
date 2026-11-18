@@ -546,6 +546,22 @@ class TestPlotFactorReport:
         assert out.exists()
         assert out.stat().st_size > 0
 
+    def test_creates_multiple_pngs_for_sequence(self, tmp_path, monkeypatch):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        monkeypatch.chdir(tmp_path)
+        fv, ret = self._make_data()
+        fv = fv.rename(columns={"test_factor": "alpha_1"})
+        fv["alpha_2"] = fv["alpha_1"] * -1.0
+
+        plot_factor_report(fv, ret, ["alpha_1", "alpha_2"])
+
+        out1 = tmp_path / "research" / "reports" / "alpha_1_tearsheet.png"
+        out2 = tmp_path / "research" / "reports" / "alpha_2_tearsheet.png"
+        assert out1.exists() and out1.stat().st_size > 0
+        assert out2.exists() and out2.stat().st_size > 0
+
 
 # ---------------------------------------------------------------------------
 # AC5 — TestMomentum20D: four paradigms

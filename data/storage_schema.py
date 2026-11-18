@@ -6,7 +6,7 @@
 - ``asset/``：47 张 A 股相关表（日历、股票核心与状态、指数/行业/权重、7 张 PIT 基本面表
   ``cn_stock_fundamental_*``、特色资金流/情绪/筹码、股东与资本事件、逐笔/L2、5 张独立 ``cn_etf_*``、
   5 张公募基金 ``cn_fund_*``）及 4 张期货表（``cn_futures_*``）。
-- ``factors/``：因子表（1 张，按因子与年份分区的长表）。
+- ``factors/``：因子表（1 张，按频率、因子名、版本号与时间分区的因子表）。
 
 结构与类型约定：
 - Schema 仅允许向后兼容增列（新列须同时设置 ``nullable=True`` 与 ``required=False``），``strict=True`` 拒绝未声明列。
@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -1184,23 +1185,58 @@ CONTINUOUS_SCHEMA = _table(
 )
 
 _FACTOR_RESERVED_COLUMNS = frozenset({"ticker", "date"})
+FACTOR_FREQUENCY_CHOICES: tuple[str, ...] = ("daily", "minute", "tick")
 
 
-def factor_schema(value_column: str = "value") -> DataFrameSchema:
-    """单因子长表 Schema（``ticker, date, {name}``）。"""
-    if value_column in _FACTOR_RESERVED_COLUMNS:
-        raise ValueError(
-            f"value_column {value_column!r} collides with a fixed column name; "
-            f"reserved names are {sorted(_FACTOR_RESERVED_COLUMNS)}"
+def factor_schema(
+    value_columns: str | Sequence[str] = "value",
+    *,
+    frequency: str = "daily",
+) -> DataFrameSchema:
+    """因子存储表 Schema（``ticker, date, {col1}, ...``）。
+
+    ``daily`` 使用 ``pa.Date``（Parquet ``date32``），``minute`` 使用 ``pa.DateTime``
+    （Parquet ``timestamp[us]``）；``tick`` 仅作契约占位并抛出 ``NotImplementedError``。
+    """
+    if frequency == "tick":
+        raise NotImplementedError(
+            "tick-frequency factor storage schema is reserved as a placeholder only"
         )
-    return _table(
-        {
-            "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
-            "date": _date_column(),
-            value_column: Column(float, nullable=True),
-        },
-        unique=["ticker", "date"],
-    )
+    if frequency not in FACTOR_FREQUENCY_CHOICES:
+        raise ValueError(
+            f"unsupported factor frequency {frequency!r}; expected one of {FACTOR_FREQUENCY_CHOICES}"
+        )
+
+    if isinstance(value_columns, str):
+        cols = (value_columns,)
+    else:
+        cols = tuple(value_columns)
+    if not cols:
+        raise ValueError("value_columns must not be empty")
+
+    seen: set[str] = set()
+    for col in cols:
+        if not isinstance(col, str) or not col:
+            raise ValueError(
+                f"factor value column must be a non-empty str, got {col!r}"
+            )
+        if col in _FACTOR_RESERVED_COLUMNS:
+            raise ValueError(
+                f"value_column {col!r} collides with a fixed column name; "
+                f"reserved names are {sorted(_FACTOR_RESERVED_COLUMNS)}"
+            )
+        if col in seen:
+            raise ValueError(f"duplicate factor value column {col!r}")
+        seen.add(col)
+
+    date_col = _date_column() if frequency == "daily" else _datetime_column()
+    columns: dict[str, Column] = {
+        "ticker": Column(str, checks=_equity_ticker_check, nullable=False),
+        "date": date_col,
+    }
+    for col in cols:
+        columns[col] = Column(float, nullable=True)
+    return _table(columns, unique=["ticker", "date"])
 
 
 FACTOR_SCHEMA = factor_schema()
@@ -1269,7 +1305,7 @@ PARTITION_PATHS: dict[str, str] = _AliasedDict(
         "cn_futures_tick_l2": "asset/cn_futures_tick_l2/{date}.parquet",
         "cn_futures_contract_specs": "asset/cn_futures_contract_specs/contract_specs.parquet",
         "cn_futures_continuous": "asset/cn_futures_continuous/{symbol}.parquet",
-        "factor": "factors/cn_stock_factors/{name}_v{version}/{year}.parquet",
+        "factor": "factors/{freq}/{name}/v{version}/{partition}.parquet",
     }
 )
 

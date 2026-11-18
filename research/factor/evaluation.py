@@ -26,7 +26,7 @@ from typing import Any, Callable, Sequence
 
 import pandas as pd
 
-from research.factor.storage import _safe_component, save_factor_full
+from research.factor.storage import _safe_component, _version_dir, save_factor_full
 from research.post_processor import PIPELINE_STOCK_EVAL, PostProcessor, neutralize
 from core.config import DATA_ROOT
 
@@ -178,6 +178,15 @@ def _expr_columns(expr: str) -> tuple[str, ...]:
 _NEUTRALIZE_COLS: tuple[str, ...] = ("industry", "log_market_cap")
 
 
+def _value_cols(df: pd.DataFrame) -> list[str]:
+    cols = [c for c in df.columns if c not in ("date", "ticker")]
+    if not cols:
+        raise ValueError(
+            f"expected at least one value column besides date/ticker, got {list(df.columns)!r}"
+        )
+    return cols
+
+
 def _value_col(df: pd.DataFrame) -> str:
     cols = [c for c in df.columns if c not in ("date", "ticker")]
     if len(cols) != 1:
@@ -185,6 +194,16 @@ def _value_col(df: pd.DataFrame) -> str:
             f"expected exactly one value column besides date/ticker, got {cols!r}"
         )
     return cols[0]
+
+
+def _factor_columns(df: pd.DataFrame) -> list[str]:
+    """提取全部因子列名（忽略中性化元数据列）。"""
+    cols = [c for c in df.columns if c not in ("date", "ticker", *_NEUTRALIZE_COLS)]
+    if not cols:
+        raise ValueError(
+            f"expected at least one factor column, got {list(df.columns)!r}"
+        )
+    return cols
 
 
 def _factor_column(df: pd.DataFrame) -> str:
@@ -405,6 +424,7 @@ class EvalResult:
     quantile_returns: pd.DataFrame
     turnover: pd.DataFrame
     report_path: str | None
+    column_results: dict[str, "EvalResult"] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -415,13 +435,22 @@ class EvalResult:
 class _FactorRecord:
     """适配 ``factor_storage`` 接口的轻量因子元信息对象。"""
 
-    def __init__(self, name: str, version: str, depends_on: Sequence[str]) -> None:
+    def __init__(
+        self,
+        name: str,
+        version: str,
+        depends_on: Sequence[str],
+        *,
+        frequency: str = "daily",
+        output_columns: Sequence[str] = (),
+    ) -> None:
         self.name = name
         self.version = str(version)
         self._depends = tuple(depends_on)
         self.description = ""
         self.category = ""
-        self.frequency = "daily"
+        self.frequency = frequency
+        self.output_columns = tuple(output_columns)
         self.asset_types: tuple[str, ...] = ("equity",)
 
     def depends_on(self) -> tuple[str, ...]:
@@ -490,57 +519,44 @@ class FactorPipeline:
     # -- 阶段 2：预处理 -------------------------------------------------------
 
     def preprocess(
-        self, raw: pd.DataFrame, factor_col: str | None = None
+        self, raw: pd.DataFrame, factor_col: str | Sequence[str] | None = None
     ) -> pd.DataFrame:
-        """执行缩尾、中位数填充与 z-score，存在行业/市值列时自动中性化并仅返回 3 列因子表。"""
-        col = factor_col or _factor_column(raw)
-        processed = PostProcessor(PIPELINE_STOCK_EVAL).transform(
-            raw, factor_col=col, date_col="date"
-        )
-        if {"industry", "log_market_cap"} <= set(processed.columns):
-            processed = neutralize(processed, factor_col=col)
-        processed = processed[["date", "ticker", col]]
+        """执行缩尾、中位数填充与 z-score；支持单列及多列因子，存在行业/市值列时自动中性化。"""
+        if isinstance(factor_col, str):
+            cols = [factor_col]
+        elif factor_col is not None:
+            cols = list(factor_col)
+        else:
+            cols = _factor_columns(raw)
+        if not cols:
+            raise ValueError("factor_col must not be empty")
+        processed = raw.copy()
+        has_neutralize = {"industry", "log_market_cap"} <= set(processed.columns)
+        pp = PostProcessor(PIPELINE_STOCK_EVAL)
+        for col in cols:
+            processed = pp.transform(processed, factor_col=col, date_col="date")
+            if has_neutralize:
+                processed = neutralize(processed, factor_col=col)
+        processed = processed[["date", "ticker", *cols]]
         self._pending_raw = raw
         return processed
 
     # -- 阶段 3：评估 ---------------------------------------------------------
 
-    def evaluate(
+    def _evaluate_column(
         self,
         processed: pd.DataFrame,
-        periods: Sequence[int] = DEFAULT_PERIODS,
-        name: str | None = None,
-        n_attempts: int | None = None,
+        col: str,
+        prices: pd.DataFrame,
+        periods: Sequence[int],
+        eval_name: str,
+        attempts_n: int,
     ) -> EvalResult:
-        """运行 alphalens 评估、校验多重检验准入门限并生成 tearsheet HTML。
-
-        传入 *name* 时按因子族累计尝试次数 *N*；绘图失败仅发警告并将 ``report_path`` 置为 ``None``。
-        """
         import alphalens.performance as al_perf  # 延迟导入 alphalens
         import alphalens.utils as al_utils
 
-        if processed.empty:
-            raise ValueError("processed frame is empty")
-        col = _value_col(processed)
-        if name is not None:
-            name = _safe_component(name, "factor name")
-        eval_name = name or col
-        # 绑定原始因子表供后续 register() 使用，重复评估时不覆盖既有原始数据
-        self._last_raw = (
-            self._pending_raw if self._pending_raw is not None else processed
-        )
-
         wide = processed.pivot(index="date", columns="ticker", values=col)
         factor = AlphalensAdapter.to_al_factor(wide)
-
-        dates = pd.to_datetime(processed["date"])
-        symbols = sorted(processed["ticker"].astype(str).unique())
-        bars = self._load_bars(
-            symbols,
-            str(dates.min().date()),
-            str((dates.max() + pd.Timedelta(days=_PRICE_BUFFER_DAYS)).date()),
-        )
-        prices = AlphalensAdapter.to_al_prices(bars)
 
         factor_data = al_utils.get_clean_factor_and_forward_returns(
             factor,
@@ -565,34 +581,12 @@ class FactorPipeline:
         summary = AlphalensAdapter.extract_metrics(
             factor_data, ic_series, mean_quant_ret
         )
-
-        family = factor_family(eval_name) if name is not None else None
-        if name is not None:
-            attempts_n = len(_load_attempts(self._base_dir, family)) + 1
-        elif n_attempts is not None:
-            attempts_n = n_attempts
-        else:
-            attempts_n = 1
-
         gate_passed, gate_detail = AlphalensAdapter.check_gate(
             summary, n_attempts=attempts_n
         )
-        if name is not None:
-            _record_attempt(
-                self._base_dir,
-                family,
-                {
-                    "date": datetime.now(timezone.utc).date().isoformat(),
-                    "name": name,
-                    "gate_passed": gate_passed,
-                    "rank_ic_mean": summary["rank_ic_mean"],
-                },
-            )
-
         report_path = self._write_tearsheet(
             factor_data, eval_name, summary, gate_passed
         )
-
         return EvalResult(
             summary=summary,
             gate_passed=gate_passed,
@@ -603,9 +597,110 @@ class FactorPipeline:
             report_path=report_path,
         )
 
+    def evaluate(
+        self,
+        processed: pd.DataFrame,
+        periods: Sequence[int] = DEFAULT_PERIODS,
+        name: str | None = None,
+        n_attempts: int | None = None,
+        *,
+        frequency: str = "daily",
+    ) -> EvalResult:
+        """运行 alphalens 评估、校验多重检验准入门限并生成 tearsheet HTML。
+
+        支持单列与多列因子：多列因子拆分为 N 次独立评估并生成 N 份 tearsheet，准入采用全部通过（AND）门控；
+        传入 *name* 时按因子族累计尝试次数 *N*；绘图失败仅发警告并将 ``report_path`` 置为 ``None``。
+        """
+        if processed.empty:
+            raise ValueError("processed frame is empty")
+        cols = _value_cols(processed)
+        if name is not None:
+            name = _safe_component(name, "factor name")
+        eval_name = name or (cols[0] if len(cols) == 1 else "_".join(cols))
+        # 绑定原始因子表供后续 register() 使用，重复评估时不覆盖既有原始数据
+        self._last_raw = (
+            self._pending_raw if self._pending_raw is not None else processed
+        )
+
+        dates = pd.to_datetime(processed["date"])
+        symbols = sorted(processed["ticker"].astype(str).unique())
+        start_str = str(dates.min().date())
+        end_str = str((dates.max() + pd.Timedelta(days=_PRICE_BUFFER_DAYS)).date())
+        if frequency != "daily":
+            bars = self._load_bars(symbols, start_str, end_str, frequency=frequency)
+        else:
+            bars = self._load_bars(symbols, start_str, end_str)
+        prices = AlphalensAdapter.to_al_prices(bars)
+
+        family = factor_family(eval_name) if name is not None else None
+        if name is not None:
+            attempts_n = len(_load_attempts(self._base_dir, family)) + 1
+        elif n_attempts is not None:
+            attempts_n = n_attempts
+        else:
+            attempts_n = 1
+
+        if len(cols) == 1:
+            res = self._evaluate_column(
+                processed, cols[0], prices, periods, eval_name, attempts_n
+            )
+            if name is not None:
+                _record_attempt(
+                    self._base_dir,
+                    family,
+                    {
+                        "date": datetime.now(timezone.utc).date().isoformat(),
+                        "name": name,
+                        "gate_passed": res.gate_passed,
+                        "rank_ic_mean": res.summary["rank_ic_mean"],
+                    },
+                )
+            return res
+
+        col_results: dict[str, EvalResult] = {}
+        for col in cols:
+            col_eval_name = f"{name}_{col}" if name is not None else col
+            col_results[col] = self._evaluate_column(
+                processed, col, prices, periods, col_eval_name, attempts_n
+            )
+        gate_passed = all(r.gate_passed for r in col_results.values())
+        summary = {col: r.summary for col, r in col_results.items()}
+        gate_detail = {col: r.gate_detail for col, r in col_results.items()}
+        if name is not None:
+            _record_attempt(
+                self._base_dir,
+                family,
+                {
+                    "date": datetime.now(timezone.utc).date().isoformat(),
+                    "name": name,
+                    "gate_passed": gate_passed,
+                    "rank_ic_mean": min(
+                        r.summary["rank_ic_mean"] for r in col_results.values()
+                    ),
+                },
+            )
+        first = col_results[cols[0]]
+        return EvalResult(
+            summary=summary,
+            gate_passed=gate_passed,
+            gate_detail=gate_detail,
+            ic_series=first.ic_series,
+            quantile_returns=first.quantile_returns,
+            turnover=first.turnover,
+            report_path=first.report_path,
+            column_results=col_results,
+        )
+
     # -- 阶段 4：注册落盘 -----------------------------------------------------
 
-    def register(self, name: str, expr: str, result: EvalResult) -> None:
+    def register(
+        self,
+        name: str,
+        expr: str,
+        result: EvalResult,
+        *,
+        frequency: str = "daily",
+    ) -> None:
         """落盘原始因子值、更新 ``metadata.json`` 评估与尝试记录，并保存评估时序 Parquet 文件。"""
         name = _safe_component(name, "factor name")
         if self._last_raw is None:
@@ -613,12 +708,27 @@ class FactorPipeline:
                 "register() needs a factor frame from this pipeline "
                 "(run compute()/preprocess()/evaluate() first)"
             )
-        # 剔除可能残留的中性化辅助列，仅保留单因子列
-        col = _factor_column(self._last_raw)
-        frame = self._last_raw[["date", "ticker", col]].rename(columns={col: name})
+        if result.column_results is None:
+            # 剔除可能残留的中性化辅助列，仅保留单因子列
+            col = _factor_column(self._last_raw)
+            frame = self._last_raw[["date", "ticker", col]].rename(columns={col: name})
+            output_cols: tuple[str, ...] = (name,)
+            attempt_ic = result.summary["rank_ic_mean"]
+        else:
+            output_cols = tuple(result.column_results.keys())
+            frame = self._last_raw[["date", "ticker", *output_cols]].copy()
+            attempt_ic = min(
+                r.summary["rank_ic_mean"] for r in result.column_results.values()
+            )
 
         # 固定使用默认版本号 "1.0"，与 factor_storage 读取契约保持一致
-        record = _FactorRecord(name, version="1.0", depends_on=_expr_columns(expr))
+        record = _FactorRecord(
+            name,
+            version="1.0",
+            depends_on=_expr_columns(expr),
+            frequency=frequency,
+            output_columns=output_cols,
+        )
         factors_dir = self._base_dir / "factors"
         save_factor_full(record, frame, base_dir=str(factors_dir))
 
@@ -636,38 +746,74 @@ class FactorPipeline:
                     "date": eval_date,
                     "name": name,
                     "gate_passed": result.gate_passed,
-                    "rank_ic_mean": result.summary["rank_ic_mean"],
+                    "rank_ic_mean": attempt_ic,
                 },
             )
             attempts = _load_attempts(self._base_dir, family)
-        meta_path = factors_dir / name / f"v{record.version}" / "metadata.json"
+        meta_path = (
+            _version_dir(factors_dir, name, record.version, frequency=frequency)
+            / "metadata.json"
+        )
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta["eval"] = {
-            **result.summary,
-            "gate_passed": result.gate_passed,
-            "eval_date": eval_date,
-            "report": result.report_path,
-        }
+        if result.column_results is None:
+            meta["eval"] = {
+                **result.summary,
+                "gate_passed": result.gate_passed,
+                "eval_date": eval_date,
+                "report": result.report_path,
+            }
+        else:
+            meta["eval"] = {
+                col: {
+                    **col_res.summary,
+                    "gate_passed": col_res.gate_passed,
+                    "eval_date": eval_date,
+                    "report": col_res.report_path,
+                }
+                for col, col_res in result.column_results.items()
+            }
         meta["attempts"] = len(attempts)
         meta["attempt_log"] = attempts
         meta_path.write_text(
             json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
-        out_dir = self._base_dir / "factor_eval" / name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        result.ic_series.to_parquet(out_dir / "ic_series.parquet")
-        result.quantile_returns.to_parquet(out_dir / "quantile_returns.parquet")
-        result.turnover.to_parquet(out_dir / "turnover.parquet")
+        if result.column_results is None:
+            out_dir = self._base_dir / "factor_eval" / name
+            out_dir.mkdir(parents=True, exist_ok=True)
+            result.ic_series.to_parquet(out_dir / "ic_series.parquet")
+            result.quantile_returns.to_parquet(out_dir / "quantile_returns.parquet")
+            result.turnover.to_parquet(out_dir / "turnover.parquet")
+        else:
+            for col, col_res in result.column_results.items():
+                col_dir = (
+                    self._base_dir
+                    / "factor_eval"
+                    / name
+                    / _safe_component(col, "output column")
+                )
+                col_dir.mkdir(parents=True, exist_ok=True)
+                col_res.ic_series.to_parquet(col_dir / "ic_series.parquet")
+                col_res.quantile_returns.to_parquet(
+                    col_dir / "quantile_returns.parquet"
+                )
+                col_res.turnover.to_parquet(col_dir / "turnover.parquet")
 
     # -- 内部辅助方法 ---------------------------------------------------------
 
-    def _load_bars(self, symbols: Sequence[str], start: str, end: str) -> pd.DataFrame:
+    def _load_bars(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        *,
+        frequency: str = "daily",
+    ) -> pd.DataFrame:
         return self._data_api.load_bars(
             list(symbols),
             start,
             end,
-            freq="daily",
+            freq=frequency,
             adjust="forward",
             table_family="equity",
         )

@@ -113,7 +113,7 @@ $QUANT_DATA_ROOT/
 │   ├── cn_etf_{basic,bars_daily,bars_minute,fundamental,tick}/...   # 独立 ETF 域（暂不落 cn_etf_pcf）
 │   ├── cn_fund_{basic,managers,nav,dividend,portfolio}/...          # 场外 .OF 与场内 LOF 公募基金
 │   └── cn_futures_{bars_daily,tick_l2,contract_specs,continuous}/...
-├── factors/cn_stock_factors/{name}_v{version}/{year}.parquet + metadata.json   # 与 asset/ 同级
+├── factors/{freq}/{name}/v{version}/{partition}.parquet + metadata.json         # 与 asset/ 同级（daily 年 / minute 月 / tick 占位）
 ├── raw/{source}/{table}/{date}.parquet              # 原始落盘（保留 1 年）
 ├── quarantine/{table}/{date}.parquet                # 隔离区（T+30 清理）
 ├── dqc/ · cross_check/ · manifest/                  # DQC 报告、交叉校验、落盘清单（manifest/ 仅 QDC 契约预留，代码未实现）

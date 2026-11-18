@@ -822,3 +822,92 @@ class TestMaxWorkersWarn:
             assert any("max_workers" in str(x.message) for x in w), (
                 "compute_all_safe should warn when max_workers is set"
             )
+
+
+# ---------------------------------------------------------------------------
+# Multi-column DAG semantics & minute intraday caching (Issue #87)
+# ---------------------------------------------------------------------------
+
+
+class MultiUpstream(Factor):
+    name = "multi_upstream"
+    output_columns = ("col_a", "col_b")
+
+    def depends_on(self):
+        return ["bars_daily"]
+
+    def compute(self, data):
+        df = data["bars_daily"][["date", "ticker", "close"]].copy()
+        df["col_a"] = df["close"] * 1.0
+        df["col_b"] = df["close"] * 2.0
+        return df[["date", "ticker", "col_a", "col_b"]]
+
+
+class ConsumerOfMulti(Factor):
+    name = "multi_consumer"
+
+    def depends_on(self):
+        return ["factor:multi_upstream"]
+
+    def compute(self, data):
+        up = data["factor:multi_upstream"]
+        assert list(up.columns) == ["date", "ticker", "col_a", "col_b"]
+        out = up[["date", "ticker"]].copy()
+        out["multi_consumer"] = up["col_b"] - up["col_a"]
+        return out
+
+
+class MinuteStampFactor(Factor):
+    name = "min_stamp"
+    frequency = "minute"
+    calls = 0
+
+    def depends_on(self):
+        return ["bars_minute"]
+
+    def compute(self, data):
+        MinuteStampFactor.calls += 1
+        df = data["bars_minute"][["date", "ticker"]].copy()
+        df["min_stamp"] = float(MinuteStampFactor.calls)
+        return df
+
+
+class TestMultiColAndMinuteRuntime:
+    def test_factor_dep_passes_full_multi_column_frame(self):
+        dag = FactorDAG(data_loader=_synthetic_loader)
+        dag.register(MultiUpstream())
+        dag.register(ConsumerOfMulti())
+        results = compute_all(dag, "2024-01-02", "2024-01-08")
+        assert list(results["multi_upstream"].columns) == [
+            "date",
+            "ticker",
+            "col_a",
+            "col_b",
+        ]
+        assert (results["multi_consumer"]["multi_consumer"] > 0).all()
+
+    def test_minute_intraday_append_cache(self):
+        times = ["2024-01-02 09:31:00", "2024-01-02 09:32:00", "2024-01-02 09:35:00"]
+        bars_min = pd.DataFrame(
+            {"date": times, "ticker": ["000001.SZ"] * 3, "close": [10.0, 10.1, 10.2]}
+        )
+
+        def min_loader(table_name: str, start: str, end: str) -> pd.DataFrame:
+            dt_col = pd.to_datetime(bars_min["date"])
+            return bars_min[
+                (dt_col >= pd.to_datetime(start)) & (dt_col <= pd.to_datetime(end))
+            ].copy()
+
+        MinuteStampFactor.calls = 0
+        dag = FactorDAG(data_loader=min_loader)
+        dag.register(MinuteStampFactor())
+        short = compute_factor(
+            dag, "min_stamp", "2024-01-02 09:31:00", "2024-01-02 09:32:00"
+        )
+        assert len(short) == 2
+        ext = compute_factor(
+            dag, "min_stamp", "2024-01-02 09:31:00", "2024-01-02 09:35:00"
+        )
+        assert len(ext) == 3
+        assert ext.loc[ext["date"] == "2024-01-02 09:31:00", "min_stamp"].item() == 1.0
+        assert ext.loc[ext["date"] == "2024-01-02 09:35:00", "min_stamp"].item() == 2.0

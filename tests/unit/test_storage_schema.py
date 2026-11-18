@@ -18,6 +18,7 @@ from core.types import QualityFlag
 from data.storage_schema import (
     A_SHARE_TABLES,
     CLEAN,
+    FACTOR_FREQUENCY_CHOICES,
     LEGACY_TO_CANONICAL,
     PARTITION_PATHS,
     QUALITY_FLAG_BITS,
@@ -1283,6 +1284,67 @@ class TestNullableDateColumns:
         df = pd.DataFrame([row])
         result = SCHEMA["corporate_actions"].validate(df)
         assert pd.isna(result["record_date"].iloc[0])
+
+
+class TestFactorSchemaMultiColAndFrequency:
+    """Issue #87 rulings 1, 2, 4, 7: multi-column & frequency-aware factor_schema."""
+
+    def test_frequency_choices_and_partition_path(self):
+        assert FACTOR_FREQUENCY_CHOICES == ("daily", "minute", "tick")
+        assert (
+            PARTITION_PATHS["factor"]
+            == "factors/{freq}/{name}/v{version}/{partition}.parquet"
+        )
+
+    def test_multi_column_daily_schema(self):
+        schema = factor_schema(["alpha_a", "alpha_b"])
+        assert list(schema.columns) == ["ticker", "date", "alpha_a", "alpha_b"]
+        df = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000002.SZ"],
+                "date": ["2024-01-02", "2024-01-02"],
+                "alpha_a": [1.0, float("nan")],
+                "alpha_b": [2.0, 3.0],
+            }
+        )
+        validated = schema.validate(df)
+        assert validated["date"].iloc[0] == date(2024, 1, 2)
+
+    def test_minute_schema_uses_datetime_date_column(self):
+        schema = factor_schema(["ofi_1m", "ofi_5m"], frequency="minute")
+        assert set(schema.columns) == {"ticker", "date", "ofi_1m", "ofi_5m"}
+        df = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000001.SZ"],
+                "date": ["2024-01-02 09:31:00", "2024-01-02 09:32:00"],
+                "ofi_1m": [0.1, 0.2],
+                "ofi_5m": [0.3, 0.4],
+            }
+        )
+        validated = schema.validate(df)
+        assert validated["date"].iloc[0] == pd.Timestamp("2024-01-02 09:31:00")
+
+    def test_tick_schema_raises_not_implemented(self):
+        with pytest.raises(NotImplementedError, match="placeholder"):
+            factor_schema("tick_val", frequency="tick")
+
+    def test_invalid_frequency_rejected(self):
+        with pytest.raises(ValueError, match="unsupported factor frequency"):
+            factor_schema("alpha_a", frequency="hourly")
+
+    @pytest.mark.parametrize(
+        "cols",
+        [
+            [],
+            ["a", "a"],
+            ["a", "date"],
+            ["a", "ticker"],
+            [""],
+        ],
+    )
+    def test_invalid_value_columns_rejected(self, cols):
+        with pytest.raises(ValueError):
+            factor_schema(cols)
 
     def test_mixed_present_missing_batch_accepted(self):
         row1 = _valid_row("corporate_actions")

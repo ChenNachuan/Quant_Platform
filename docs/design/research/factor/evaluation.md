@@ -38,19 +38,20 @@ def check_exit(metrics: dict) -> bool: ...
 
 @dataclass
 class EvalResult:
-    summary: dict                  # 标量指标（决策面）
-    gate_passed: bool
+    summary: dict                  # 标量指标（决策面；多列因子时为 {col: summary}）
+    gate_passed: bool              # 多列因子采用全部通过（AND）门控
     gate_detail: dict
     ic_series: pd.DataFrame        # 日频 IC 序列 (1D/5D/10D/20D)
     quantile_returns: pd.DataFrame
     turnover: pd.DataFrame
     report_path: str | None        # HTML tearsheet 路径
+    column_results: dict[str, EvalResult] | None = None  # 多列因子分列独立评估产出
 
 class FactorPipeline:
     def compute(self, expr: str, universe, start: str, end: str) -> pd.DataFrame: ...
-    def preprocess(self, raw: pd.DataFrame) -> pd.DataFrame: ...
-    def evaluate(self, processed: pd.DataFrame, periods: Sequence[int] = DEFAULT_PERIODS) -> EvalResult: ...
-    def register(self, name: str, expr: str, result: EvalResult) -> None: ...
+    def preprocess(self, raw: pd.DataFrame, factor_col: str | Sequence[str] | None = None) -> pd.DataFrame: ...
+    def evaluate(self, processed: pd.DataFrame, periods: Sequence[int] = DEFAULT_PERIODS, *, frequency: str = "daily") -> EvalResult: ...
+    def register(self, name: str, expr: str, result: EvalResult, *, frequency: str = "daily") -> None: ...
 ```
 
 ## 关键决策
@@ -72,6 +73,7 @@ class FactorPipeline:
 
 核心约定：
 - 表达式求值通过白名单 AST 节点（`_BIN_OPS` / `_UNARY_OPS` / `_EXPR_FUNCS`）安全解析，`delta` / `pct_change` 严格校验正整数滞后阶数 `_positive_periods`，禁止前视偏移。
-- `FactorPipeline.preprocess` 默认使用 `PIPELINE_STOCK_EVAL`（去极值 → 填充 → 标准化），并在元数据含 `industry` / `log_market_cap` 时于评估前先调用 `neutralize()`（alphalens 阶段不再重复中性化）。
+- `FactorPipeline.preprocess` 默认使用 `PIPELINE_STOCK_EVAL`（去极值 → 填充 → 标准化），并在元数据含 `industry` / `log_market_cap` 时于评估前先调用 `neutralize()`（alphalens 阶段不再重复中性化）；支持多列逐列清洗。
 - `to_al_prices` 向前延伸 45 个日历日缓冲区计算前向收益，并以 `ffill(limit=5)` 有限度处理短期停牌。
-- 注册落盘：`save_factor_full` 写入因子目录并更新 `metadata.json`（含 `eval` / `attempts` / `attempt_log`），时序结果存 `$QUANT_DATA_ROOT/factor_eval/{name}/`，完整 HTML 报告存 `research/reports/{name}_{date}.html`。
+- 多列评估与准入：多列因子拆分为 `N` 次独立 `AlphalensAdapter` 评估并生成 `N` 份 HTML tearsheet；`gate_passed` 采用 `all(...)` 全列通过（AND）规则；`metadata.json["eval"]` 按 `{col: {...}}` 分列写入，评估时序存 `$QUANT_DATA_ROOT/factor_eval/{name}/{col}/`。
+- 注册落盘：`save_factor_full` 写入因子目录 `factors/{freq}/{name}/v{version}/` 并通过 `_version_dir` 定位更新 `metadata.json`（含 `eval` / `attempts` / `attempt_log`），单列时序存 `$QUANT_DATA_ROOT/factor_eval/{name}/`，完整 HTML 报告存 `research/reports/{eval_name}_{date}.html`。

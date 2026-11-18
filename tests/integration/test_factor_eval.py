@@ -538,7 +538,12 @@ class TestThreeLayerPersistence:
 
         # Layer 1 — metadata.json eval block (plus attempts siblings)
         meta_path = (
-            pipeline._base_dir / "factors" / "knownic_1d" / "v1.0" / "metadata.json"
+            pipeline._base_dir
+            / "factors"
+            / "daily"
+            / "knownic_1d"
+            / "v1.0"
+            / "metadata.json"
         )
         assert meta_path.exists()
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -582,7 +587,7 @@ class TestThreeLayerPersistence:
         # Factor values landed under the semantic version directory the
         # ecosystem reads (v1.0) and round-trip through load_factor's *default*
         # version — the reader seam DataAPI.get_factor() wraps.
-        version_dir = pipeline._base_dir / "factors" / "knownic_1d" / "v1.0"
+        version_dir = pipeline._base_dir / "factors" / "daily" / "knownic_1d" / "v1.0"
         value_files = sorted(version_dir.glob("*.parquet"))
         assert value_files
         stored = pd.concat([pd.read_parquet(p) for p in value_files], ignore_index=True)
@@ -601,7 +606,7 @@ class TestThreeLayerPersistence:
         result = pipeline.evaluate(factor, name="knownic_1d")
         pipeline.register("knownic_1d", "close - 1", result)
 
-        out_dir = pipeline._base_dir / "factors" / "knownic_1d" / "v1.0"
+        out_dir = pipeline._base_dir / "factors" / "daily" / "knownic_1d" / "v1.0"
         record = SimpleNamespace(
             name="knownic_1d",
             version="1.0",
@@ -715,3 +720,76 @@ class TestThreeLayerPersistence:
         # the attempt-log path validates its family component directly
         with pytest.raises(ValueError, match="invalid factor family"):
             _load_attempts(pipeline._base_dir, "evil/../../x")
+
+
+class TestMultiColumnEvaluationAndPersistence:
+    """Issue #87 ruling 6: N-column split evaluation, AND gate, per-col storage."""
+
+    def test_multi_column_and_gate_and_three_layer_register(self, pipeline, bars):
+        good = make_factor_frame(bars, kind="next_return", noise=5e-4).rename(
+            columns={"factor": "sig_a"}
+        )
+        good2 = make_factor_frame(bars, kind="next_return", noise=1e-3).rename(
+            columns={"factor": "sig_b"}
+        )
+        noise = make_factor_frame(bars, kind="random").rename(
+            columns={"factor": "sig_noise"}
+        )
+
+        raw = good.merge(good2, on=["date", "ticker"]).merge(
+            noise, on=["date", "ticker"]
+        )
+        raw.loc[raw.index[:3], "sig_a"] = np.nan
+
+        # AND gate: one bad column fails the whole multi-column factor
+        mixed = raw[["date", "ticker", "sig_a", "sig_noise"]].copy()
+        proc_mixed = pipeline.preprocess(mixed)
+        res_mixed = pipeline.evaluate(proc_mixed, name="mixed_multi")
+        assert res_mixed.column_results is not None
+        assert res_mixed.column_results["sig_a"].gate_passed is True
+        assert res_mixed.column_results["sig_noise"].gate_passed is False
+        assert res_mixed.gate_passed is False
+
+        # Both columns passing -> overall PASS + 2 tearsheets + 3-layer persist
+        both_good = raw[["date", "ticker", "sig_a", "sig_b"]].copy()
+        proc = pipeline.preprocess(both_good)
+        assert proc["sig_a"].isna().sum() < 3  # preprocess fills sparse gaps
+
+        res = pipeline.evaluate(proc, name="dual_alpha")
+        assert res.gate_passed is True
+        assert res.column_results is not None
+        assert set(res.column_results) == {"sig_a", "sig_b"}
+        assert list(pipeline._reports_dir.glob("dual_alpha_sig_a_*.html"))
+        assert list(pipeline._reports_dir.glob("dual_alpha_sig_b_*.html"))
+
+        pipeline.register("dual_alpha", "close - 1", res)
+
+        meta_path = (
+            pipeline._base_dir
+            / "factors"
+            / "daily"
+            / "dual_alpha"
+            / "v1.0"
+            / "metadata.json"
+        )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["frequency"] == "daily"
+        assert meta["output_columns"] == ["sig_a", "sig_b"]
+        assert set(meta["eval"]) == {"sig_a", "sig_b"}
+        assert meta["eval"]["sig_a"]["gate_passed"] is True
+        assert meta["eval"]["sig_b"]["gate_passed"] is True
+
+        for col in ("sig_a", "sig_b"):
+            eval_dir = pipeline._base_dir / "factor_eval" / "dual_alpha" / col
+            assert (eval_dir / "ic_series.parquet").is_file()
+            assert (eval_dir / "quantile_returns.parquet").is_file()
+            assert (eval_dir / "turnover.parquet").is_file()
+
+        stored = load_factor(
+            "dual_alpha",
+            bars["date"].min(),
+            bars["date"].max(),
+            base_dir=str(pipeline._base_dir / "factors"),
+        )
+        assert list(stored.columns) == ["date", "ticker", "sig_a", "sig_b"]
+        assert int(stored["sig_a"].isna().sum()) == 3  # raw NaN preserved on disk

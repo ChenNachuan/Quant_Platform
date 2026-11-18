@@ -15,6 +15,7 @@ import pytest
 from research.factor.interface import (
     DEFAULT_CATEGORY,
     FACTOR_CATEGORIES,
+    FREQUENCY_CHOICES,
     KIND_FACTOR,
     KIND_TABLE,
     VALID_CATEGORIES,
@@ -22,6 +23,7 @@ from research.factor.interface import (
     factor_meta,
     extract_factor_meta,
     parse_dependency,
+    resolved_output_columns,
     validate_output,
 )
 
@@ -606,3 +608,70 @@ class TestDependsOnIntegration:
 
         with pytest.raises(ValueError, match="unrecognised"):
             parse_dependency(BadDep().depends_on()[0])
+
+
+# ---------------------------------------------------------------------------
+# Multi-column output_columns & frequency choices (Issue #87)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiColumnAndFrequency:
+    def test_frequency_choices_and_default_output_columns(self):
+        assert FREQUENCY_CHOICES == ("daily", "minute", "tick")
+        assert MinimalFactor.output_columns == ()
+        assert resolved_output_columns(MinimalFactor()) == ("min_fac",)
+
+    def test_multi_column_validate_output_accepts_any_value_col_order(self):
+        class MultiSig(Factor):
+            name = "multi_sig"
+            output_columns = ("sig_fast", "sig_slow")
+
+            def depends_on(self):
+                return ["bars_daily"]
+
+            def compute(self, data):
+                return pd.DataFrame(columns=["date", "ticker", "sig_fast", "sig_slow"])
+
+        f = MultiSig()
+        assert resolved_output_columns(f) == ("sig_fast", "sig_slow")
+
+        df = pd.DataFrame(
+            {
+                "date": ["2024-01-02"],
+                "ticker": ["000001.SZ"],
+                "sig_slow": [0.2],
+                "sig_fast": [0.1],
+            }
+        )
+        assert validate_output(f, df) is df
+
+        bad_order = df[["ticker", "date", "sig_fast", "sig_slow"]]
+        with pytest.raises(ValueError, match="columns"):
+            validate_output(f, bad_order)
+
+        missing = df[["date", "ticker", "sig_fast"]]
+        with pytest.raises(ValueError, match="columns"):
+            validate_output(f, missing)
+
+    @pytest.mark.parametrize(
+        "bad_cols",
+        [
+            "sig_fast",
+            ("sig_fast", "date"),
+            ("sig_fast", "ticker"),
+            ("sig_fast", "sig_fast"),
+            (" sig_fast",),
+            ("",),
+        ],
+    )
+    def test_invalid_output_columns_rejected(self, bad_cols):
+        with pytest.raises(ValueError):
+            type(
+                "BadMulti", (Factor,), {"name": "bad_multi", "output_columns": bad_cols}
+            )
+
+    def test_frequency_validation_on_subclass(self):
+        tick_cls = type("TickFac", (Factor,), {"name": "tick_fac", "frequency": "tick"})
+        assert tick_cls.frequency == "tick"
+        with pytest.raises(ValueError, match="invalid frequency"):
+            type("BadFreq", (Factor,), {"name": "bad_freq", "frequency": "hourly"})

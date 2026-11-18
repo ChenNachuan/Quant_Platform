@@ -284,14 +284,27 @@ def _slice_data_to_range(
     end: str,
 ) -> dict[str, pd.DataFrame]:
     """将各依赖表裁剪至 ``[start, end]`` 日期区间。"""
-    start10, end10 = str(start)[:10], str(end)[:10]
+    start_s, end_s = str(start).strip(), str(end).strip()
+    use_ts = len(start_s) > 10 or len(end_s) > 10
+    if use_ts:
+        start_ts, end_ts = pd.to_datetime(start_s), pd.to_datetime(end_s)
+        if len(end_s) <= 10:
+            end_ts = (
+                end_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            )
+    else:
+        start10, end10 = start_s[:10], end_s[:10]
     sliced: dict[str, pd.DataFrame] = {}
     for dep, df in data.items():
         if df is None or "date" not in getattr(df, "columns", []):
             sliced[dep] = df
             continue
-        dates = df["date"].astype(str).str[:10]
-        sliced[dep] = df.loc[(dates >= start10) & (dates <= end10)]
+        if use_ts:
+            parsed = pd.to_datetime(df["date"], format="mixed")
+            sliced[dep] = df.loc[(parsed >= start_ts) & (parsed <= end_ts)]
+        else:
+            dates = df["date"].astype(str).str[:10]
+            sliced[dep] = df.loc[(dates >= start10) & (dates <= end10)]
     return sliced
 
 
@@ -364,9 +377,14 @@ def compute_factor(
             _old_key, cached_df = candidate
             _c_start, c_end = _old_key[2]
             tail_result = factor.compute(data)
-            validate_output(factor.name, tail_result)
-            tail_dates = tail_result["date"].astype(str).str[:10]
-            tail_result = tail_result.loc[tail_dates > c_end[:10]]
+            validate_output(factor, tail_result)
+            c_end_s = str(c_end).strip()
+            if len(c_end_s) > 10:
+                tail_ts = pd.to_datetime(tail_result["date"], format="mixed")
+                tail_result = tail_result.loc[tail_ts > pd.to_datetime(c_end_s)]
+            else:
+                tail_dates = tail_result["date"].astype(str).str[:10]
+                tail_result = tail_result.loc[tail_dates > c_end_s[:10]]
             result = pd.concat([cached_df, tail_result])
             result = result.drop_duplicates(["date", "ticker"])
             result = _canonicalise(result)
@@ -375,7 +393,7 @@ def compute_factor(
 
     # 3. 全量计算
     result = factor.compute(data)
-    validate_output(factor.name, result)
+    validate_output(factor, result)
     result = _canonicalise(result)
     dag._cache[key] = result
     return result
