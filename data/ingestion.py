@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import json
 import logging
@@ -87,6 +88,7 @@ _REPO_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "source_priority.yaml"
 )
 SOURCE_PRIORITY_PATH = DATA_ROOT / "config" / "source_priority.yaml"
+_SOURCE_PRIORITY_CACHE: dict[Path, tuple[int, dict[str, Any]]] = {}
 
 
 def _resolve_source_priority_path(path: str | os.PathLike[str] | None = None) -> Path:
@@ -429,7 +431,11 @@ def load_source_priority(
 
     要求每项包含 ``priority`` 列表（支持嵌套子表），且 ``field_override`` 指定的源必须在对应 ``priority`` 中，否则抛出 ``ValueError``。
     """
-    resolved = _resolve_source_priority_path(path)
+    resolved = _resolve_source_priority_path(path).resolve()
+    mtime = resolved.stat().st_mtime_ns
+    cached = _SOURCE_PRIORITY_CACHE.get(resolved)
+    if cached is not None and cached[0] == mtime:
+        return copy.deepcopy(cached[1])
     cfg = yaml.safe_load(resolved.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError(f"{SOURCE_PRIORITY_PATH}: top level must be a mapping")
@@ -437,7 +443,8 @@ def load_source_priority(
         if table == "cross_check":
             continue
         _validate_entry(str(table), entry)
-    return cfg
+    _SOURCE_PRIORITY_CACHE[resolved] = (mtime, cfg)
+    return copy.deepcopy(cfg)
 
 
 def _validate_entry(table: str, entry: Any) -> None:
@@ -754,22 +761,18 @@ def get_field_overrides(
 
 
 # --- 五级容差查询 ---
-def tolerance_for(
+def _resolve_tolerance_from_parts(
     field: str,
-    tolerances: Mapping[str, float] | None = None,
-    *,
+    base_table: Mapping[str, float],
+    overrides: Mapping[str, Mapping[str, Any]],
     asset_type: str | None = None,
     ticker: str | None = None,
-    path: str | os.PathLike[str] | None = None,
 ) -> tuple[float, str]:
-    """返回 *field* 的 ``(容差阈值, 比较模式)``（``absolute`` 或 ``relative``）；支持按资产子类覆盖容差。"""
     cls = TOLERANCE_CLASS.get(field, "default")
-    table = dict(tolerances) if tolerances is not None else load_tolerances(path)
-    value = float(table[cls] if cls in table else table["default"])
+    value = float(base_table[cls] if cls in base_table else base_table["default"])
     mode = "absolute" if cls in _ABSOLUTE_CLASSES else "relative"
 
-    if asset_type and ticker:
-        overrides = load_tolerance_overrides(asset_type, path=path)
+    if asset_type and ticker and overrides:
         for group_name, group_tols in overrides.items():
             if _ticker_in_group(ticker, group_name, asset_type, group_cfg=group_tols):
                 override_val = group_tols.get(field)
@@ -780,6 +783,24 @@ def tolerance_for(
                 ):
                     return float(override_val), mode
     return value, mode
+
+
+def tolerance_for(
+    field: str,
+    tolerances: Mapping[str, float] | None = None,
+    *,
+    asset_type: str | None = None,
+    ticker: str | None = None,
+    path: str | os.PathLike[str] | None = None,
+) -> tuple[float, str]:
+    """返回 *field* 的 ``(容差阈值, 比较模式)``（``absolute`` 或 ``relative``）；支持按资产子类覆盖容差。"""
+    table = dict(tolerances) if tolerances is not None else load_tolerances(path)
+    overrides = (
+        load_tolerance_overrides(asset_type, path=path) if asset_type and ticker else {}
+    )
+    return _resolve_tolerance_from_parts(
+        field, table, overrides, asset_type=asset_type, ticker=ticker
+    )
 
 
 # --- 交叉校验数据结构 ---
@@ -868,15 +889,18 @@ def cross_source_check(
     both = merged[merged["_merge"] == "both"]
     matched_rows = int(len(both))
     exemptions = load_exemptions(canonical)
-    has_overrides = bool(load_tolerance_overrides(canonical))
+    base_tols = dict(tolerances) if tolerances is not None else load_tolerances()
+    table_overrides = load_tolerance_overrides(canonical)
 
     def _field_tol(field_name: str) -> tuple[float | pd.Series, str]:
-        base_tol, mode = tolerance_for(field_name, tolerances)
-        if not has_overrides or both.empty:
+        base_tol, mode = _resolve_tolerance_from_parts(field_name, base_tols, {})
+        if not table_overrides or both.empty:
             return base_tol, mode
         unique_tickers = both["ticker"].astype(str).unique()
         tol_map = {
-            t: tolerance_for(field_name, tolerances, asset_type=canonical, ticker=t)[0]
+            t: _resolve_tolerance_from_parts(
+                field_name, base_tols, table_overrides, asset_type=canonical, ticker=t
+            )[0]
             for t in unique_tickers
         }
         return both["ticker"].astype(str).map(tol_map).astype("float64"), mode
@@ -1020,17 +1044,20 @@ def cross_source_check_aggregate(
     matched_rows = int(len(both))
 
     exemptions = load_exemptions(canonical)
-    has_overrides = (
-        bool(load_tolerance_overrides(canonical)) and "ticker" in both.columns
+    base_tols = dict(tolerances) if tolerances is not None else load_tolerances()
+    table_overrides = (
+        load_tolerance_overrides(canonical) if "ticker" in both.columns else {}
     )
 
     def _field_tol(field_name: str) -> tuple[float | pd.Series, str]:
-        base_tol, mode = tolerance_for(field_name, tolerances)
-        if not has_overrides or both.empty:
+        base_tol, mode = _resolve_tolerance_from_parts(field_name, base_tols, {})
+        if not table_overrides or both.empty:
             return base_tol, mode
         unique_tickers = both["ticker"].astype(str).unique()
         tol_map = {
-            t: tolerance_for(field_name, tolerances, asset_type=canonical, ticker=t)[0]
+            t: _resolve_tolerance_from_parts(
+                field_name, base_tols, table_overrides, asset_type=canonical, ticker=t
+            )[0]
             for t in unique_tickers
         }
         return both["ticker"].astype(str).map(tol_map).astype("float64"), mode
