@@ -27,6 +27,11 @@ def get_data_root() -> Path:
     return override if override is not None else Path(DATA_ROOT)
 
 
+def set_data_root(path: str | Path) -> contextvars.Token[Path | None]:
+    """设置当前上下文的数据根目录并返回用于恢复的 ``Token``。"""
+    return _data_root_var.set(Path(path))
+
+
 @contextmanager
 def use_data_root(path: str | Path) -> Iterator[Path]:
     """在当前上下文内临时切换 :func:`get_data_root` 返回值，退出 ``with`` 块后自动恢复。"""

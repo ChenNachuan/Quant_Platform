@@ -10,6 +10,7 @@ from core.config import (
     load_config,
     load_secrets,
     load_strategy_config,
+    set_data_root,
     use_data_root,
 )
 
@@ -147,4 +148,13 @@ class TestDataRootContext:
                     raise RuntimeError("boom")
             assert get_data_root() == outer
 
+        assert get_data_root() == before
+
+    def test_set_data_root_returns_reset_token(self, tmp_path):
+        before = get_data_root()
+        token = set_data_root(tmp_path)
+        try:
+            assert get_data_root() == tmp_path
+        finally:
+            core_config._data_root_var.reset(token)
         assert get_data_root() == before
