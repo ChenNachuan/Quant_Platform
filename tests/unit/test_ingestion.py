@@ -408,16 +408,22 @@ class TestSourcePriorityConfig:
             "amazingdata": 2,
             "tushare": 3,
         }
+        daily_history_primary_overrides = {"cn_stock_fundamental"}
         for table, entry in cfg.items():
             if table == "cross_check":
                 continue
             priority = entry["priority"]
             assert priority, f"{table}: empty priority"
             assert priority[0] != "tushare", f"{table}: tushare must not be primary"
-            ranks = [global_rank[s] for s in priority]
-            assert ranks == sorted(ranks), (
-                f"{table}: priority {priority} violates straightflush->qdc->amazingdata->tushare order"
-            )
+            if table in daily_history_primary_overrides:
+                assert priority[0] == "qdc", (
+                    f"{table}: daily-history override must use qdc as primary"
+                )
+            else:
+                ranks = [global_rank[s] for s in priority]
+                assert ranks == sorted(ranks), (
+                    f"{table}: priority {priority} violates straightflush->qdc->amazingdata->tushare order"
+                )
             overrides = entry.get("field_override") or {}
             for field, src in overrides.items():
                 assert src != "tushare", (
@@ -432,10 +438,13 @@ class TestSourcePriorityConfig:
             "qdc",
             "amazingdata",
         ]
-        assert get_source_priority("fundamental") == ["straightflush", "qdc"]
+        assert get_source_priority("fundamental") == ["qdc", "straightflush"]
         assert get_field_overrides("bars_daily") == {"adjfactor": "qdc"}
         assert get_field_overrides("cn_etf_bars_daily") == {"adjfactor": "qdc"}
-        assert get_field_overrides("fundamental") == {"pe_ttm": "qdc"}
+        assert get_field_overrides("fundamental") == {
+            "total_market_cap": "straightflush",
+            "float_market_cap": "straightflush",
+        }
         assert get_field_overrides("bars_minute") == {}
         assert get_source_priority("reference", "calendar") == [
             "straightflush",
@@ -446,6 +455,22 @@ class TestSourcePriorityConfig:
         assert get_primary_source("cn_stock_tick") == "qdc"
         assert get_primary_source("cn_etf_tick") == "qdc"
         assert get_primary_source("cn_etf_bars_daily") == "straightflush"
+
+    def test_source_capabilities_yaml_valid(self):
+        from pathlib import Path
+        import yaml
+
+        cap_path = (
+            Path(__file__).resolve().parents[2] / "config" / "source_capabilities.yaml"
+        )
+        data = yaml.safe_load(cap_path.read_text(encoding="utf-8"))
+        assert set(data["source_capabilities"]) == {
+            "straightflush",
+            "qdc",
+            "amazingdata",
+            "tushare",
+        }
+        assert data["decision_framework"]["steps"]
 
     def test_field_override_source_must_be_in_priority(self, tmp_path):
         bad = tmp_path / "source_priority.yaml"

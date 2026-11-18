@@ -1,0 +1,99 @@
+# 四大数据源真实能力画像与新表主源决策框架（纯元信息/文档配置，供架构决策与适配器排期参考）。
+# 优先级仲裁与字段覆盖见同目录 config/source_priority.yaml。
+
+source_capabilities:
+  straightflush:
+    realtime: true                 # 唯一支持盘中实时/最快盘后快照的源
+    history_depth: "varies"        # 日线历史深，但估值无日频历史、分钟线无 HTTP 历史接口
+    minute_bars: false             # 扶摇 HTTP API 不提供历史分钟线（仅规划 Market Dumps 批量导入）
+    tick_l2: false                 # 无逐笔 tick / L2
+    fundamentals: "snapshot_only"  # 估值仅最新快照，回测直接使用会引入前视偏差
+    rate_limits: "API Key 限流（Adapter 配置 5 req/s）"
+    adapter_status:
+      implemented_datasets: [stock, etf, index, futures, option, calendar]
+      todo_datasets: [market_dumps_minute, fundamental_snapshot]
+    unique_data:
+      - ".TI 同花顺独家行业/概念/风格指数（851 个）"
+      - "集合竞价行情"
+      - "龙虎榜完整历史营业部明细"
+      - "公募基金全量基础/净值/分红/持仓"
+    known_issues:
+      - "深证成指(399001.SZ)/创业板指(399006.SZ)成交量额采用全市场/全板块口径（与 QDC 一致，与 AD 成份股口径差数千亿）"
+      - "上证债券指数(000012.SH/000022.SH)成交量口径与 QDC/AD 差约 100 倍"
+      - "独家 .TI 指数在多源交叉校验中全部记为 missing_in_secondary"
+      - "估值无日频历史，不可作为回测期 PE/PB/PS 主源"
+
+  qdc:
+    realtime: false                # 盘后定时同步入库，当日晚间同步前可能返回空表
+    history_depth: "2000~"         # 逐笔成交 2000 年起，十档 L2 2017 年起
+    minute_bars: true              # 全历史 1 分钟线（1999~，stocks_1m / cn_etf_1m 等）
+    tick_l2: true                  # 独家十档逐笔 L2（cn_tick_l2）
+    fundamentals: "daily_history"  # cn_valuation_1d 提供完整无前视偏差日频历史估值
+    rate_limits: "qdc-cli 本地 Parquet 无限频；HTTP /v1/query 有每日行配额"
+    adapter_status:
+      implemented_datasets: [stock, etf, index, convertible, futures, option]
+      todo_datasets: [cn_valuation_1d, stocks_1m, cn_etf_1m]
+    unique_data:
+      - "十档逐笔 L2（cn_tick_l2）"
+      - "PIT 一致预期（cn_estimates）"
+      - "日频历史估值（cn_valuation_1d）与全历史复权因子（cn_adj_factor）"
+      - "新闻 / 宏观 / 另类 / 港美 / 数字货币"
+    known_issues:
+      - "无 A 股全市场基础表（stock_basic）与交易日历（calendar）"
+      - "cn_index_1d 仅覆盖 554 条沪深指数，不含任何北交所 .BJ 指数（如 899050.BJ）"
+      - "cn_index_1d 在 399001.SZ/399006.SZ 同样采用全市场量额口径（2026-11-13 与 SF 完全一致）"
+      - "盘后同步存在时延（如 2026-11-16 22:15 尚未产出当日切片）"
+      - "cn_tick 2026 年存在部分缺失日（由 L2 快照回补，买卖方向丢失）"
+
+  amazingdata:
+    realtime: true                 # 支持实时订阅（当前平台通过 Docker 桥接按日拉取）
+    history_depth: "2013~"         # 历史行情与五档快照 2013 年起
+    minute_bars: true              # 支持分钟线
+    tick_l2: false                 # 仅五档快照，无逐笔
+    fundamentals: "partial"        # 基本面覆盖不如 SF/QDC 完整
+    rate_limits: "gRPC 并发连接槽位有限，Adapter 限速 2 req/s"
+    adapter_status:
+      implemented_datasets: [stock, etf, index, calendar, option]
+      todo_datasets: []
+    unique_data:
+      - "五档历史快照"
+      - "量化算子库(108)与技术指标(57)"
+      - "Docker 容器托管隔离执行（x64 SDK）"
+    known_issues:
+      - "覆盖窄（无港美/宏观/新闻/另类），A 股日线缺少北交所等约 355 只标的"
+      - "EXTRA_INDEX_A 上交所(.SH)指数成交量按手返回，Normalizer 需按 .SH * 100 转股"
+      - "399001.SZ/399006.SZ 成交量额按样本成份股加总（与 SF/QDC 交易所全市场口径差数千亿）"
+      - "独立回填股票/ETF 日线时未携带真实日频 adjfactor（默认 1.0）"
+
+  tushare:
+    realtime: false                # 盘后社区/接口维护
+    history_depth: "2001~"         # 日线与 daily_basic 可追溯至 2001，分钟线 2009~
+    minute_bars: true              # stk_mins（受 500 次/分 × 8000 行严格限频）
+    tick_l2: false
+    fundamentals: "full_but_limited"
+    rate_limits: "2000 积分阶梯：daily_basic/daily/trade_cal/fut_basic 可用；adj_factor 限 1 次/小时"
+    adapter_status:
+      implemented_datasets: [stock]
+      todo_datasets:
+        - "daily_basic -> cn_stock_fundamental（★ 2000 积分核心价值：日频 PE/PB/PS/股息率/市值三源校验；注意 total_mv/circ_mv 原生单位为万元，需 * 10000 转元）"
+        - "trade_cal -> cn_calendar"
+        - "stock_basic -> cn_stock_basic"
+        - "index_daily -> cn_stock_index_bars_daily（用于与 SF+QDC 组成三源投票，仲裁 AD 口径分歧）"
+        - "fut_basic -> cn_futures_contract_specs（补充期货合约乘数等静态规格）"
+        - "Adapter 增加 50x 错误重试/指数退避，Normalizer 补齐 .BJ 核验与 None->NaN 统一"
+    unique_data:
+      - "daily_basic（2000 积分无限频日频历史估值与股本市值）"
+      - "fut_basic（期货合约静态规格覆盖全）"
+      - "272 量化因子与大模型语料"
+    known_issues:
+      - "adj_factor 限 1 次/小时，仅适合单日增量校验，严禁用于历史批量回补或作主源"
+      - "stk_mins 限频严重，全市场历史批量拉取耗时过长，严禁作分钟主源"
+      - "社区级 SLA，偶发 50x 或延迟"
+
+decision_framework:
+  steps:
+    - "1. 是否需要盘中实时/当日最早盘后数据？是 -> straightflush 主源"
+    - "2. 是否需要无前视偏差的日频历史数据（如历史估值、分钟/Tick 历史）？是 -> qdc 主源"
+    - "3. 是否仅单一数据源覆盖（如 .TI 概念指数 / 十档 L2 / 一致预期 PIT）？是 -> 唯一覆盖源主源"
+    - "4. 多源均覆盖时：按 straightflush -> qdc -> amazingdata -> tushare 排序，但须核查 known_issues 避免口径污染"
+    - "5. 仅个别字段需特殊源时：使用 field_override（如 adjfactor -> qdc、实时市值 -> straightflush）；静态/低频小表可考虑 tushare 补充"

@@ -1,7 +1,9 @@
 # 多数据源仲裁配置表（覆盖 51 张规范资产表，设计见 docs/design/data/ingestion.md 与 storage_schema.md）。
+# 各数据源能力边界与已知口径差异见 config/source_capabilities.yaml。
 #
-# 全局优先级：straightflush -> qdc -> amazingdata；
-# tushare 因当前积分/频次受限，仅保留在三源存在缺口且低积分可用的表末位作独有/补充源。
+# 全局默认优先级：straightflush -> qdc -> amazingdata；
+# 例外规则：需无前视偏差日频历史但 SF 仅提供最新快照的域（如 cn_stock_fundamental），以 qdc 为主源、实时字段用 field_override 取 SF。
+# tushare 因频次与积分阶梯限制，原则上作末位校验/兜底源（静/低频小表及 2000 分 daily_basic 等待 TushareAdapter 扩展完成后接入）。
 # priority[0] 为唯一写入资产层的主数据源，其余仅用于交叉校验与缺口回补（严禁混写）；
 # field_override 指定单字段强制数据源（须在对应表的 priority 列表中）；切换主源须经提交评审。
 #
@@ -10,24 +12,25 @@
 
 # --- 1. 交易日历 (1) ---
 cn_calendar:
-  priority: [straightflush, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]  # TODO(TushareAdapter): 接入 trade_cal 后可追加 tushare 作校验源
 
 # --- 2. A 股基础信息与行情状态 (6) ---
 cn_stock_basic:
-  priority: [straightflush, amazingdata, tushare]  # QDC 无独立全市场基础表；tushare stock_basic 可补充 market/list_status/is_hs
+  priority: [straightflush, amazingdata, tushare]  # QDC 无独立全市场基础表；TODO(TushareAdapter): 接入 stock_basic 补充 market/list_status/is_hs
 
 cn_stock_bars_daily:
-  priority: [straightflush, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]  # TODO(TushareAdapter): stock 适配器已就绪（含 adj_factor/suspend_d）；因 should_cross_check 要求全部备源到达，暂不列入默认列表，可按需显式指定 --source tushare 校验
   field_override:
-    adjfactor: qdc          # QDC cn_adj_factor 覆盖全历史且无限频（Tushare adj_factor 限 1次/小时）
+    adjfactor: qdc          # QDC cn_adj_factor 覆盖全历史且无限频（Tushare adj_factor 限 1次/小时，仅适合作单日校验）
 
 cn_stock_bars_minute:
-  priority: [qdc, amazingdata]
+  priority: [qdc, amazingdata]  # TODO(StraightFlushAdapter/QdcAdapter): 接入 SF Market Dumps 与 QDC stocks_1m 后评估追加 straightflush 作第三校验源
 
 cn_stock_fundamental:
-  priority: [straightflush, qdc]
+  priority: [qdc, straightflush]  # QDC cn_valuation_1d 提供完整日频历史估值（避免 SF 快照前视偏差）；TODO(TushareAdapter): 接入 daily_basic 后追加 tushare 作第三校验源（注意 total_mv/circ_mv 万元->元）
   field_override:
-    pe_ttm: qdc             # 日频历史估值以 QDC cn_valuation_1d 为准（SF 仅提供最新快照）
+    total_market_cap: straightflush  # SF 实时盘面总市值更准（QDC 盘后才入库）
+    float_market_cap: straightflush
 
 cn_stock_daily_status:
   priority: [qdc, amazingdata]
@@ -40,7 +43,7 @@ cn_stock_index_basic:
   priority: [straightflush, qdc, amazingdata]
 
 cn_stock_index_bars_daily:
-  priority: [straightflush, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]  # 注：实测 QDC 与 SF 在 399001/399006 同为全市场量额且 QDC 缺 .BJ 指数与盘后时效，暂维持 SF 主源；TODO(TushareAdapter): 接入 index_daily 后用于三源多数投票仲裁 AD 成份股口径差异
 
 cn_stock_industry:
   priority: [straightflush, qdc, amazingdata]
@@ -87,10 +90,10 @@ cn_stock_margin:
   priority: [qdc, amazingdata]
 
 cn_stock_lhb:
-  priority: [straightflush, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]  # 确认 SF 主源（营业部明细覆盖完整）
 
 cn_stock_lhb_seats:
-  priority: [straightflush, qdc, amazingdata]
+  priority: [straightflush, qdc, amazingdata]  # QDC 仅 2024+ 覆盖 seat_detail，保持 SF 主源
 
 cn_stock_limit_pool:
   priority: [straightflush, qdc]
@@ -172,7 +175,7 @@ cn_futures_tick_l2:
   priority: [qdc, amazingdata]
 
 cn_futures_contract_specs:
-  priority: [straightflush, qdc, amazingdata, tushare]  # QDC 未购国内期货且 SF/AD 规格不全；tushare fut_basic 可作补充
+  priority: [straightflush, qdc, amazingdata, tushare]  # TODO(TushareAdapter): 接入 fut_basic 后再评估是否提升权重或对 contract_multiplier 做覆写
 
 cn_futures_continuous:
   priority: [straightflush, qdc]

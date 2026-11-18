@@ -1,4 +1,19 @@
-"""Tushare 数据源适配器（A 股日线行情，支持按日期水位线增量拉取）。"""
+"""Tushare 数据源适配器（A 股日线行情，支持按日期水位线增量拉取）。
+
+TODO(Tushare 2000 积分扩展计划，详见 config/source_capabilities.yaml):
+1. 基础可靠性：为 Pro API 请求补充 50x / 网络抖动重试与指数退避。
+2. 核心高价值扩展（2000 积分无限频）：
+   - ``daily_basic`` -> ``cn_stock_fundamental``（日频历史 PE/PB/PS/股息率/换手/市值，
+     作为 QDC + SF 之外的第三校验源；注意 ``total_mv``/``circ_mv`` 原生单位为**万元**，
+     Normalizer 须 ``* 10000`` 对齐平台“元”口径）。
+3. 低频/静态/三源仲裁扩展：
+   - ``trade_cal`` -> ``cn_calendar``
+   - ``stock_basic`` -> ``cn_stock_basic``
+   - ``index_daily`` -> ``cn_stock_index_bars_daily``（用于 SF+QDC vs AD 三源投票）
+   - ``fut_basic`` -> ``cn_futures_contract_specs``
+4. Normalizer 边界补齐：核验 ``.BJ`` 北交所代码与量额单位换算，统一将 ``None`` 转为 ``NaN``。
+5. 严格禁区：``adj_factor`` 限 1 次/小时、``stk_mins`` 限频严重，二者均不可作主源或用于历史批量回补。
+"""
 
 from __future__ import annotations
 

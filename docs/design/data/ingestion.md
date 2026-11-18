@@ -1,6 +1,6 @@
 # ingestion
 
-> 域：data · 对应代码 [data/ingestion.py](../../../data/ingestion.py)
+> 域：data · 对应代码 [data/ingestion.py](../../../data/ingestion.py) · 源能力画像 [config/source_capabilities.yaml](../../../config/source_capabilities.yaml)
 
 ## 职责与边界
 
@@ -17,12 +17,11 @@
 ## 接口签名
 
 ```yaml
-# source_priority.yaml — 主源指定表
-bars_daily:    {priority: [tushare, akshare], field_override: {adjfactor: tushare}}
-bars_minute:   {priority: [tushare]}
-fundamental:   {priority: [akshare, tushare], field_override: {pe_ttm: tushare}}
-option_basic:  {priority: [amazingdata]}
-reference:     {calendar: ..., industry: ...}   # 按表指定
+# config/source_priority.yaml — 主源指定表（示例）
+cn_stock_bars_daily:    {priority: [straightflush, qdc, amazingdata], field_override: {adjfactor: qdc}}
+cn_stock_bars_minute:   {priority: [qdc, amazingdata]}
+cn_stock_fundamental:   {priority: [qdc, straightflush], field_override: {total_market_cap: straightflush, float_market_cap: straightflush}}
+cn_etf_bars_daily:      {priority: [straightflush, qdc, amazingdata], field_override: {adjfactor: qdc}}
 ```
 
 ```python
@@ -70,6 +69,7 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 | 单源写 asset，备源只校验/补缺 | 多源混合写入 | 血缘清晰，问题可追到源 |
 | **不做自动主源选举** | 主源挂了自动切备源为主 | 静默换人是事故温床 |
 | `source_priority.yaml` 按 table 索引 | 硬编码优先级 | 字段级覆盖 |
+| `cn_stock_fundamental` 以 QDC 为主源 + SF 实时市值覆写 | SF 为主源仅覆写 `pe_ttm` | SF 仅提供最新估值快照，历史 `pe_lyr`/`pb`/`ps_ttm` 会引入前视偏差 |
 | 跨源对比在 Normalizer 后 | raw 对比 | raw 列名口径不同 |
 | 对比容差按字段类给 | 全局单一容差 | 价格/成交量/比率的误差量纲不同 |
 | 分级响应 + adjfactor 永远告警 | 不一致即拒收 | 跨源合理误差存在，硬拒频繁误杀 |
@@ -87,15 +87,16 @@ def should_cross_check(...) -> bool:   # hook：主源入库完成 + 备源 raw 
 3. 主源HARD失败+备源可用→fallback补数(带backfill标记+降级告警)
 
 核心约定:
-- field_override 里的字段从指定源取值替换(如 adjfactor只信tushare)
-- 新增数据源=Adapter + Normalizer + source_priority.yaml加一行
-- source_priority.yaml存放于 config/(git追踪)
+- field_override 里的字段从指定源取值替换(如 `adjfactor` 取 `qdc`、`cn_stock_fundamental` 实时市值取 `straightflush`)
+- 新增数据源=Adapter + Normalizer + `source_priority.yaml` 加一行，能力边界同步记录至 [config/source_capabilities.yaml](../../../config/source_capabilities.yaml)
+- `source_priority.yaml` 与 `source_capabilities.yaml` 存放于 `config/`（git 追踪）
+- `TushareAdapter` 2000 积分扩展规划（`daily_basic` / `trade_cal` / `stock_basic` / `index_daily` / `fut_basic`）当前列为 TODO，见 [tushare_adapter.py](../../../data/adapters/tushare_adapter.py)
 
-### 已打通多源校验的表与实测边界（2026-11-13）
+### 已打通多源校验的表与实测边界（2026-11-13 ~ 2026-11-16）
 
 | 规范表 | 优先级（[source_priority.yaml](../../../config/source_priority.yaml)） | 多源校验状态 | 细节与已知问题 |
 |---|---|---|---|
 | [`cn_calendar`](asset/01-stock-core-and-status.md#1-cn_calendar交易日历) | `straightflush` → `qdc` → `amazingdata` | 已配置（`silent`，仅比 `trade_date` 交集窗口） | QDC 不支持日历跳过；AmazingData 返回整型 `YYYYMMDD` 需先转字符串解析，macOS 走 Docker 挂载拉取 |
-| [`cn_stock_bars_daily`](asset/01-stock-core-and-status.md#3-cn_stock_bars_daily股票日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（SF vs QDC / AD 均 `silent`） | `field_override: adjfactor=qdc`；Normalizer 显式强制浮点列转 `float64` |
+| [`cn_stock_bars_daily`](asset/01-stock-core-and-status.md#3-cn_stock_bars_daily股票日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（SF vs QDC / AD 均 `silent`） | `field_override: adjfactor=qdc`；Normalizer 显式强制浮点列转 `float64`；QDC 当日滞后返回空表时会触发回退 `amazingdata:backfill` |
 | [`cn_etf_bars_daily`](asset/06-etf-and-fund.md#2-cn_etf_bars_dailyetf-独立日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（AD `silent`；QDC `WARNING 0.17%`） | SF 零成交 `NaN` 由入库过滤（`<= 20%`）且交叉校验在 `volume==0` 等收盘时豁免；保留 QDC `tdx_mootdx` 小额 ETF 整百截断 `WARNING` |
-| [`cn_stock_index_bars_daily`](asset/02-stock-index-and-board.md#2-cn_stock_index_bars_daily指数与板块日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（QDC `WARNING 0.36%`；AD `ERROR 2.89%`） | SF `000xxx.CSI` 对齐 `.SH`；AD `.SH` 指数手→股 `*100`；保留 QDC `000012`/`000022` 100 倍单位差异与 AD 16 只偏差监控 |
+| [`cn_stock_index_bars_daily`](asset/02-stock-index-and-board.md#2-cn_stock_index_bars_daily指数与板块日线行情) | `straightflush` → `qdc` → `amazingdata` | 已配置（QDC `WARNING 0.36%`；AD `ERROR 2.89%–3.24%`） | SF 与 QDC 在 `399001.SZ`/`399006.SZ` 同为全市场量额且 QDC 缺 `.BJ` 指数与盘后时效，暂维持 SF 主源；AD 按成份股计算量额及债券指数口径差异触发 `ERROR` |
