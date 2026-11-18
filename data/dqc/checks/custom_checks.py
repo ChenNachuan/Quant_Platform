@@ -193,6 +193,43 @@ def check_industry_coverage(
     return pd.Series([ratio < min_ratio], index=["__aggregate__"])
 
 
+def row_count_vs_prev_day(
+    df: pd.DataFrame,
+    prev_row_count: int = 0,
+    min_ratio: float = 0.9,
+    max_ratio: float = 1.1,
+    **_,
+) -> pd.Series:
+    """C11：当日行数与前一日行数比值须在 [min_ratio, max_ratio] 内（无前日基准则跳过）。"""
+    if not prev_row_count or prev_row_count <= 0:
+        return pd.Series(False, index=df.index)
+    ratio = len(df) / prev_row_count
+    if ratio < min_ratio or ratio > max_ratio:
+        return pd.Series([True], index=pd.Index(["__aggregate__"]))
+    return pd.Series(False, index=df.index)
+
+
+def ticker_set_drift(
+    df: pd.DataFrame,
+    prev_tickers=None,
+    max_new_rate: float = 0.05,
+    max_drop_rate: float = 0.02,
+    **_,
+) -> pd.Series:
+    """C12：标的集合跨日漂移检测——新增 > max_new_rate 或消失 > max_drop_rate 时全批告警。"""
+    if not prev_tickers or "ticker" not in df.columns:
+        return pd.Series(False, index=df.index)
+    prev = {str(t) for t in prev_tickers}
+    if not prev:
+        return pd.Series(False, index=df.index)
+    today = set(df["ticker"].dropna().astype(str).unique())
+    new_rate = len(today - prev) / len(prev)
+    drop_rate = len(prev - today) / len(prev)
+    if new_rate > max_new_rate or drop_rate > max_drop_rate:
+        return pd.Series([True], index=pd.Index(["__aggregate__"]))
+    return pd.Series(False, index=df.index)
+
+
 # ── 合法性 L03–L05, L12 ─────────────────────────────────────────────────
 
 
@@ -373,6 +410,33 @@ def check_fund_vs_daily_tickers(
     diff = fund_set.symmetric_difference(set(daily_tickers))
     return pd.Series([len(diff) > max_diff], index=["__aggregate__"])
 
+
+def value_distribution_shift(
+    df: pd.DataFrame,
+    prev_stats: dict | None = None,
+    col: str = "close",
+    max_mean_shift: float = 0.1,
+    **_,
+) -> pd.Series:
+    """K12：数值分布跨日偏移——今日均值相对前日均值偏移超过 max_mean_shift 时全批告警。"""
+    if not prev_stats or col not in df.columns:
+        return pd.Series(False, index=df.index)
+    prev_mean = prev_stats.get(f"{col}_mean")
+    if prev_mean is None or pd.isna(prev_mean) or prev_mean == 0:
+        return pd.Series(False, index=df.index)
+    series = pd.to_numeric(df[col], errors="coerce").dropna()
+    if series.empty:
+        return pd.Series(False, index=df.index)
+    today_mean = float(series.mean())
+    shift = abs(today_mean - float(prev_mean)) / abs(float(prev_mean))
+    if shift > max_mean_shift:
+        return pd.Series([True], index=pd.Index(["__aggregate__"]))
+    return pd.Series(False, index=df.index)
+
+
+check_row_count_vs_prev_day = row_count_vs_prev_day
+check_ticker_set_drift = ticker_set_drift
+check_value_distribution_shift = value_distribution_shift
 
 # ── 时效性 T01–T09 ──────────────────────────────────────────────────────
 

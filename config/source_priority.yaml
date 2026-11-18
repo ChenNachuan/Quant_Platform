@@ -190,3 +190,31 @@ cross_check:
     adjfactor: 1.0e-6
     pe_pb: 0.02
     default: 0.001
+  # 剥离跳过列表：已知独家指数（如 SF .TI 概念指数）不参与跨源交叉校验
+  skip_suffixes:
+    cn_stock_index_bars_daily: [".TI"]
+  # 显式口径豁免：已知跨源统计口径差异字段不计入不一致
+  exemptions:
+    cn_stock_index_bars_daily:
+      399001.SZ: [volume, amount]  # 深证成指：SF/QDC 全市场口径 vs AD 成份股口径
+      399006.SZ: [volume, amount]  # 创业板指：SF/QDC 全市场口径 vs AD 成份股口径
+      000012.SH: [volume]          # 上证国债指数：手/张口径差异
+      000022.SH: [volume]          # 上证公司债指数：手/张口径差异
+  # 按资产子类分级容差（按 YAML 顺序匹配，bond/cross_border 先于 equity 兜底）
+  tolerance_overrides:
+    cn_stock_index_bars_daily:
+      bond:
+        tickers: ["000012.SH", "000013.SH", "000022.SH", "000061.SH", "399481.SZ"]
+        price: 0.20
+        volume: 0.05
+        amount: 0.05
+      cross_border:
+        prefixes: ["HSI", "HSCEI", "HSTECH", "SPX", "NDX"]
+        price: 0.50
+        volume: 0.02
+        amount: 0.02
+      equity:
+        prefixes: ["000", "399", "899", "93", "97", "98", "47", "48"]
+        price: 0.05
+        volume: 0.005
+        amount: 0.005

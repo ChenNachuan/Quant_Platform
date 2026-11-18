@@ -28,7 +28,7 @@ from data.storage_ops import (
     is_monthly_partition,
     partition_path,
 )
-from data.storage_schema import PARTITION_PATHS
+from data.storage_schema import PARTITION_PATHS, resolve_table_name
 from core.config import DATA_ROOT
 
 __all__ = [
@@ -39,11 +39,13 @@ __all__ = [
     "summary_path",
     "build_detail_rows",
     "build_summary_row",
+    "compute_quality_score",
     "append_detail",
     "append_summary",
     "load_detail",
     "load_summary",
     "load_quarantine_batches",
+    "load_prev_day_stats",
     "build_reference_overrides",
     "run_dashboard",
     "reingest",
@@ -60,6 +62,7 @@ SUMMARY_TABLE = "_dqc_batch_summary"
 DETAIL_COLUMNS = [
     "run_date",
     "run_time",
+    "run_id",
     "data_date",
     "table",
     "rule_id",
@@ -76,6 +79,7 @@ DETAIL_COLUMNS = [
 ]
 SUMMARY_COLUMNS = [
     "run_time",
+    "run_id",
     "data_date",
     "table",
     "total_rows",
@@ -88,6 +92,7 @@ SUMMARY_COLUMNS = [
     "hard_rules_failed",
     "soft_rules_failed",
     "elapsed_seconds",
+    "quality_score",
 ]
 QUARANTINE_COLUMNS = [
     "data_date",
@@ -134,6 +139,23 @@ def summary_path(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> Path:
 # ── 行构建 ───────────────────────────────────────────────────────────────
 
 
+def compute_quality_score(
+    hard_results: Sequence[Any],
+    soft_results: Sequence[Any],
+    total_rows: int = 0,
+) -> float:
+    """百分制数据质量分：满分 100，每个触发的 HARD 规则扣 10 分，每个触发的 SOFT 规则扣 2 分。"""
+    del total_rows  # 保留签名参数以兼容调用方
+    score = 100.0
+    for r in hard_results:
+        if r.failing_count > 0:
+            score -= 10.0
+    for r in soft_results:
+        if r.failing_count > 0:
+            score -= 2.0
+    return max(0.0, score)
+
+
 def build_detail_rows(
     hard_results: Sequence[Any],
     soft_results: Sequence[Any],
@@ -142,6 +164,7 @@ def build_detail_rows(
     table: str,
     batch_rejected: bool = False,
     run_time: datetime | None = None,
+    run_id: str = "",
 ) -> list[dict]:
     """构建单批每条规则对应的 ``_dqc_results`` 明细行。"""
     when = run_time or _now()
@@ -161,6 +184,7 @@ def build_detail_rows(
             {
                 "run_date": when.date(),
                 "run_time": when,
+                "run_id": run_id,
                 "data_date": data_date,
                 "table": table,
                 "rule_id": result.rule_id,
@@ -195,6 +219,10 @@ def build_summary_row(
     soft_failed: Sequence[str],
     elapsed_seconds: float,
     run_time: datetime | None = None,
+    run_id: str = "",
+    quality_score: float | None = None,
+    hard_results: Sequence[Any] | None = None,
+    soft_results: Sequence[Any] | None = None,
 ) -> dict:
     """构建单批对应的 ``_dqc_batch_summary`` 汇总行。"""
     if batch_status not in BATCH_STATUSES:
@@ -204,8 +232,17 @@ def build_summary_row(
     total = int(total_rows)
     dropped = int(rows_dropped)
     flagged = int(rows_flagged)
+    if quality_score is not None:
+        score = float(quality_score)
+    elif hard_results is not None or soft_results is not None:
+        score = compute_quality_score(hard_results or (), soft_results or (), total)
+    else:
+        score = max(
+            0.0, 100.0 - 10.0 * len(list(hard_failed)) - 2.0 * len(list(soft_failed))
+        )
     return {
         "run_time": run_time or _now(),
+        "run_id": run_id,
         "data_date": data_date,
         "table": table,
         "total_rows": total,
@@ -218,6 +255,7 @@ def build_summary_row(
         "hard_rules_failed": json.dumps(list(hard_failed), ensure_ascii=False),
         "soft_rules_failed": json.dumps(list(soft_failed), ensure_ascii=False),
         "elapsed_seconds": float(elapsed_seconds),
+        "quality_score": score,
     }
 
 
@@ -231,6 +269,20 @@ def _normalize_legacy_table_col(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _align_report_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """补齐历史报告缺失的新增字段并按 *columns* 对齐列序。"""
+    out = _normalize_legacy_table_col(df).copy()
+    for col in columns:
+        if col not in out.columns:
+            if col == "run_id":
+                out[col] = ""
+            elif col == "quality_score":
+                out[col] = float("nan")
+            else:
+                out[col] = pd.NA
+    return out[columns]
+
+
 def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
     """在 ``FileLock`` 保护下原子追加行到未注册的报告 Parquet 文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -241,7 +293,7 @@ def _append_parquet(path: Path, rows: list[dict], columns: list[str]) -> Path:
     tmp = path.with_name(path.name + ".tmp")
     with FileLock(path):
         if path.exists():
-            existing = _normalize_legacy_table_col(pd.read_parquet(path))
+            existing = _align_report_columns(pd.read_parquet(path), columns)
             combined = pd.concat([existing, new_df], ignore_index=True)
         else:
             combined = new_df
@@ -302,7 +354,7 @@ def load_detail(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFr
     files = sorted(root.glob("month=*/data.parquet"))
     if not files:
         return pd.DataFrame(columns=DETAIL_COLUMNS)
-    frames = [_normalize_legacy_table_col(pd.read_parquet(f)) for f in files]
+    frames = [_align_report_columns(pd.read_parquet(f), DETAIL_COLUMNS) for f in files]
     return pd.concat(frames, ignore_index=True)[DETAIL_COLUMNS]
 
 
@@ -311,7 +363,7 @@ def load_summary(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataF
     path = summary_path(data_root)
     if not path.exists():
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
-    return _normalize_legacy_table_col(pd.read_parquet(path))[SUMMARY_COLUMNS]
+    return _align_report_columns(pd.read_parquet(path), SUMMARY_COLUMNS)
 
 
 def load_quarantine_batches(
@@ -367,6 +419,48 @@ def load_quarantine_batches(
 
 
 # ── 参考数据注入 ─────────────────────────────────────────────────────────
+
+
+def load_prev_day_stats(
+    data_root: str | os.PathLike[str],
+    table: str,
+    data_date: date,
+) -> dict[str, Any]:
+    """从前一个可用日分区 Parquet 提取行数、标的列表及均值统计（严格早于 *data_date*）。"""
+    root = Path(data_root)
+    canonical = resolve_table_name(table)
+    template = PARTITION_PATHS.get(canonical)
+    if not template or "{date}" not in template:
+        return {}
+    table_dir = partition_path(canonical, data_date, root).parent
+    if not table_dir.exists() and canonical == "cn_stock_bars_daily":
+        legacy_dir = root / "asset" / "bars_daily"
+        if legacy_dir.exists():
+            table_dir = legacy_dir
+    if not table_dir.exists():
+        return {}
+    date_str = data_date.strftime("%Y-%m-%d")
+    prior = [
+        f
+        for f in table_dir.glob("*.parquet")
+        if len(f.stem) == 10 and f.stem < date_str
+    ]
+    if not prior:
+        return {}
+    prev_file = max(prior)
+    prev_df = pd.read_parquet(prev_file)
+    stats: dict[str, Any] = {
+        "prev_date": prev_file.stem,
+        "row_count": int(len(prev_df)),
+    }
+    if "ticker" in prev_df.columns:
+        stats["tickers"] = sorted(set(prev_df["ticker"].dropna().astype(str)))
+    for col in ("close", "open", "high", "low", "volume", "amount"):
+        if col in prev_df.columns:
+            series = pd.to_numeric(prev_df[col], errors="coerce").dropna()
+            if not series.empty:
+                stats[f"{col}_mean"] = float(series.mean())
+    return stats
 
 
 def build_reference_overrides(
@@ -464,6 +558,12 @@ def build_reference_overrides(
                 stored = stored[td == data_date].reset_index(drop=True)
             if {"ticker", "adjfactor"} <= set(stored.columns):
                 overrides["previous_adjfactor"] = stored
+
+    prev_stats = load_prev_day_stats(root, table, data_date)
+    if prev_stats:
+        overrides["prev_row_count"] = prev_stats.get("row_count", 0)
+        overrides["prev_tickers"] = prev_stats.get("tickers", [])
+        overrides["prev_stats"] = prev_stats
     return overrides
 
 

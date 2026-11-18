@@ -1247,3 +1247,29 @@ class TestDqcReportTables:
         )
         assert proc.returncode == 0
         assert "quarantine" in proc.stdout and "reingest" in proc.stdout
+
+    def test_build_reference_overrides_injects_strictly_prior_day_stats(self, tmp_path):
+        from data.dqc import report
+
+        bars_dir = tmp_path / "asset" / "cn_stock_bars_daily"
+        bars_dir.mkdir(parents=True, exist_ok=True)
+        d_prev = _dqc_daily_frame(n=4)
+        d_prev["close"] = 20.0
+        d_prev.to_parquet(bars_dir / "2024-01-02.parquet")
+        # Same-day file (e.g. --force re-ingest) must NOT be picked as prev_day
+        d_same = _dqc_daily_frame(n=2)
+        d_same["close"] = 999.0
+        d_same.to_parquet(bars_dir / "2024-01-03.parquet")
+
+        ov = report.build_reference_overrides(
+            tmp_path, "cn_stock_bars_daily", date(2024, 1, 3)
+        )
+        assert ov["prev_row_count"] == 4
+        assert ov["prev_tickers"] == [
+            "000001.SZ",
+            "000002.SZ",
+            "000003.SZ",
+            "000004.SZ",
+        ]
+        assert ov["prev_stats"]["close_mean"] == 20.0
+        assert ov["prev_stats"]["prev_date"] == "2024-01-02"

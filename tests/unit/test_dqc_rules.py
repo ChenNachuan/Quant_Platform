@@ -1,4 +1,4 @@
-"""Structural and constructive tests for DQC rules — 44 rules across 5 asset YAMLs.
+"""Structural and constructive tests for DQC rules — 47 rules across 5 asset YAMLs.
 
 Part 1: structural validation (counts, continuity, applicability, YAML shape).
 Part 2: declarative evaluation harness + clean-sample test + 27 HARD trigger cases.
@@ -26,16 +26,16 @@ YAML_FILES = [
 
 # Expected ID ranges per dimension
 EXPECTED_IDS = {
-    "C": [f"C{i:02d}" for i in range(1, 11)],  # C01-C10
+    "C": [f"C{i:02d}" for i in range(1, 13)],  # C01-C12
     "L": [f"L{i:02d}" for i in range(1, 15)],  # L01-L14
-    "K": [f"K{i:02d}" for i in range(1, 12)],  # K01-K11
+    "K": [f"K{i:02d}" for i in range(1, 13)],  # K01-K12
     "T": [f"T{i:02d}" for i in range(1, 10)],  # T01-T09
 }
 ALL_EXPECTED_IDS = sorted([rid for ids in EXPECTED_IDS.values() for rid in ids])
 
 # Expected HARD/SOFT counts per dimension prefix
 EXPECTED_HARD = {"C": 6, "L": 9, "K": 7, "T": 5}  # total 27
-EXPECTED_SOFT = {"C": 4, "L": 5, "K": 4, "T": 4}  # total 17
+EXPECTED_SOFT = {"C": 6, "L": 5, "K": 5, "T": 4}  # total 20
 
 # Applicability marks from the design tables: rule_id -> set of marks
 EXPECTED_APPLICABILITY = {
@@ -49,6 +49,8 @@ EXPECTED_APPLICABILITY = {
     "C08": {"factor"},
     "C09": {"factor"},
     "C10": {"reference"},
+    "C11": {"daily"},
+    "C12": {"daily"},
     "L01": {"daily", "minute"},
     "L02": {"daily", "minute"},
     "L03": {"daily", "minute"},
@@ -74,6 +76,7 @@ EXPECTED_APPLICABILITY = {
     "K09": {"factor"},
     "K10": {"reference"},
     "K11": {"daily", "fund"},
+    "K12": {"daily"},
     "T01": {"daily", "fund"},
     "T02": {"minute"},
     "T03": {"daily", "minute", "fund", "factor", "reference"},
@@ -386,10 +389,10 @@ class TestYamlFilesExist:
 
 
 class TestRuleCountAndContinuity:
-    def test_unique_ids_exactly_44(self):
+    def test_unique_ids_exactly_47(self):
         entries = _load_all_rules()
         unique = _unique_rules(entries)
-        assert len(unique) == 44, f"expected 44 unique ids, got {len(unique)}"
+        assert len(unique) == 47, f"expected 47 unique ids, got {len(unique)}"
 
     def test_id_continuity_each_dimension(self):
         entries = _load_all_rules()
@@ -420,11 +423,11 @@ class TestHardSoftBreakdown:
         hard = [r for r in unique.values() if r["severity"] == "HARD"]
         assert len(hard) == 27, f"expected 27 HARD, got {len(hard)}"
 
-    def test_soft_total_17(self):
+    def test_soft_total_20(self):
         entries = _load_all_rules()
         unique = _unique_rules(entries)
         soft = [r for r in unique.values() if r["severity"] == "SOFT"]
-        assert len(soft) == 17, f"expected 17 SOFT, got {len(soft)}"
+        assert len(soft) == 20, f"expected 20 SOFT, got {len(soft)}"
 
     def test_hard_per_dimension(self):
         entries = _load_all_rules()
@@ -584,11 +587,11 @@ class TestUniquenessAcrossFiles:
                         )
 
 
-# ── Clean sample: all 44 rules pass ───────────────────────────────────
+# ── Clean sample: all 47 rules pass ───────────────────────────────────
 
 
 class TestCleanSample:
-    """A clean small sample must produce 0 failures across all 44 rules."""
+    """A clean small sample must produce 0 failures across all 47 rules."""
 
     def _run_all(self, overrides_map=None):
         rules = _get_rules()
@@ -660,7 +663,7 @@ class TestCleanSample:
 
         return total_failures, failures_detail
 
-    def test_all_44_rules_pass_clean_sample(self):
+    def test_all_47_rules_pass_clean_sample(self):
         total, detail = self._run_all()
         assert total == 0, f"clean sample should have 0 failures, got {total}: {detail}"
 
@@ -1293,3 +1296,84 @@ class TestThirdReviewRegression:
             dirty.loc[0, "close"] = bad_close
             flagged = evaluate_column_check(dirty, rule)
             assert flagged.iloc[0], f"{rid} must flag a bad minute close"
+
+
+class TestCrossDayChecks:
+    """C11 (row_count_vs_prev_day), C12 (ticker_set_drift), K12 (value_distribution_shift)."""
+
+    def test_C11_row_count_vs_prev_day(self):
+        from data.dqc.checks.custom_checks import row_count_vs_prev_day
+
+        df = pd.DataFrame({"ticker": [f"000{i:03d}.SZ" for i in range(10)]})
+        # No prev baseline -> skips (False)
+        assert not row_count_vs_prev_day(df, prev_row_count=0).any()
+        # Within [0.9, 1.1] -> passes
+        assert not row_count_vs_prev_day(df, prev_row_count=10).any()
+        assert not row_count_vs_prev_day(df, prev_row_count=11).any()  # 10/11 = 0.909
+        # Sharp drop (< 0.9) -> __aggregate__ True
+        drop = row_count_vs_prev_day(df, prev_row_count=15)
+        assert list(drop.index) == ["__aggregate__"]
+        assert bool(drop.iloc[0]) is True
+        # Sudden spike (> 1.1) -> __aggregate__ True
+        spike = row_count_vs_prev_day(df, prev_row_count=8)
+        assert list(spike.index) == ["__aggregate__"]
+        assert bool(spike.iloc[0]) is True
+
+    def test_C12_ticker_set_drift(self):
+        from data.dqc.checks.custom_checks import ticker_set_drift
+
+        prev = [f"000{i:03d}.SZ" for i in range(100)]
+        df_same = pd.DataFrame({"ticker": prev})
+        assert not ticker_set_drift(df_same, prev_tickers=None).any()
+        assert not ticker_set_drift(df_same, prev_tickers=prev).any()
+
+        # 6% new tickers (> 5%) -> triggers
+        df_new = pd.DataFrame({"ticker": prev + [f"600{i:03d}.SH" for i in range(6)]})
+        res_new = ticker_set_drift(df_new, prev_tickers=prev)
+        assert list(res_new.index) == ["__aggregate__"]
+        assert bool(res_new.iloc[0]) is True
+
+        # 3% dropped tickers (> 2%) -> triggers
+        df_drop = pd.DataFrame({"ticker": prev[3:]})
+        res_drop = ticker_set_drift(df_drop, prev_tickers=prev)
+        assert list(res_drop.index) == ["__aggregate__"]
+        assert bool(res_drop.iloc[0]) is True
+
+        # 5% new and 2% drop at boundary -> passes
+        df_edge = pd.DataFrame(
+            {"ticker": prev[2:] + [f"600{i:03d}.SH" for i in range(5)]}
+        )
+        assert not ticker_set_drift(df_edge, prev_tickers=prev).any()
+
+    def test_K12_value_distribution_shift(self):
+        from data.dqc.checks.custom_checks import value_distribution_shift
+
+        df = pd.DataFrame({"close": [10.0, 20.0, 30.0]})  # mean = 20.0
+        assert not value_distribution_shift(df, prev_stats=None).any()
+        assert not value_distribution_shift(df, prev_stats={"close_mean": 0.0}).any()
+        # 5% shift <= 10% -> passes
+        assert not value_distribution_shift(df, prev_stats={"close_mean": 21.0}).any()
+        # 25% shift > 10% -> triggers
+        res = value_distribution_shift(df, prev_stats={"close_mean": 16.0})
+        assert list(res.index) == ["__aggregate__"]
+        assert bool(res.iloc[0]) is True
+
+    def test_cross_day_rules_registered_in_engine(self):
+        from data.dqc.engine import run_all_checks
+
+        df = _make_clean_daily()
+        _hard, soft = run_all_checks(
+            df,
+            pd.Timestamp("2024-01-03").date(),
+            "bars_daily",
+            overrides={
+                "prev_row_count": 100,  # triggers C11
+                "prev_tickers": ["999999.SH"] * 10,  # triggers C12
+                "prev_stats": {"close_mean": 1000.0},  # triggers K12
+            },
+        )
+        by_id = {r.rule_id: r for r in soft}
+        for rid in ("C11", "C12", "K12"):
+            assert rid in by_id
+            assert by_id[rid].failing_count == len(df)
+            assert by_id[rid].action_taken == "flag"

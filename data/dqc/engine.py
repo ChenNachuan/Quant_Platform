@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import importlib
+import copy
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -31,9 +33,12 @@ from pandera.pandas import DataFrameSchema
 
 from core.config import DATA_ROOT
 from data.dqc import report
+from data.dqc.notify import notify_dqc_event
 from data.dqc.severity import (
+    DQC_THRESHOLDS_PATH,
     BatchRejectConfig,
     DQCBatchReject,
+    _load_threshold_overrides,
     compute_quality_flag,
     severity_config_for,
 )
@@ -54,6 +59,7 @@ __all__ = [
     "DQC_RULE_FILES",
     "CheckResult",
     "BatchEvaluation",
+    "load_dqc_thresholds",
     "run_all_checks",
     "evaluate_batch",
     "build_schema",
@@ -143,7 +149,18 @@ class BatchEvaluation:
 # ── 规则加载与执行 ───────────────────────────────────────────────────────
 
 
-def _load_rules(dqc_group: DqcRuleGroup | str) -> list[dict]:
+def load_dqc_thresholds(
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """从 ``config/dqc_thresholds.yaml`` 加载规则阈值与升级配置。"""
+    return _load_threshold_overrides(path)
+
+
+def _load_rules(
+    dqc_group: DqcRuleGroup | str,
+    *,
+    thresholds_path: str | os.PathLike[str] | None = None,
+) -> list[dict]:
     try:
         fname = DQC_RULE_FILES[dqc_group]
     except KeyError:
@@ -152,7 +169,20 @@ def _load_rules(dqc_group: DqcRuleGroup | str) -> list[dict]:
         ) from None
     with open(RULES_DIR / fname, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    return list(data["rules"])
+    thresholds = load_dqc_thresholds(thresholds_path or DQC_THRESHOLDS_PATH)
+    rules: list[dict] = []
+    for raw_rule in data["rules"]:
+        rule = copy.deepcopy(raw_rule)
+        override = thresholds.get(rule.get("id"))
+        if isinstance(override, dict):
+            if "value" in override:
+                rule["value"] = copy.deepcopy(override["value"])
+            if "params" in override and isinstance(override["params"], dict):
+                merged_params = dict(rule.get("params") or {})
+                merged_params.update(copy.deepcopy(override["params"]))
+                rule["params"] = merged_params
+        rules.append(rule)
+    return rules
 
 
 def _resolve_function(func_path: str):
@@ -467,11 +497,13 @@ def _reject_batch(
     *,
     reason: str,
     data_root: str | os.PathLike,
+    run_id: str = "",
 ) -> NoReturn:
     """将原始批次写入隔离区并抛出 :class:`DQCBatchReject`。"""
     drop_rate = (float(rows_to_drop.sum()) / len(df)) if len(df) else 0.0
     triggered = [r.rule_id for r in hard_results if r.failing_count]
     detail = {
+        "run_id": run_id,
         "data_date": data_date.strftime("%Y-%m-%d"),
         "table": table,
         "reject_time": datetime.now().isoformat(timespec="seconds"),
@@ -484,6 +516,12 @@ def _reject_batch(
     }
     save_quarantine(df, table, data_date, detail, data_root)
     logger.error("DQC batch rejected (%s): %s", reason, detail)
+    notify_dqc_event(
+        "REJECT",
+        f"batch rejected: {table} {detail['data_date']} ({reason})",
+        detail,
+        run_id=run_id,
+    )
     raise DQCBatchReject(
         f"batch {detail['data_date']} {table} rejected: {reason} "
         f"(drop_rate={drop_rate:.4f}, rows_would_drop={detail['rows_would_drop']}"
@@ -512,13 +550,23 @@ def ingest_with_dqc(
     """
     config = batch_config or BatchRejectConfig()
     table = table or str(dqc_group)
+    run_id = str(uuid.uuid4())[:8]
     started = time.monotonic()
     run_time = datetime.now(timezone.utc).replace(tzinfo=None)
+    merged_overrides = dict(overrides or {})
+    if "prev_row_count" not in merged_overrides:
+        prev_stats = report.load_prev_day_stats(data_root, table, data_date)
+        if prev_stats:
+            merged_overrides.setdefault(
+                "prev_row_count", prev_stats.get("row_count", 0)
+            )
+            merged_overrides.setdefault("prev_tickers", prev_stats.get("tickers", []))
+            merged_overrides.setdefault("prev_stats", prev_stats)
     evaluation = evaluate_batch(
         df,
         data_date,
         dqc_group,
-        overrides=overrides,
+        overrides=merged_overrides,
         cross_df=cross_df,
         batch_config=config,
     )
@@ -533,7 +581,9 @@ def ingest_with_dqc(
         table=table,
         batch_rejected=rejected,
         run_time=run_time,
+        run_id=run_id,
     )
+    quality_score = report.compute_quality_score(hard_results, soft_results, len(df))
     summary_row = report.build_summary_row(
         data_date,
         table,
@@ -545,6 +595,8 @@ def ingest_with_dqc(
         soft_failed=[r.rule_id for r in soft_results if r.failing_count],
         elapsed_seconds=time.monotonic() - started,
         run_time=run_time,
+        run_id=run_id,
+        quality_score=quality_score,
     )
 
     if rejected:
@@ -559,6 +611,7 @@ def ingest_with_dqc(
             hard_results,
             reason=evaluation.reject_reason,
             data_root=data_root,
+            run_id=run_id,
         )
 
     # 第 4–5 步：剔除问题行并挂载质量位掩码
@@ -588,6 +641,21 @@ def ingest_with_dqc(
     flagged_rate = (
         float((df_clean["quality_flag"] != 0).mean()) if len(df_clean) else 0.0
     )
+    if "soft_alarm" in evaluation.warnings:
+        notify_dqc_event(
+            "WARN",
+            f"soft alarm: {table} {data_date.strftime('%Y-%m-%d')}",
+            {
+                "table": table,
+                "data_date": data_date.strftime("%Y-%m-%d"),
+                "flagged_count": evaluation.flagged_count,
+                "flagged_rate": round(flagged_rate, 6),
+                "soft_rules_failed": [
+                    r.rule_id for r in soft_results if r.failing_count
+                ],
+            },
+            run_id=run_id,
+        )
     report.append_detail(detail_rows, data_root=data_root)
     report.append_summary(summary_row, data_root=data_root)
     logger.info(

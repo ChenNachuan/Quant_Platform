@@ -12,9 +12,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+import yaml
 
 from core.types import QualityFlag
 
@@ -26,6 +29,7 @@ __all__ = [
     "RULE_FLAG_BITS",
     "DQCSeverityConfig",
     "SEVERITY_CONFIGS",
+    "DQC_THRESHOLDS_PATH",
     "severity_config_for",
     "BatchRejectConfig",
     "DQCBatchReject",
@@ -84,6 +88,8 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
     "C08": DQCSeverityConfig("flag", None, "batch"),
     "C09": DQCSeverityConfig("flag", None, "batch"),
     "C10": DQCSeverityConfig("pass", 0.0, "batch"),
+    "C11": DQCSeverityConfig("flag", None, "batch"),
+    "C12": DQCSeverityConfig("flag", None, "batch"),
     # 合法性
     "L01": DQCSeverityConfig("drop", 0.01),  # 负价格视为数据损坏
     "L02": DQCSeverityConfig("drop", 0.01),
@@ -111,6 +117,7 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
     "K09": DQCSeverityConfig("flag"),
     "K10": DQCSeverityConfig("pass", 0.0, "batch"),
     "K11": DQCSeverityConfig("flag"),
+    "K12": DQCSeverityConfig("flag", None, "batch"),
     # 时效性
     "T01": DQCSeverityConfig("pass", 0.0, "batch"),  # 数据过期拒绝入库
     "T02": DQCSeverityConfig("pass", 0.0, "batch"),
@@ -124,15 +131,48 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
 }
 
 
-def severity_config_for(rule_id: str) -> DQCSeverityConfig:
+DQC_THRESHOLDS_PATH: Path = (
+    Path(__file__).resolve().parents[2] / "config" / "dqc_thresholds.yaml"
+)
+_THRESHOLD_CACHE: dict[Path, tuple[int, dict[str, dict[str, Any]]]] = {}
+
+
+def _load_threshold_overrides(
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    resolved = Path(path) if path is not None else DQC_THRESHOLDS_PATH
+    if not resolved.is_file():
+        return {}
+    mtime = resolved.stat().st_mtime_ns
+    cached = _THRESHOLD_CACHE.get(resolved)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    raw = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    thresholds = raw.get("thresholds") if isinstance(raw, dict) else {}
+    parsed = dict(thresholds) if isinstance(thresholds, dict) else {}
+    _THRESHOLD_CACHE[resolved] = (mtime, parsed)
+    return parsed
+
+
+def severity_config_for(
+    rule_id: str,
+    *,
+    thresholds_path: str | os.PathLike[str] | None = None,
+) -> DQCSeverityConfig:
     """返回 *rule_id* 的处置配置；未登记规则直接报错（fail-closed）。"""
     try:
-        return SEVERITY_CONFIGS[rule_id]
+        base = SEVERITY_CONFIGS[rule_id]
     except KeyError:
         raise KeyError(
             f"no DQCSeverityConfig for rule {rule_id!r}; add it to "
             "data.dqc.severity.SEVERITY_CONFIGS before enabling the rule"
         ) from None
+    entry = _load_threshold_overrides(thresholds_path).get(rule_id)
+    if isinstance(entry, dict) and "escalation_threshold" in entry:
+        return DQCSeverityConfig(
+            base.row_action, entry["escalation_threshold"], base.granularity
+        )
+    return base
 
 
 @dataclass(frozen=True)

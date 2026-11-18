@@ -55,10 +55,13 @@ __all__ = [
     "ResponseLevel",
     "load_source_priority",
     "load_tolerances",
+    "load_tolerance_overrides",
+    "load_exemptions",
     "get_source_priority",
     "get_primary_source",
     "get_field_overrides",
     "tolerance_for",
+    "_ticker_in_group",
     "cross_source_check",
     "response_level",
     "respond",
@@ -510,6 +513,130 @@ def load_tolerances(
     return {c: float(tolerances[c]) for c in TOLERANCE_CLASSES}
 
 
+_BOND_INDEX_TICKERS = frozenset(
+    {"000012.SH", "000013.SH", "000022.SH", "000061.SH", "399481.SZ"}
+)
+_CROSS_BORDER_PREFIXES = ("HSI", "HSCEI", "HSTECH", "SPX", "NDX")
+_EQUITY_INDEX_PREFIXES = ("000", "399", "899", "93", "97", "98", "47", "48")
+
+
+def _cross_check_section(
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    cfg = load_source_priority(path)
+    section = cfg.get("cross_check")
+    return dict(section) if isinstance(section, dict) else {}
+
+
+def load_tolerance_overrides(
+    asset_type: str,
+    *,
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """读取 ``cross_check.tolerance_overrides`` 中指定表的按子类分级容差配置。"""
+    section = _cross_check_section(path)
+    all_overrides = section.get("tolerance_overrides") or {}
+    if not isinstance(all_overrides, dict):
+        return {}
+    key = _lookup_key(all_overrides, asset_type)
+    if key is None:
+        return {}
+    table_overrides = all_overrides.get(key)
+    if not isinstance(table_overrides, dict):
+        return {}
+    return {
+        str(group): dict(cfg)
+        for group, cfg in table_overrides.items()
+        if isinstance(cfg, dict)
+    }
+
+
+def load_exemptions(
+    asset_type: str,
+    *,
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, set[str]]:
+    """读取 ``cross_check.exemptions`` 中指定表的 ``{ticker: set(fields)}`` 口径豁免映射。"""
+    section = _cross_check_section(path)
+    all_exemptions = section.get("exemptions") or {}
+    if not isinstance(all_exemptions, dict):
+        return {}
+    key = _lookup_key(all_exemptions, asset_type)
+    if key is None:
+        return {}
+    table_exemptions = all_exemptions.get(key) or {}
+    if not isinstance(table_exemptions, dict):
+        return {}
+    return {
+        str(ticker): {str(f) for f in (fields or ())}
+        for ticker, fields in table_exemptions.items()
+    }
+
+
+def _load_skip_rules(
+    asset_type: str,
+    *,
+    path: str | os.PathLike[str] | None = None,
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    section = _cross_check_section(path)
+    skip_tickers_map = section.get("skip_tickers") or {}
+    skip_suffixes_map = section.get("skip_suffixes") or {}
+    tickers: list[str] = []
+    suffixes: list[str] = []
+    if isinstance(skip_tickers_map, dict):
+        key = _lookup_key(skip_tickers_map, asset_type)
+        if key is not None:
+            tickers = [str(t) for t in (skip_tickers_map.get(key) or ())]
+    if isinstance(skip_suffixes_map, dict):
+        key = _lookup_key(skip_suffixes_map, asset_type)
+        if key is not None:
+            suffixes = [str(s) for s in (skip_suffixes_map.get(key) or ())]
+    return frozenset(tickers), tuple(suffixes)
+
+
+def _ticker_in_group(
+    ticker: str,
+    group_name: str,
+    asset_type: str,
+    *,
+    group_cfg: Mapping[str, Any] | None = None,
+) -> bool:
+    """判定 *ticker* 是否属于 *asset_type* 下的指定子类 *group_name*。"""
+    del asset_type
+    t = str(ticker)
+    if group_cfg is not None:
+        explicit_tickers = group_cfg.get("tickers")
+        explicit_prefixes = group_cfg.get("prefixes")
+        explicit_suffixes = group_cfg.get("suffixes")
+        has_explicit = any(
+            x is not None
+            for x in (explicit_tickers, explicit_prefixes, explicit_suffixes)
+        )
+        if has_explicit:
+            if explicit_tickers and t in {str(x) for x in explicit_tickers}:
+                return True
+            if explicit_prefixes and t.startswith(
+                tuple(str(p) for p in explicit_prefixes)
+            ):
+                return True
+            if explicit_suffixes and t.endswith(
+                tuple(str(s) for s in explicit_suffixes)
+            ):
+                return True
+            return False
+    if group_name == "bond":
+        return t in _BOND_INDEX_TICKERS
+    if group_name == "cross_border":
+        return t.startswith(_CROSS_BORDER_PREFIXES)
+    if group_name == "equity":
+        if t in _BOND_INDEX_TICKERS or t.startswith(_CROSS_BORDER_PREFIXES):
+            return False
+        return t.startswith(_EQUITY_INDEX_PREFIXES) or t.endswith(
+            (".SH", ".SZ", ".BJ", ".CSI")
+        )
+    return False
+
+
 def get_source_priority(
     table: str,
     sub_type: str | None = None,
@@ -548,13 +675,30 @@ def get_field_overrides(
 
 # --- 五级容差查询 ---
 def tolerance_for(
-    field: str, tolerances: Mapping[str, float] | None = None
+    field: str,
+    tolerances: Mapping[str, float] | None = None,
+    *,
+    asset_type: str | None = None,
+    ticker: str | None = None,
+    path: str | os.PathLike[str] | None = None,
 ) -> tuple[float, str]:
-    """返回 *field* 的 ``(容差阈值, 比较模式)``（``absolute`` 或 ``relative``）；未列出字段使用 ``default``。"""
+    """返回 *field* 的 ``(容差阈值, 比较模式)``（``absolute`` 或 ``relative``）；支持按资产子类覆盖容差。"""
     cls = TOLERANCE_CLASS.get(field, "default")
-    table = dict(tolerances) if tolerances is not None else load_tolerances()
+    table = dict(tolerances) if tolerances is not None else load_tolerances(path)
     value = float(table[cls] if cls in table else table["default"])
     mode = "absolute" if cls in _ABSOLUTE_CLASSES else "relative"
+
+    if asset_type and ticker:
+        overrides = load_tolerance_overrides(asset_type, path=path)
+        for group_name, group_tols in overrides.items():
+            if _ticker_in_group(ticker, group_name, asset_type, group_cfg=group_tols):
+                override_val = group_tols.get(field)
+                if override_val is None:
+                    override_val = group_tols.get(cls)
+                if isinstance(override_val, (int, float)) and not isinstance(
+                    override_val, bool
+                ):
+                    return float(override_val), mode
     return value, mode
 
 
@@ -632,6 +776,22 @@ def cross_source_check(
         if "trade_date" in df_a.columns and "trade_date" in df_b.columns
         else ["ticker"]
     )
+    canonical = resolve_table_name(table)
+    skip_tickers, skip_suffixes = _load_skip_rules(canonical)
+    if skip_tickers or skip_suffixes:
+
+        def _keep_mask(series: pd.Series) -> pd.Series:
+            s = series.astype(str)
+            mask = pd.Series(True, index=series.index)
+            if skip_tickers:
+                mask = mask & ~s.isin(skip_tickers)
+            if skip_suffixes:
+                mask = mask & ~s.str.endswith(skip_suffixes)
+            return mask
+
+        df_a = df_a.loc[_keep_mask(df_a["ticker"])]
+        df_b = df_b.loc[_keep_mask(df_b["ticker"])]
+
     if df_a.duplicated(join_keys).any() or df_b.duplicated(join_keys).any():
         raise ValueError(f"duplicate join keys {join_keys} in input frames")
 
@@ -640,6 +800,19 @@ def cross_source_check(
     )
     both = merged[merged["_merge"] == "both"]
     matched_rows = int(len(both))
+    exemptions = load_exemptions(canonical)
+    has_overrides = bool(load_tolerance_overrides(canonical))
+
+    def _field_tol(field_name: str) -> tuple[float | pd.Series, str]:
+        base_tol, mode = tolerance_for(field_name, tolerances)
+        if not has_overrides or both.empty:
+            return base_tol, mode
+        unique_tickers = both["ticker"].astype(str).unique()
+        tol_map = {
+            t: tolerance_for(field_name, tolerances, asset_type=canonical, ticker=t)[0]
+            for t in unique_tickers
+        }
+        return both["ticker"].astype(str).map(tol_map).astype("float64"), mode
 
     _ohlc_nullable_when_zero_vol = frozenset({"open", "high", "low"})
     zero_vol_close_ok: pd.Series | None = None
@@ -650,7 +823,7 @@ def cross_source_check(
         vol_b = pd.to_numeric(both["volume_b"], errors="coerce")
         cls_a = pd.to_numeric(both["close_a"], errors="coerce").astype("float64")
         cls_b = pd.to_numeric(both["close_b"], errors="coerce").astype("float64")
-        close_tol, close_mode = tolerance_for("close", tolerances)
+        close_tol, close_mode = _field_tol("close")
         close_diff = (cls_a - cls_b).abs()
         if close_mode == "absolute":
             close_ok = close_diff <= close_tol
@@ -671,7 +844,7 @@ def cross_source_check(
         valid = ~(na | nb)
         one_missing = na ^ nb
         diff = (a - b).abs()
-        tol, mode = tolerance_for(field, tolerances)
+        tol, mode = _field_tol(field)
         if mode == "absolute":
             bad = valid & (diff > tol)
         else:
@@ -699,14 +872,23 @@ def cross_source_check(
             bad = bad | (one_missing & ~exempt_zero_vol)
         else:
             bad = bad | one_missing
+        is_exempt = pd.Series(False, index=both.index)
+        if exemptions and not both.empty:
+            is_exempt = (
+                both["ticker"].astype(str).map(lambda t: field in exemptions.get(t, ()))
+            )
+            bad = bad & ~is_exempt
         count = int(bad.sum())
         if not count:
             continue
+        valid_non_exempt = valid & ~is_exempt
         mismatched[field] = MismatchDetail(
             field=field,
             mismatch_count=count,
             mismatch_rate=(count / matched_rows) if matched_rows else 0.0,
-            max_abs_diff=float(diff[valid].max()) if bool(valid.any()) else 0.0,
+            max_abs_diff=float(diff[valid_non_exempt].max())
+            if bool(valid_non_exempt.any())
+            else 0.0,
             sample_tickers=list(both.loc[bad, "ticker"].head(5)),
         )
 

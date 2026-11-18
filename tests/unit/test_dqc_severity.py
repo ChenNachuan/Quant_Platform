@@ -173,12 +173,12 @@ def test_batch_reject_config_defaults():
 
 def test_disposition_table_spot_checks():
     expected = (
-        {f"C{i:02d}" for i in range(1, 11)}
+        {f"C{i:02d}" for i in range(1, 13)}
         | {f"L{i:02d}" for i in range(1, 15)}
-        | {f"K{i:02d}" for i in range(1, 12)}
+        | {f"K{i:02d}" for i in range(1, 13)}
         | {f"T{i:02d}" for i in range(1, 10)}
     )
-    assert set(severity.SEVERITY_CONFIGS) == expected  # all 44 rules
+    assert set(severity.SEVERITY_CONFIGS) == expected  # all 47 rules
     l04 = severity_config_for("L04")
     assert (l04.row_action, l04.escalation_threshold) == ("flag", None)
     t03 = severity_config_for("T03")
@@ -360,3 +360,183 @@ def test_ingest_clean_daily_smoke(tmp_path):
     )
     assert len(written) == 2
     assert set(written.columns) == set(engine.build_schema("bars_daily").columns)
+
+
+# ── Webhook, run_id, quality_score & thresholds decoupling ────────────
+
+
+def test_compute_quality_score():
+    from data.dqc.report import compute_quality_score
+
+    df = _daily_frame(4)
+    h_pass = _fake_result("L01", df, [False] * 4, "HARD")
+    h_fail = _fake_result("L01", df, [True, False, False, False], "HARD")
+    s_pass = _fake_result("C05", df, [False] * 4, "SOFT")
+    s_fail = _fake_result("C05", df, [True, False, False, False], "SOFT")
+    s_fail2 = _fake_result("L04", df, [True, False, False, False], "SOFT")
+
+    assert compute_quality_score([h_pass], [s_pass], 4) == 100.0
+    assert compute_quality_score([h_fail], [s_fail, s_fail2], 4) == 86.0
+    # Clamped at 0.0 when deductions exceed 100
+    assert compute_quality_score([h_fail] * 12, [s_fail] * 5, 4) == 0.0
+
+
+def test_run_id_and_quality_score_written_to_reports(tmp_path, monkeypatch):
+    from data.dqc import report
+
+    df = _daily_frame(10)
+    soft = [_fake_result("C05", df, [i == 0 for i in range(10)], "SOFT")]
+    monkeypatch.setattr(engine, "run_all_checks", _fake_runner(soft=soft))
+    engine.ingest_with_dqc(df, DATA_DATE, "bars_daily", data_root=tmp_path)
+
+    summary = report.load_summary(tmp_path)
+    detail = report.load_detail(tmp_path)
+    assert len(summary) == 1
+    run_id = summary.iloc[0]["run_id"]
+    assert isinstance(run_id, str) and len(run_id) == 8
+    assert (detail["run_id"] == run_id).all()
+    assert summary.iloc[0]["quality_score"] == 98.0
+
+
+def test_webhook_fault_isolation_and_notifications(tmp_path, monkeypatch):
+    import requests
+
+    from data.dqc import notify, report
+
+    df = _daily_frame(10)
+    # 1) DQC_WEBHOOK_URL unset -> accepted and rejected work cleanly
+    monkeypatch.delenv("DQC_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(
+        engine,
+        "run_all_checks",
+        _fake_runner(
+            soft=[_fake_result("C05", df, [i < 6 for i in range(10)], "SOFT")]
+        ),
+    )
+    out = engine.ingest_with_dqc(df, DATA_DATE, "bars_daily", data_root=tmp_path)
+    assert len(out) == 10
+
+    # 2) Invalid/failing webhook URL -> ConnectionError must NOT escape ingest_with_dqc
+    monkeypatch.setenv("DQC_WEBHOOK_URL", "http://127.0.0.1:9/invalid-hook")
+
+    def _boom(*args, **kwargs):
+        raise requests.ConnectionError("network unreachable")
+
+    monkeypatch.setattr(notify.requests, "post", _boom)
+    out2 = engine.ingest_with_dqc(df, DATA_DATE, "bars_daily", data_root=tmp_path)
+    assert len(out2) == 10
+
+    # Rejected batch still raises DQCBatchReject (not ConnectionError)
+    monkeypatch.setattr(
+        engine,
+        "run_all_checks",
+        _fake_runner(hard=[_fake_result("T03", df, [i == 0 for i in range(10)])]),
+    )
+    with pytest.raises(DQCBatchReject) as excinfo:
+        engine.ingest_with_dqc(df, DATA_DATE, "bars_daily", data_root=tmp_path)
+    assert len(excinfo.value.detail["run_id"]) == 8
+
+    # 3) Capture actual webhook payloads on WARN and REJECT
+    sent: list[dict] = []
+
+    def _capture(url, json=None, timeout=None):
+        sent.append({"url": url, "json": json, "timeout": timeout})
+
+    monkeypatch.setattr(notify.requests, "post", _capture)
+    monkeypatch.setattr(
+        engine,
+        "run_all_checks",
+        _fake_runner(
+            soft=[_fake_result("C05", df, [i < 6 for i in range(10)], "SOFT")]
+        ),
+    )
+    engine.ingest_with_dqc(df, DATA_DATE, "bars_daily", data_root=tmp_path)
+    assert len(sent) == 1
+    assert "[DQC WARN][run_id=" in sent[0]["json"]["content"]["text"]
+
+    monkeypatch.setattr(
+        engine,
+        "run_all_checks",
+        _fake_runner(hard=[_fake_result("T03", df, [i == 0 for i in range(10)])]),
+    )
+    with pytest.raises(DQCBatchReject):
+        engine.ingest_with_dqc(df, DATA_DATE, "bars_daily", data_root=tmp_path)
+    assert len(sent) == 2
+    assert "[DQC REJECT][run_id=" in sent[1]["json"]["content"]["text"]
+    assert report.load_summary(tmp_path).iloc[-1]["quality_score"] == 90.0
+
+
+def test_dqc_thresholds_yaml_matches_inline_rules_and_supports_override(tmp_path):
+    import yaml
+
+    empty_thr = tmp_path / "empty_thresholds.yaml"
+    empty_thr.write_text("thresholds: {}\n", encoding="utf-8")
+
+    for group in engine.DQC_RULE_FILES:
+        with_file = engine._load_rules(group)
+        without_file = engine._load_rules(group, thresholds_path=empty_thr)
+        assert with_file == without_file, (
+            f"dqc_thresholds.yaml diverged from inline rules for group={group}"
+        )
+
+    # Verify escalation_threshold parity across all 47 rules
+    for rid, base_cfg in severity.SEVERITY_CONFIGS.items():
+        assert severity_config_for(rid) == base_cfg
+
+    # Verify custom threshold override works
+    custom_thr = tmp_path / "custom_thresholds.yaml"
+    custom_thr.write_text(
+        yaml.safe_dump(
+            {
+                "thresholds": {
+                    "L01": {"value": 0.5, "escalation_threshold": 0.05},
+                    "L04": {"params": {"tolerance": 0.01}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    daily_rules = {
+        r["id"]: r for r in engine._load_rules("bars_daily", thresholds_path=custom_thr)
+    }
+    assert daily_rules["L01"]["value"] == 0.5
+    assert daily_rules["L04"]["params"]["tolerance"] == 0.01
+    assert (
+        daily_rules["L04"]["params"]["main_limit"] == 0.10
+    )  # preserved inline default
+    assert (
+        severity_config_for("L01", thresholds_path=custom_thr).escalation_threshold
+        == 0.05
+    )
+
+
+def test_legacy_report_parquet_backcompat(tmp_path):
+    from data.dqc import report
+
+    # Write legacy summary & detail without run_id / quality_score
+    s_path = report.summary_path(tmp_path)
+    s_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_summary_cols = [
+        c for c in report.SUMMARY_COLUMNS if c not in ("run_id", "quality_score")
+    ]
+    row = report.build_summary_row(
+        DATA_DATE,
+        "bars_daily",
+        total_rows=10,
+        rows_dropped=0,
+        rows_flagged=0,
+        batch_status="accepted",
+        hard_failed=[],
+        soft_failed=[],
+        elapsed_seconds=0.1,
+    )
+    pd.DataFrame([{k: row[k] for k in legacy_summary_cols}]).to_parquet(s_path)
+
+    loaded = report.load_summary(tmp_path)
+    assert list(loaded.columns) == report.SUMMARY_COLUMNS
+    assert loaded.iloc[0]["run_id"] == ""
+    assert pd.isna(loaded.iloc[0]["quality_score"])
+
+    report.append_summary(row, data_root=tmp_path)
+    loaded2 = report.load_summary(tmp_path)
+    assert len(loaded2) == 2

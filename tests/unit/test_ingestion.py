@@ -734,3 +734,73 @@ class TestCalendarCrossCheck:
                 secondary,
                 "cn_calendar",
             )
+
+
+class TestTieredCrossCheckTolerancesAndExemptions:
+    def test_tolerance_for_subclass_overrides(self):
+        # Stock bars daily has no overrides -> base tolerances
+        assert tolerance_for(
+            "close", asset_type="cn_stock_bars_daily", ticker="000001.SZ"
+        ) == (
+            0.01,
+            "absolute",
+        )
+        # Equity index -> equity tier
+        assert tolerance_for(
+            "close", asset_type="cn_stock_index_bars_daily", ticker="000300.SH"
+        ) == (0.05, "absolute")
+        assert tolerance_for(
+            "volume", asset_type="cn_stock_index_bars_daily", ticker="000300.SH"
+        ) == (0.005, "relative")
+        # Bond index -> bond tier (matched before equity despite 000 prefix)
+        assert tolerance_for(
+            "close", asset_type="cn_stock_index_bars_daily", ticker="000012.SH"
+        ) == (0.20, "absolute")
+        assert tolerance_for(
+            "volume", asset_type="cn_stock_index_bars_daily", ticker="000012.SH"
+        ) == (0.05, "relative")
+        # Cross-border index -> cross_border tier
+        assert tolerance_for(
+            "close", asset_type="cn_stock_index_bars_daily", ticker="HSI.HK"
+        ) == (0.50, "absolute")
+
+    def test_index_cross_check_skips_ti_and_exempts_known_fields(self):
+        primary = pd.DataFrame(
+            {
+                "ticker": ["885001.TI", "399001.SZ", "000012.SH", "000300.SH"],
+                "trade_date": [TRADE_DATE] * 4,
+                "open": [1000.0, 10000.0, 200.0, 4000.0],
+                "high": [1010.0, 10100.0, 201.0, 4020.0],
+                "low": [990.0, 9900.0, 199.0, 3980.0],
+                "close": [1005.0, 10050.0, 200.5, 4010.0],
+                "volume": [1e6, 5e10, 1e6, 1e9],
+                "amount": [1e9, 6e11, 2e8, 2e11],
+            }
+        )
+        secondary = pd.DataFrame(
+            {
+                "ticker": ["399001.SZ", "000012.SH", "000300.SH"],
+                "trade_date": [TRADE_DATE] * 3,
+                "open": [10000.0, 200.0, 4000.0],
+                "high": [10100.0, 201.0, 4020.0],
+                "low": [9900.0, 199.0, 3980.0],
+                # 000012.SH close diff=0.15 <= bond 0.20; 000300.SH close diff=0.03 <= equity 0.05
+                "close": [10050.02, 200.65, 4010.03],
+                # 399001.SZ & 000012.SH volume/amount differ dramatically (exempted)
+                "volume": [1e9, 1e8, 1e9 * 1.003],  # 000300.SH rel diff 0.3% <= 0.5%
+                "amount": [1e10, 2e8, 2e11],
+            }
+        )
+        res = cross_source_check(
+            primary,
+            secondary,
+            "cn_stock_index_bars_daily",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert res.missing_in_secondary == 0  # .TI skipped before join
+        assert res.missing_in_primary == 0
+        assert res.total_rows == 3
+        assert res.matched_rows == 3
+        assert res.mismatched_fields == {}
+        assert respond(res) == "silent"

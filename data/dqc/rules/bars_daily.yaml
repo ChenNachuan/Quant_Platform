@@ -1,6 +1,6 @@
 # DQC rules — bars_daily (daily bars / daily+futures)
 # Source: docs/design/data/dqc_rules.md
-# Unique rule IDs across all 5 YAMLs = 44 (C01-C10, L01-L14, K01-K11, T01-T09).
+# Unique rule IDs across all 5 YAMLs = 47 (C01-C12, L01-L14, K01-K12, T01-T09).
 # Multi-asset rules repeat per their applicability mark.
 # HARD = reject-to-quarantine, SOFT = quality_flag only (never interchanged).
 
@@ -72,6 +72,34 @@ rules:
     threshold_source: fixed
     boundary: "eq 0: any missing (ticker,date) adjfactor entry fails"
     description: "Adjfactor must be present for every ticker x date"
+
+  - id: C11
+    name: row_count_vs_prev_day
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.row_count_vs_prev_day"
+    params:
+      min_ratio: 0.9
+      max_ratio: 1.1
+    applicability: [daily]
+    threshold: "today row count / prev row count in [0.9, 1.1]"
+    threshold_source: statistical
+    boundary: "inclusive [0.9, 1.1]: ratio outside [0.9, 1.1] flags batch"
+    description: "Cross-day row count ratio vs previous trading day"
+
+  - id: C12
+    name: ticker_set_drift
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.ticker_set_drift"
+    params:
+      max_new_rate: 0.05
+      max_drop_rate: 0.02
+    applicability: [daily]
+    threshold: "new ticker rate <= 5% AND dropped ticker rate <= 2%"
+    threshold_source: statistical
+    boundary: "le: new_rate > 0.05 or drop_rate > 0.02 flags batch"
+    description: "Cross-day ticker set drift vs previous trading day"
 
   - id: L01
     name: price_positive
@@ -324,6 +352,20 @@ rules:
     threshold_source: statistical
     boundary: "le 5: difference of exactly 5 passes, 6 fails"
     description: "Ticker set consistency between fundamental and daily"
+
+  - id: K12
+    name: value_distribution_shift
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.value_distribution_shift"
+    params:
+      col: "close"
+      max_mean_shift: 0.10
+    applicability: [daily]
+    threshold: "mean(close) shift vs previous day <= 10%"
+    threshold_source: statistical
+    boundary: "le 0.10: relative shift > 0.10 flags batch"
+    description: "Cross-day value distribution mean shift vs previous day"
 
   # ---- Timeliness T01-T09 ----
   - id: T01
