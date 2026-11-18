@@ -88,7 +88,7 @@ class AmazingdataAdapter(SourceAdapter):
     def _resolve_data_root(self) -> Path:
         if self._data_root is not None:
             return self._data_root
-        return Path(core_config.DATA_ROOT)
+        return core_config.get_data_root()
 
     def _can_import_sdk(self) -> bool:
         try:

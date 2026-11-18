@@ -23,9 +23,9 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from core.config import DATA_ROOT, get_data_root
 from data.storage_ops import write_parquet_atomic
 from data.storage_schema import factor_schema
-from core.config import DATA_ROOT
 
 __all__ = [
     "load_factor",
@@ -54,6 +54,8 @@ METADATA_FIELDS: tuple[str, ...] = (
     "updated_at",
     "depends_on",
     "depends_hash",
+    "data_sources",
+    "data_hash",
     "date_range",
     "row_count",
     "file_count",
@@ -76,10 +78,17 @@ def _safe_component(value: str, what: str) -> str:
     return s
 
 
-def _version_dir(base_dir: str, name: str, version: str) -> Path:
+def _resolve_base_dir(base_dir: str | Path | None) -> str:
+    """解析因子根目录；未显式传入时使用当前上下文 ``get_data_root() / 'factors'``。"""
+    if base_dir is not None:
+        return str(base_dir)
+    return str(get_data_root() / "factors")
+
+
+def _version_dir(base_dir: str | Path | None, name: str, version: str) -> Path:
     """返回因子版本目录路径 ``{base_dir}/{name}/v{version}``。"""
     return (
-        Path(base_dir)
+        Path(_resolve_base_dir(base_dir))
         / _safe_component(name, "factor name")
         / f"v{_safe_component(version, 'version')}"
     )
@@ -101,6 +110,40 @@ def _depends_hash(depends_on: Iterable[str]) -> str:
     return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:12]
 
 
+def _compute_data_hash(df: pd.DataFrame) -> str:
+    """计算因子数据内容的确定性 SHA-256 摘要（按 ``(date, ticker)`` 排序）。"""
+    if df.empty:
+        return hashlib.sha256(b"").hexdigest()
+    work = df.copy()
+    if "date" in work.columns:
+        work["date"] = pd.to_datetime(work["date"], format="mixed").dt.strftime(
+            "%Y-%m-%d"
+        )
+    sort_cols = [c for c in _KEY_COLS if c in work.columns]
+    if sort_cols:
+        work = work.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+    payload = work.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _resolve_data_sources(
+    factor: Any,
+    result: pd.DataFrame,
+    depends_on: list[str],
+    explicit: Iterable[str] | None,
+) -> list[str]:
+    """解析写入因子元数据的数据源血缘列表。"""
+    if explicit is not None:
+        return [str(s) for s in explicit]
+    attrs = getattr(result, "attrs", None)
+    if isinstance(attrs, dict) and attrs.get("data_sources") is not None:
+        return [str(s) for s in attrs["data_sources"]]
+    factor_sources = getattr(factor, "data_sources", None)
+    if factor_sources is not None:
+        return [str(s) for s in factor_sources]
+    return [str(d) for d in depends_on if not str(d).startswith("factor:")]
+
+
 def _write_year(chunk: pd.DataFrame, path: Path, factor_name: str) -> None:
     """通过 ``data.storage_ops.write_parquet_atomic`` 原子写入单年 Parquet 文件。"""
     write_parquet_atomic(
@@ -118,10 +161,17 @@ def _write_year(chunk: pd.DataFrame, path: Path, factor_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def write_metadata(out_dir, factor, result) -> None:
+def write_metadata(
+    out_dir,
+    factor,
+    result,
+    *,
+    data_sources: Iterable[str] | None = None,
+    data_hash: str | None = None,
+) -> None:
     """写入描述因子版本目录的 ``metadata.json``。
 
-    ``date_range`` / ``row_count`` / ``file_count`` 优先统计目录内现存 Parquet 文件，
+    ``date_range`` / ``row_count`` / ``file_count`` / ``data_hash`` 优先统计目录内现存 Parquet 文件，
     尚无文件时回退至 ``result``；跨次重写自动保留 ``created_at`` 与 ``eval`` /
     ``attempts`` / ``attempt_log`` 等评估块。
     """
@@ -138,11 +188,11 @@ def write_metadata(out_dir, factor, result) -> None:
 
     files = sorted(out_path.glob("*.parquet"))
     if files:
-        dates = pd.concat(
-            [pd.read_parquet(p, columns=["date"]) for p in files], ignore_index=True
-        )["date"]
+        stored = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+        dates = stored["date"]
         row_count = int(len(dates))
         date_range: list[str] | None = [str(dates.min()), str(dates.max())]
+        hash_source = stored
     else:
         row_count = int(len(result))
         if row_count:
@@ -150,8 +200,23 @@ def write_metadata(out_dir, factor, result) -> None:
             date_range = [str(rdates.min().date()), str(rdates.max().date())]
         else:
             date_range = None
+        hash_source = result
 
     depends_on = list(factor.depends_on())
+    resolved_sources = _resolve_data_sources(factor, result, depends_on, data_sources)
+    if data_hash is not None:
+        resolved_hash = str(data_hash)
+    else:
+        attrs = getattr(result, "attrs", None)
+        attr_hash = attrs.get("data_hash") if isinstance(attrs, dict) else None
+        resolved_hash = (
+            str(attr_hash)
+            if attr_hash is not None
+            else str(
+                getattr(factor, "data_hash", None) or _compute_data_hash(hash_source)
+            )
+        )
+
     now = datetime.now(timezone.utc).isoformat()
 
     meta: dict[str, Any] = {
@@ -165,6 +230,8 @@ def write_metadata(out_dir, factor, result) -> None:
         "updated_at": now,
         "depends_on": depends_on,
         "depends_hash": _depends_hash(depends_on),
+        "data_sources": resolved_sources,
+        "data_hash": resolved_hash,
         "date_range": date_range,
         "row_count": row_count,
         "file_count": len(files),
@@ -207,7 +274,14 @@ def _normalise(result: pd.DataFrame, factor_name: str) -> pd.DataFrame:
     return out
 
 
-def save_factor_append(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None:
+def save_factor_append(
+    factor,
+    result,
+    base_dir: str | Path | None = None,
+    *,
+    data_sources: Iterable[str] | None = None,
+    data_hash: str | None = None,
+) -> None:
     """增量追加写入因子当前版本目录。
 
     先校验 ``result`` 再建目录；按年份拆分并与盘上既有文件合并，按 ``(date, ticker)``
@@ -234,10 +308,23 @@ def save_factor_append(factor, result, base_dir=str(DATA_ROOT / "factors")) -> N
             _write_year(chunk, path, factor.name)
         data = data.drop(columns=["_year"])
 
-    write_metadata(out_dir, factor, data)
+    write_metadata(
+        out_dir,
+        factor,
+        data,
+        data_sources=data_sources,
+        data_hash=data_hash,
+    )
 
 
-def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> None:
+def save_factor_full(
+    factor,
+    result,
+    base_dir: str | Path | None = None,
+    *,
+    data_sources: Iterable[str] | None = None,
+    data_hash: str | None = None,
+) -> None:
     """全量覆盖写入当前版本目录（不影响其他版本目录）。
 
     先校验 ``result`` 再建目录，全部新年份文件原子写入完成后再删除过期年份文件，
@@ -262,7 +349,13 @@ def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> Non
         if stale not in written:
             stale.unlink()
 
-    write_metadata(out_dir, factor, data)
+    write_metadata(
+        out_dir,
+        factor,
+        data,
+        data_sources=data_sources,
+        data_hash=data_hash,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +364,11 @@ def save_factor_full(factor, result, base_dir=str(DATA_ROOT / "factors")) -> Non
 
 
 def load_factor(
-    name, start, end, version="1.0", base_dir=str(DATA_ROOT / "factors")
+    name,
+    start,
+    end,
+    version="1.0",
+    base_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """按 ``[start, end]``（含端点）读取单因子原始值。
 
@@ -307,7 +404,7 @@ def load_factor_matrix(
     start,
     end,
     version="1.0",
-    base_dir=str(DATA_ROOT / "factors"),
+    base_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """读取多因子并按 ``(date, ticker)`` 外连接为宽表 ``(date, ticker, f1, f2, ...)``，缺失值保持 ``NaN``。"""
     if not names:

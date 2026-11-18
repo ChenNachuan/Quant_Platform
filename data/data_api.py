@@ -10,31 +10,80 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from enum import Enum
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
 import duckdb
 import pandas as pd
 import pyarrow as pa
-from core.config import DATA_ROOT
+from core.config import DATA_ROOT, get_data_root
 from data.storage_schema import TABLE_ALIASES
 
 logger = logging.getLogger(__name__)
 
+
 # --- 表族与参数枚举 ---
-#: 存储表族选择器字面量类型（仅用于 ``data_api`` 路由底层行情表，非交易规则资产类型）。
-TableFamily = Literal[
-    "equity",
-    "stock",
-    "etf",
-    "futures",
-    "continuous",
-    "cn_stock",
-    "cn_equity",
-    "cn_etf",
-    "cn_futures",
-    "cn_continuous",
-]
+class TableFamily(Enum):
+    """标准存储表族枚举（内部统一使用规范表名，入口别名经 ``_ALIASES`` 归一化）。"""
+
+    CN_STOCK_DAILY = "cn_stock_bars_daily"
+    CN_STOCK_MINUTE = "cn_stock_bars_minute"
+    CN_ETF_DAILY = "cn_etf_bars_daily"
+    CN_ETF_MINUTE = "cn_etf_bars_minute"
+    CN_FUTURES_DAILY = "cn_futures_bars_daily"
+    CN_CONTINUOUS_DAILY = "cn_futures_continuous"
+
+
+#: 入口表族别名归一化映射（历史/简写 -> 规范表族前缀）。
+_ALIASES: dict[str, str] = {
+    "equity": "cn_stock",
+    "stock": "cn_stock",
+    "cn_equity": "cn_stock",
+    "etf": "cn_etf",
+    "futures": "cn_futures",
+    "continuous": "cn_continuous",
+}
+
+#: 集中声明各规范行情表的列与属性，替代分散在各查询构造器中的硬编码分支。
+TABLE_SCHEMA: dict[str, dict[str, Any]] = {
+    "cn_stock_bars_daily": {
+        "date_col": "trade_date",
+        "filter_col": "trade_date",
+        "ticker_col": "ticker",
+        "has_adjfactor": True,
+    },
+    "cn_stock_bars_minute": {
+        "date_col": "datetime",
+        "filter_col": "trade_date",
+        "ticker_col": "ticker",
+        "has_adjfactor": False,
+    },
+    "cn_etf_bars_daily": {
+        "date_col": "trade_date",
+        "filter_col": "trade_date",
+        "ticker_col": "ticker",
+        "has_adjfactor": True,
+    },
+    "cn_etf_bars_minute": {
+        "date_col": "datetime",
+        "filter_col": "trade_date",
+        "ticker_col": "ticker",
+        "has_adjfactor": False,
+    },
+    "cn_futures_bars_daily": {
+        "date_col": "trade_date",
+        "filter_col": "trade_date",
+        "ticker_col": "ticker",
+        "has_adjfactor": False,
+    },
+    "cn_futures_continuous": {
+        "date_col": "trade_date",
+        "filter_col": "trade_date",
+        "ticker_col": "dominant_contract",
+        "has_adjfactor": True,
+    },
+}
 
 #: 标准化行情频率字面量类型。
 BarFreq = Literal["daily", "minute", "5min", "60min"]
@@ -66,25 +115,6 @@ class BarsResult:
     data: pd.DataFrame
     meta: BarsMeta
 
-
-TABLE_MAP: dict[tuple[TableFamily, str], str] = {
-    ("equity", "daily"): "bars_daily",
-    ("stock", "daily"): "bars_daily",
-    ("etf", "daily"): "cn_etf_bars_daily",
-    ("equity", "minute"): "bars_minute",
-    ("stock", "minute"): "bars_minute",
-    ("etf", "minute"): "cn_etf_bars_minute",
-    ("futures", "daily"): "bars_daily_futures",
-    ("continuous", "daily"): "continuous",
-    ("cn_stock", "daily"): "cn_stock_bars_daily",
-    ("cn_equity", "daily"): "cn_stock_bars_daily",
-    ("cn_stock", "minute"): "cn_stock_bars_minute",
-    ("cn_equity", "minute"): "cn_stock_bars_minute",
-    ("cn_etf", "daily"): "cn_etf_bars_daily",
-    ("cn_etf", "minute"): "cn_etf_bars_minute",
-    ("cn_futures", "daily"): "cn_futures_bars_daily",
-    ("cn_continuous", "daily"): "cn_futures_continuous",
-}
 
 # 目标频率 -> 底层表基础频率（5min/60min 由 minute 聚合）
 _FREQ_BASE: dict[str, str] = {
@@ -123,6 +153,12 @@ _DEFAULT_DATA_ROOT = str(DATA_ROOT / "asset")
 _DEFAULT_START = "2020-01-01"
 _DEFAULT_END = "2024-12-31"
 
+# --- 模块级连接单例与复权基准缓存 ---
+_API_CACHE: dict[Path, DataAPI] = {}
+_API_LOCK = threading.Lock()
+_ADJ_CACHE: dict[tuple[Path | int, str], pd.DataFrame] = {}
+_ADJ_LOCK = threading.Lock()
+
 
 def _base_freq(freq: str) -> str:
     """将 *freq* 映射到底层基础表频率（5min/60min -> minute）。"""
@@ -135,21 +171,64 @@ def _base_freq(freq: str) -> str:
 
 
 def _resolve_table(table_family: TableFamily | str, freq: BarFreq | str) -> str:
-    """解析 (*table_family*, *freq*) 对应的存储表名。"""
+    """解析 (*table_family*, *freq*) 对应的规范存储表名。"""
     base = _base_freq(freq)
-    key = (table_family, base)
-    if key in TABLE_MAP:  # type: ignore[operator]
-        return TABLE_MAP[key]  # type: ignore[index]
-    for (k_asset, k_freq), v in TABLE_MAP.items():
-        if k_freq == base:
-            legacy_or_alias = TABLE_ALIASES.get(v, "")
-            if table_family in (v, legacy_or_alias):
-                return v
-    valid = sorted(TABLE_MAP)
+    if isinstance(table_family, TableFamily):
+        if table_family.name.endswith(f"_{base.upper()}"):
+            return table_family.value
+    else:
+        canonical = _ALIASES.get(table_family, table_family)
+        enum_key = f"{canonical}_{base}".upper()
+        member = TableFamily.__members__.get(enum_key)
+        if member is not None:
+            return member.value
+        # 兼容直接传入完整规范表名或旧表名（如 cn_stock_bars_daily / bars_daily）
+        for m in TableFamily:
+            if m.name.endswith(f"_{base.upper()}"):
+                alias_name = TABLE_ALIASES.get(m.value, "")
+                if table_family in (m.value, alias_name):
+                    return m.value
+    valid = [m.name.lower() for m in TableFamily]
     raise ValueError(
         f"no table for table_family={table_family!r} freq={freq!r}; "
-        f"valid (table_family, base_freq) pairs: {valid}"
-    ) from None
+        f"valid table families: {valid}"
+    )
+
+
+def _resolve_asset_root(data_root: str | Path | None = None) -> Path:
+    """解析资产层根目录；未显式传入时读取当前上下文 ``get_data_root() / 'asset'``。"""
+    if data_root is None:
+        return (get_data_root() / "asset").resolve()
+    return Path(data_root).resolve()
+
+
+def get_api(data_root: str | Path | None = None) -> DataAPI:
+    """按解析后的 ``data_root`` 获取模块级复用的 :class:`DataAPI` 实例并完成一次视图注册。"""
+    resolved = _resolve_asset_root(data_root)
+    with _API_LOCK:
+        api = _API_CACHE.get(resolved)
+        if api is None:
+            api = DataAPI(resolved)
+            api.register_views()
+            _API_CACHE[resolved] = api
+        return api
+
+
+def clear_api_cache() -> None:
+    """关闭并清空模块级缓存的 :class:`DataAPI` 实例。"""
+    with _API_LOCK:
+        for api in _API_CACHE.values():
+            try:
+                api.close()
+            except Exception:
+                logger.debug("error closing cached DataAPI", exc_info=True)
+        _API_CACHE.clear()
+
+
+def clear_adj_cache() -> None:
+    """清空复权基准因子缓存（供日终数据更新或测试重置后调用）。"""
+    with _ADJ_LOCK:
+        _ADJ_CACHE.clear()
 
 
 # --- DataAPI（持久化 DuckDB 目录，仅支持 SQL） ---
@@ -161,13 +240,15 @@ class DataAPI:
 
     def __init__(
         self,
-        data_root: str | Path = _DEFAULT_DATA_ROOT,
+        data_root: str | Path | None = None,
         *,
         catalog_path: str | Path | None = None,
         statement_timeout: float = 60.0,
         read_only: bool = False,
     ) -> None:
-        self._root = Path(data_root)
+        self._root = (
+            Path(data_root) if data_root is not None else get_data_root() / "asset"
+        )
         self._statement_timeout = statement_timeout
         self._read_only = read_only
 
@@ -381,13 +462,20 @@ def _symbol_list(symbol: str | list[str] | None) -> list[str]:
     return [str(s) for s in symbols]
 
 
-def _symbol_filter(symbol: str | list[str] | None) -> str:
-    """生成标的过滤 SQL 条件片段；全量时返回空串。"""
+def _build_where(
+    start: str,
+    end: str,
+    symbol: str | list[str] | None,
+    schema: dict[str, Any],
+) -> str:
+    """构建统一的日期区间与标的列表 ``WHERE`` 子句。"""
+    filter_col = schema.get("filter_col", schema["date_col"])
+    where = f"WHERE {filter_col} BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
     symbols = _symbol_list(symbol)
-    if not symbols:
-        return ""
-    joined = ", ".join(_sql_literal(s) for s in symbols)
-    return f" AND ticker IN ({joined})"
+    if symbols:
+        joined = ", ".join(_sql_literal(s) for s in symbols)
+        where += f" AND {schema['ticker_col']} IN ({joined})"
+    return where
 
 
 def _build_daily_sql(
@@ -398,24 +486,10 @@ def _build_daily_sql(
     fields: list[str] | None,
 ) -> str:
     """构建非聚合表（日线或原始分钟线）的 SELECT 语句。"""
-    has_adj = table in (
-        "bars_daily",
-        "continuous",
-        "cn_stock_bars_daily",
-        "cn_etf_bars_daily",
-        "cn_futures_continuous",
-    )
-    ticker_col = (
-        "dominant_contract"
-        if table in ("continuous", "cn_futures_continuous")
-        else "ticker"
-    )
-    # 分钟表以 datetime 为时间列，其余表使用 trade_date
-    date_col = (
-        "datetime"
-        if table in ("bars_minute", "cn_stock_bars_minute", "cn_etf_bars_minute")
-        else "trade_date"
-    )
+    schema = TABLE_SCHEMA[table]
+    has_adj = schema["has_adjfactor"]
+    ticker_col = schema["ticker_col"]
+    date_col = schema["date_col"]
 
     select_parts = [f"{date_col} AS date", f"{ticker_col} AS ticker"]
     value_cols = fields if fields is not None else list(_STD_COLS[2:])
@@ -433,14 +507,7 @@ def _build_daily_sql(
     if fields is None and has_adj:
         select_parts.append("adjfactor")
 
-    # 统一按 trade_date 过滤日期区间，输出时间列按表类型映射
-    where = f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
-    # 统一复用 _symbol_list，确保连续合约分支同样拒绝空列表
-    symbols = _symbol_list(symbol)
-    if symbols:
-        joined = ", ".join(_sql_literal(s) for s in symbols)
-        where += f" AND {ticker_col} IN ({joined})"
-
+    where = _build_where(start, end, symbol, schema)
     cols_sql = ", ".join(select_parts)
     return f"SELECT {cols_sql} FROM {table} {where} ORDER BY date, ticker"
 
@@ -454,6 +521,7 @@ def _build_aggregated_sql(
     freq: str,
 ) -> str:
     """基于分钟表构建 5min/60min ``time_bucket`` 聚合 SQL（按 ``trade_date`` 分组防跨日，午休空桶不填充）。"""
+    schema = TABLE_SCHEMA[table]
     interval = _AGG_INTERVAL[freq]
     value_cols = (
         fields
@@ -470,8 +538,8 @@ def _build_aggregated_sql(
         "amount": "sum(amount)",
     }
     select_parts = [
-        f"time_bucket(INTERVAL '{interval}', datetime) AS date",
-        "ticker",
+        f"time_bucket(INTERVAL '{interval}', {schema['date_col']}) AS date",
+        f"{schema['ticker_col']} AS ticker",
     ]
     for col in value_cols:
         _validate_identifier(col)
@@ -482,34 +550,27 @@ def _build_aggregated_sql(
             )
         select_parts.append(f"{agg_exprs[col]} AS {col}")
 
-    where = f"WHERE trade_date BETWEEN {_sql_literal(start)} AND {_sql_literal(end)}"
-    where += _symbol_filter(symbol)
-
+    where = _build_where(start, end, symbol, schema)
+    filter_col = schema.get("filter_col", schema["date_col"])
     cols_sql = ", ".join(select_parts)
     return (
         f"SELECT {cols_sql} FROM {table} {where} "
-        f"GROUP BY date, ticker, trade_date "
+        f"GROUP BY date, ticker, {filter_col} "
         f"ORDER BY date, ticker"
     )
 
 
-def _apply_adjustment(
-    df: pd.DataFrame,
-    api: DataAPI,
-    table: str,
-    adjust: str,
-) -> pd.DataFrame:
-    """执行前复权 / 后复权缩放。
+def _get_adj_base(api: DataAPI, table: str, schema: dict[str, Any]) -> pd.DataFrame:
+    """查询并缓存全表历史复权极值基准（``arg_max`` / ``arg_min``），按数据根目录与表名隔离。"""
+    root_key: Path | int = api._root.resolve() if hasattr(api, "_root") else id(api)
+    cache_key = (root_key, table)
+    with _ADJ_LOCK:
+        cached = _ADJ_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    分母使用全表历史极值（``arg_max``/``arg_min``）而非查询窗口极值，保证窗口截断时比例准确；
-    仅缩放价格列，成交量与成交额保持原始值。
-    """
-    date_col = "trade_date"
-    ticker_col = (
-        "dominant_contract"
-        if table in ("continuous", "cn_futures_continuous")
-        else "ticker"
-    )
+    ticker_col = schema["ticker_col"]
+    date_col = schema.get("filter_col", schema["date_col"])
     base_sql = (
         f"SELECT {ticker_col} AS ticker, "
         f"arg_max(adjfactor, {date_col}) AS adj_latest, "
@@ -517,6 +578,25 @@ def _apply_adjustment(
         f"FROM {table} GROUP BY {ticker_col}"
     )
     base = api.query(base_sql)
+    with _ADJ_LOCK:
+        _ADJ_CACHE[cache_key] = base
+    return base
+
+
+def _apply_adjustment(
+    df: pd.DataFrame,
+    api: DataAPI,
+    table: str,
+    adjust: str,
+    schema: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    """执行前复权 / 后复权缩放。
+
+    分母使用全表历史极值（``arg_max``/``arg_min``）而非查询窗口极值，保证窗口截断时比例准确；
+    仅缩放价格列，成交量与成交额保持原始值。
+    """
+    resolved_schema = schema if schema is not None else TABLE_SCHEMA[table]
+    base = _get_adj_base(api, table, resolved_schema)
     m = df.merge(base, on="ticker", how="left")
 
     if adjust == "forward":
@@ -592,7 +672,8 @@ def load_bars(
     adjust: AdjustMode = "none",
     table_family: TableFamily | str = "equity",
     *,
-    data_root: str | Path = _DEFAULT_DATA_ROOT,
+    data_root: str | Path | None = None,
+    api: DataAPI | None = None,
 ) -> pd.DataFrame:
     """从存储层加载行情 Bar，按 ``(date, ticker)`` 升序返回标准列及可选 ``adjfactor``。
 
@@ -606,15 +687,11 @@ def load_bars(
     fields : 指定输出数值列；``None`` 返回全部标准列。
     adjust : ``none`` | ``forward`` | ``backward``。
     table_family : 表族名称（``equity`` / ``futures`` / ``continuous`` 等）。
+    api : 可选外部传入的 :class:`DataAPI` 实例；默认通过 :func:`get_api` 复用模块级连接。
     """
     table = _resolve_table(table_family, freq)
-    has_adj = table in (
-        "bars_daily",
-        "continuous",
-        "cn_stock_bars_daily",
-        "cn_etf_bars_daily",
-        "cn_futures_continuous",
-    )
+    schema = TABLE_SCHEMA[table]
+    has_adj = schema["has_adjfactor"]
     is_agg = freq in _AGG_INTERVAL
 
     # 查询前校验 adjust 取值，避免空区间时将非法参数掩盖为无数据
@@ -640,19 +717,21 @@ def load_bars(
         effective_fields = [*fields, "adjfactor"]
         drop_adj_after = True
 
-    with DataAPI(data_root) as api:
-        if is_agg:
-            sql = _build_aggregated_sql(
-                table, start, end, symbol, effective_fields, freq
-            )
-        else:
-            sql = _build_daily_sql(table, start, end, symbol, effective_fields)
-        df = api.query(sql)
+    if api is None:
+        api = get_api(data_root)
+    elif not api._views_registered:
+        api.register_views()
 
-        if adjust != "none" and not df.empty:
-            df = _apply_adjustment(df, api, table, adjust)
+    if is_agg:
+        sql = _build_aggregated_sql(table, start, end, symbol, effective_fields, freq)
+    else:
+        sql = _build_daily_sql(table, start, end, symbol, effective_fields)
+    df = api.query(sql)
 
-        source = api.read_source_tags(table)
+    if adjust != "none" and not df.empty:
+        df = _apply_adjustment(df, api, table, adjust, schema)
+
+    source = api.read_source_tags(table)
 
     if drop_adj_after and "adjfactor" in df.columns:
         df = df.drop(columns=["adjfactor"])
@@ -667,10 +746,15 @@ def load_bars(
         df = df.sort_values(["date", "ticker"]).reset_index(drop=True)
 
     # 所有 DataFrame 变形完成后挂载元数据，防止中间切片/排序丢失 attrs
+    family_str = (
+        table_family.value
+        if isinstance(table_family, TableFamily)
+        else str(table_family)
+    )
     df.attrs["meta"] = _build_bars_meta(
         df,
         table=table,
-        table_family=table_family,
+        table_family=family_str,
         freq=freq,
         adjust=adjust,
         start=start,
@@ -689,7 +773,8 @@ def load_bars_result(
     adjust: AdjustMode = "none",
     table_family: TableFamily | str = "equity",
     *,
-    data_root: str | Path = _DEFAULT_DATA_ROOT,
+    data_root: str | Path | None = None,
+    api: DataAPI | None = None,
 ) -> BarsResult:
     """加载行情 Bar 并返回携带结构化 :class:`BarsMeta` 的 :class:`BarsResult`。"""
     df = load_bars(
@@ -701,6 +786,7 @@ def load_bars_result(
         adjust=adjust,
         table_family=table_family,
         data_root=data_root,
+        api=api,
     )
     return BarsResult(data=df, meta=df.attrs["meta"])
 
@@ -715,13 +801,15 @@ def load_bars_chunked(
     table_family: TableFamily | str = "equity",
     chunk_by: str = "month",
     *,
-    data_root: str | Path = _DEFAULT_DATA_ROOT,
+    data_root: str | Path | None = None,
+    api: DataAPI | None = None,
 ) -> Iterator[pd.DataFrame]:
     """按自然月分块流式调用 :func:`load_bars`（跳过空块），避免长跨度分钟线查询 OOM。"""
     if chunk_by != "month":
         raise ValueError(
             f"unsupported chunk_by {chunk_by!r}; only 'month' is implemented"
         )
+    shared_api = api if api is not None else get_api(data_root)
     for chunk_start, chunk_end in _date_chunks(start, end):
         df = load_bars(
             symbol,
@@ -732,6 +820,7 @@ def load_bars_chunked(
             adjust=adjust,
             table_family=table_family,
             data_root=data_root,
+            api=shared_api,
         )
         if not df.empty:
             yield df
@@ -761,7 +850,8 @@ def to_alphalens_prices(
     end: str = _DEFAULT_END,
     symbols: list[str] | None = None,
     *,
-    data_root: str | Path = _DEFAULT_DATA_ROOT,
+    data_root: str | Path | None = None,
+    api: DataAPI | None = None,
 ) -> pd.DataFrame:
     """返回适用于 alphalens 的前复权日线收盘价透视表（``date × ticker``）。"""
     df = load_bars(
@@ -772,6 +862,7 @@ def to_alphalens_prices(
         adjust="forward",
         table_family="equity",
         data_root=data_root,
+        api=api,
     )
     if df.empty:
         return pd.DataFrame()

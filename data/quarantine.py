@@ -17,8 +17,8 @@ from typing import Any
 
 import pandas as pd
 
+from core.config import get_data_root
 from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock, cleanup_expired
-from core.config import DATA_ROOT
 
 __all__ = [
     "save_quarantine",
@@ -35,24 +35,33 @@ logger = logging.getLogger(__name__)
 QUARANTINE_ROOT = "quarantine"
 
 
+def _resolve_root(data_root: str | os.PathLike[str] | None) -> Path:
+    return Path(data_root) if data_root is not None else get_data_root()
+
+
 def quarantine_path(
     table: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> Path:
     """返回隔离区 Parquet 文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
-    return Path(data_root) / QUARANTINE_ROOT / table / f"{date_str}.parquet"
+    return _resolve_root(data_root) / QUARANTINE_ROOT / table / f"{date_str}.parquet"
 
 
 def rejection_path(
     table: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> Path:
     """返回拦截元数据 JSON 文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
-    return Path(data_root) / QUARANTINE_ROOT / table / f"{date_str}.rejection.json"
+    return (
+        _resolve_root(data_root)
+        / QUARANTINE_ROOT
+        / table
+        / f"{date_str}.rejection.json"
+    )
 
 
 def save_quarantine(
@@ -60,7 +69,7 @@ def save_quarantine(
     table: str,
     trade_date: date,
     rejection_meta: dict[str, Any],
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> tuple[Path, Path]:
     """原子写入被拦截批次的数据帧与拦截元数据。
 
@@ -120,7 +129,7 @@ def save_quarantine(
 def load_quarantine(
     table: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
     """读取隔离区批次，返回 ``(df, rejection_meta)``，不存在时返回 ``None``。"""
     target = quarantine_path(table, trade_date, data_root)
@@ -150,18 +159,19 @@ def recheck(
 
 
 def cleanup_quarantine(
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
     *,
     dry_run: bool = True,
     today: date | None = None,
     config_path: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
     """清理过期隔离区文件（依据 ``lifecycle.yaml`` 策略，通过 ``subdir=quarantine`` 限定清理子树）。"""
-    q_root = Path(data_root) / QUARANTINE_ROOT
+    root = _resolve_root(data_root)
+    q_root = root / QUARANTINE_ROOT
     if not q_root.exists():
         return []
     return cleanup_expired(
-        root=data_root,
+        root=root,
         subdir=QUARANTINE_ROOT,
         dry_run=dry_run,
         today=today,

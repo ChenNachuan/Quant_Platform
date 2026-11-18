@@ -24,15 +24,21 @@ from typing import get_args
 import pandas as pd
 import pytest
 
+from core.config import DATA_ROOT, get_data_root, use_data_root
 from data.data_api import (
     ALPHALENS_PERIODS,
     ALPHALENS_QUANTILES,
-    TABLE_MAP,
+    TABLE_SCHEMA,
     AdjustMode,
     BarFreq,
     BarsMeta,
     BarsResult,
     DataAPI,
+    TableFamily,
+    _resolve_table,
+    clear_adj_cache,
+    clear_api_cache,
+    get_api,
     load_bars,
     load_bars_chunked,
     load_bars_result,
@@ -172,6 +178,15 @@ def _write_continuous(root: Path, symbol: str, rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_api_and_adj_caches():
+    clear_api_cache()
+    clear_adj_cache()
+    yield
+    clear_api_cache()
+    clear_adj_cache()
+
+
 @pytest.fixture
 def asset_root(tmp_path: Path) -> Path:
     """Populated data root with bars_daily for two tickers over 3 days.
@@ -602,18 +617,53 @@ class TestAdjustment:
 
 
 # ---------------------------------------------------------------------------
-# Table-family mapping (table_family)
+# Table-family mapping (TableFamily / TABLE_SCHEMA / _resolve_table)
 # ---------------------------------------------------------------------------
 class TestTableFamilyMapping:
-    def test_equity_maps_to_bars_daily(self):
-        assert TABLE_MAP[("equity", "daily")] == "bars_daily"
-        assert TABLE_MAP[("equity", "minute")] == "bars_minute"
+    def test_equity_aliases_map_to_canonical_stock_tables(self):
+        for alias in ("equity", "stock", "cn_stock", "cn_equity"):
+            assert _resolve_table(alias, "daily") == TableFamily.CN_STOCK_DAILY.value
+            assert _resolve_table(alias, "minute") == TableFamily.CN_STOCK_MINUTE.value
+        assert (
+            _resolve_table(TableFamily.CN_STOCK_DAILY, "daily") == "cn_stock_bars_daily"
+        )
 
-    def test_futures_maps_to_bars_daily_futures(self):
-        assert TABLE_MAP[("futures", "daily")] == "bars_daily_futures"
+    def test_etf_futures_and_continuous_map_to_canonical_tables(self):
+        for alias in ("etf", "cn_etf"):
+            assert _resolve_table(alias, "daily") == TableFamily.CN_ETF_DAILY.value
+            assert _resolve_table(alias, "minute") == TableFamily.CN_ETF_MINUTE.value
+        for alias in ("futures", "cn_futures"):
+            assert _resolve_table(alias, "daily") == TableFamily.CN_FUTURES_DAILY.value
+        for alias in ("continuous", "cn_continuous"):
+            assert (
+                _resolve_table(alias, "daily") == TableFamily.CN_CONTINUOUS_DAILY.value
+            )
 
-    def test_continuous_maps_to_continuous(self):
-        assert TABLE_MAP[("continuous", "daily")] == "continuous"
+    def test_table_schema_declares_every_table_family_member(self):
+        for member in TableFamily:
+            assert member.value in TABLE_SCHEMA
+            spec = TABLE_SCHEMA[member.value]
+            assert {"date_col", "filter_col", "ticker_col", "has_adjfactor"} <= set(
+                spec
+            )
+
+    def test_equity_aliases_load_identical_bars(self, asset_root):
+        baseline = load_bars(
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="forward",
+            table_family="equity",
+            data_root=asset_root,
+        )
+        for alias in ("stock", "cn_stock", "cn_equity", TableFamily.CN_STOCK_DAILY):
+            got = load_bars(
+                start="2024-01-02",
+                end="2024-01-04",
+                adjust="forward",
+                table_family=alias,
+                data_root=asset_root,
+            )
+            pd.testing.assert_frame_equal(baseline, got)
 
     def test_futures_load(self, futures_root):
         df = load_bars(
@@ -644,6 +694,85 @@ class TestTableFamilyMapping:
     def test_invalid_freq_raises(self, asset_root):
         with pytest.raises(ValueError, match="unknown freq"):
             load_bars(freq="weekly", data_root=asset_root)
+
+
+# ---------------------------------------------------------------------------
+# Singleton connection, _ADJ_CACHE, and use_data_root context isolation
+# ---------------------------------------------------------------------------
+class TestSingletonAdjCacheAndContextRoot:
+    def test_singleton_and_adj_cache_across_repeated_calls(
+        self, asset_root, monkeypatch
+    ):
+        import duckdb as duckdb_mod
+
+        connect_calls = 0
+        orig_connect = duckdb_mod.connect
+
+        def spy_connect(*args, **kwargs):
+            nonlocal connect_calls
+            connect_calls += 1
+            return orig_connect(*args, **kwargs)
+
+        monkeypatch.setattr(duckdb_mod, "connect", spy_connect)
+
+        adj_queries = 0
+        orig_query = DataAPI.query
+
+        def spy_query(self, sql: str, profile: bool = False):
+            nonlocal adj_queries
+            if "arg_max(adjfactor" in sql:
+                adj_queries += 1
+            return orig_query(self, sql, profile=profile)
+
+        monkeypatch.setattr(DataAPI, "query", spy_query)
+
+        for _ in range(10):
+            df = load_bars(
+                symbol="600519.SH",
+                start="2024-01-02",
+                end="2024-01-04",
+                adjust="forward",
+                data_root=asset_root,
+            )
+            assert abs(df["close"].iloc[0] - 5.0) < 1e-6
+
+        assert connect_calls == 1
+        assert adj_queries == 1
+
+        # Clearing _ADJ_CACHE forces recompute on next adjusted query while keeping DataAPI singleton
+        clear_adj_cache()
+        load_bars(
+            symbol="600519.SH",
+            start="2024-01-02",
+            end="2024-01-04",
+            adjust="forward",
+            data_root=asset_root,
+        )
+        assert connect_calls == 1
+        assert adj_queries == 2
+
+        # get_api returns the same singleton instance for identical resolved root
+        assert get_api(asset_root) is get_api(str(asset_root))
+
+    def test_use_data_root_isolates_load_bars_without_explicit_param(self, tmp_path):
+        asset = tmp_path / "asset"
+        (asset / "cn_stock_bars_daily").mkdir(parents=True)
+        d = date(2024, 1, 2)
+        write_parquet_atomic(
+            pd.DataFrame([_bars_daily_row("688001.SH", d, close=99.5, adjfactor=1.0)]),
+            asset / "cn_stock_bars_daily" / f"{d.isoformat()}.parquet",
+            table="cn_stock_bars_daily",
+        )
+
+        before = get_data_root()
+        with use_data_root(tmp_path):
+            assert get_data_root() == tmp_path
+            df = load_bars(start="2024-01-02", end="2024-01-02")
+            assert df["ticker"].tolist() == ["688001.SH"]
+            assert df["close"].iloc[0] == pytest.approx(99.5)
+
+        assert get_data_root() == before
+        assert get_data_root() == DATA_ROOT
 
 
 # ---------------------------------------------------------------------------
@@ -885,7 +1014,7 @@ class TestBarsMetaAndResult:
         meta = df.attrs["meta"]
         assert isinstance(meta, BarsMeta)
         assert meta == BarsMeta(
-            table="bars_daily",
+            table="cn_stock_bars_daily",
             table_family="equity",
             freq="daily",
             adjust="forward",
@@ -910,7 +1039,7 @@ class TestBarsMetaAndResult:
         assert meta.rows == 0
         assert meta.tickers == 0
         assert meta.as_of is None
-        assert meta.table == "bars_daily"
+        assert meta.table == "cn_stock_bars_daily"
 
     def test_load_bars_result_intraday_meta(self, minute_root):
         result = load_bars_result(
@@ -921,7 +1050,7 @@ class TestBarsMetaAndResult:
         )
         assert isinstance(result, BarsResult)
         assert result.meta is result.data.attrs["meta"]
-        assert result.meta.table == "bars_minute"
+        assert result.meta.table == "cn_stock_bars_minute"
         assert result.meta.freq == "5min"
         assert result.meta.rows == 1
         assert result.meta.tickers == 1
@@ -945,7 +1074,7 @@ class TestBarsMetaAndResult:
             table_family="equity",
             data_root=root,
         )
-        assert single.meta.table == "bars_daily"
+        assert single.meta.table == "cn_stock_bars_daily"
         assert single.meta.source == "straightflush"
 
         write_parquet_atomic(

@@ -13,7 +13,12 @@ import pytest
 import requests
 
 from data.adapters import get_adapter
-from data.normalizers import UNIFIED_COLUMNS, get_normalizer
+from data.normalizers import (
+    SOURCE_COLUMN_MAP,
+    UNIFIED_COLUMNS,
+    get_normalizer,
+    normalize as normalize_unified,
+)
 from data.normalizers.qdc_normalizer import normalize as normalize_qdc
 from data.normalizers.straightflush_normalizer import (
     normalize as normalize_straightflush,
@@ -191,6 +196,79 @@ class TestAmazingdataIndexNormalizer:
             if col_name not in proj.columns and cs.nullable:
                 proj[col_name] = None
         schema.validate(normalize_missing_floats(proj, "cn_stock_index_bars_daily"))
+
+
+class TestUnifiedNormalizerRegistry:
+    def test_source_column_map_covers_all_five_sources(self):
+        assert set(SOURCE_COLUMN_MAP) == {
+            "qdc",
+            "amazingdata",
+            "straightflush",
+            "tushare",
+            "akshare",
+        }
+
+    def test_unified_normalize_dispatches_and_validates_required_columns(self):
+        raw_tushare = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20260105"],
+                "open": [11.0],
+                "high": [11.5],
+                "low": [10.8],
+                "close": [11.2],
+                "vol": [1000.0],
+                "amount": [1120.0],
+            }
+        )
+        out = normalize_unified("tushare", raw_tushare)
+        assert list(out.columns) == UNIFIED_COLUMNS
+        assert out["volume"].iloc[0] == 100000
+        assert out["amount"].iloc[0] == pytest.approx(1120000.0)
+
+        with pytest.raises(ValueError, match="no normalizer for source"):
+            normalize_unified("unknown_src", raw_tushare)
+
+        with pytest.raises(ValueError, match="缺失必需列"):
+            normalize_unified("qdc", pd.DataFrame({"symbol": ["000001.XSHE"]}))
+
+    def test_adapter_preserves_raw_units_while_normalizer_converts(
+        self, tmp_path, monkeypatch
+    ):
+        from data.adapters.amazingdata_adapter import AmazingdataAdapter
+
+        raw_df = pd.DataFrame(
+            {
+                "code": ["000300.SH"],
+                "kline_time": ["2026-11-13"],
+                "open": [4000.0],
+                "high": [4020.0],
+                "low": [3990.0],
+                "close": [4016.29],
+                "volume": [1000],  # 原始手数，Adapter 不应提前乘以 100
+                "amount": [4602456575.0],
+            }
+        )
+        raw_out = (
+            tmp_path
+            / "raw"
+            / "amazingdata"
+            / "cn_stock_index_bars_daily"
+            / "2026-11-13.parquet"
+        )
+        raw_out.parent.mkdir(parents=True, exist_ok=True)
+        raw_df.to_parquet(raw_out, index=False)
+
+        monkeypatch.setattr(
+            "data.adapters.amazingdata_adapter.subprocess.run",
+            lambda cmd, **_kw: MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        adapter = AmazingdataAdapter(data_root=tmp_path, mode="docker")
+        fetched = adapter.fetch("index", date(2026, 11, 13))
+        assert fetched.df["volume"].iloc[0] == 1000
+
+        norm = get_normalizer("amazingdata")("index", fetched.df)
+        assert norm["volume"].iloc[0] == 100000
 
 
 class TestAdapterRawNormalizeRoundTrip:

@@ -1,4 +1,4 @@
-"""AmazingData 标准化器（仅格式转换）。
+"""AmazingData 标准化器（仅格式转换与单位换算）。
 
 边界处理：
 - 停牌：保留源数据 ``suspend`` 标志；严禁因 ``suspend==True`` 而覆写源端提供的 ``adjfactor``。
@@ -12,41 +12,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from data.normalizers import UNIFIED_COLUMNS
+from data.normalizers import (
+    SOURCE_COLUMN_MAP,
+    _coerce_and_finalize_bars,
+    _normalize_calendar_frame,
+)
 
 __all__ = ["normalize"]
 
 _SUPPORTED_DATASETS = frozenset({"stock", "etf", "index", "option", "calendar"})
-
-# AmazingData kline / fund_nav -> 统一列名
-_COLUMN_MAP: dict[str, str] = {
-    "code": "ticker",
-    "kline_time": "trade_date",
-    "open": "open",
-    "high": "high",
-    "low": "low",
-    "close": "close",
-    "volume": "volume",
-    "amount": "amount",
-    "adjfactor": "adjfactor",
-    "NAV_ADJ_FACTOR": "adjfactor",
-    "suspend": "suspend",
-}
-
-_NUMERIC_COLS = (
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "amount",
-    "adjfactor",
-    "turnover",
-)
-
-_FLOAT_COLS = frozenset(
-    {"open", "high", "low", "close", "amount", "adjfactor", "turnover"}
-)
 
 
 def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -54,60 +28,28 @@ def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     if dataset not in _SUPPORTED_DATASETS:
         raise ValueError(f"unsupported dataset: {dataset!r}")
     if dataset == "calendar":
-        if raw_df.empty:
-            return pd.DataFrame({"trade_date": pd.Series(dtype="object")})
-        col = "trade_date" if "trade_date" in raw_df.columns else "cal_date"
-        if col not in raw_df.columns:
-            raise ValueError("calendar raw_df missing 'trade_date' or 'cal_date'")
-        cleaned = (
-            raw_df[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        )
-        dates = pd.to_datetime(cleaned, format="mixed", errors="coerce").dt.date
-        return (
-            pd.DataFrame({"trade_date": dates})
-            .dropna(subset=["trade_date"])
-            .drop_duplicates(subset=["trade_date"])
-            .sort_values("trade_date")
-            .reset_index(drop=True)
-        )
+        return _normalize_calendar_frame(raw_df, ("trade_date", "cal_date"))
 
     # 重命名前合并两列复权因子，避免列名冲突；以 NAV_ADJ_FACTOR 为准
     df = raw_df.copy()
     if "adjfactor" in df.columns and "NAV_ADJ_FACTOR" in df.columns:
-        df["adjfactor"] = df["NAV_ADJ_FACTOR"].fillna(df["adjfactor"])
+        nav_adj = pd.to_numeric(df["NAV_ADJ_FACTOR"], errors="coerce")
+        base_adj = pd.to_numeric(df["adjfactor"], errors="coerce")
+        df["adjfactor"] = nav_adj.fillna(base_adj)
         df = df.drop(columns=["NAV_ADJ_FACTOR"])
     elif "NAV_ADJ_FACTOR" in df.columns:
         df = df.rename(columns={"NAV_ADJ_FACTOR": "adjfactor"})
 
-    df = df.rename(columns=_COLUMN_MAP).copy()
+    df = df.rename(columns=SOURCE_COLUMN_MAP["amazingdata"]).copy()
 
     if "trade_date" in df.columns:
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-    for col in _NUMERIC_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            if col in _FLOAT_COLS:
-                df[col] = df[col].astype("float64")
-
-    if dataset == "index" and "volume" in df.columns and "ticker" in df.columns:
-        sh_mask = df["ticker"].astype(str).str.endswith(".SH")
-        if sh_mask.any():
-            df.loc[sh_mask, "volume"] = df.loc[sh_mask, "volume"] * 100
 
     if "volume" in df.columns:
-        df["volume"] = df["volume"].round().astype("Int64")
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+        if dataset == "index" and "ticker" in df.columns:
+            sh_mask = df["ticker"].astype(str).str.endswith(".SH")
+            if sh_mask.any():
+                df.loc[sh_mask, "volume"] = df.loc[sh_mask, "volume"] * 100
 
-    if "suspend" not in df.columns:
-        df["suspend"] = False
-    else:
-        df["suspend"] = df["suspend"].fillna(False).astype(bool)
-
-    # 保持源端 adjfactor 原值，不因停牌标志覆写为 1.0
-    if "adjfactor" not in df.columns:
-        df["adjfactor"] = 1.0
-
-    df["is_limit_up"] = False
-    df["is_limit_down"] = False
-    df["quality_flag"] = 0
-
-    return df.reindex(columns=UNIFIED_COLUMNS)
+    return _coerce_and_finalize_bars(df)

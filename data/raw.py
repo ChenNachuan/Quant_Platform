@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.config import get_data_root
 from data.storage_ops import PARQUET_WRITE_CONFIG, FileLock, cleanup_expired
-from core.config import DATA_ROOT
 
 __all__ = ["save_raw", "load_raw", "raw_path", "cleanup_raw", "RAW_ROOT"]
 
@@ -23,15 +23,19 @@ logger = logging.getLogger(__name__)
 RAW_ROOT = "raw"
 
 
+def _resolve_root(data_root: str | os.PathLike[str] | None) -> Path:
+    return Path(data_root) if data_root is not None else get_data_root()
+
+
 def raw_path(
     source: str,
     table: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> Path:
     """返回 ``source / table / trade_date`` 对应的原始层文件路径。"""
     date_str = trade_date.strftime("%Y-%m-%d")
-    return Path(data_root) / RAW_ROOT / source / table / f"{date_str}.parquet"
+    return _resolve_root(data_root) / RAW_ROOT / source / table / f"{date_str}.parquet"
 
 
 def save_raw(
@@ -39,7 +43,7 @@ def save_raw(
     source: str,
     table: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> Path:
     """以 zstd 压缩原子写入原始 DataFrame（不做 schema 校验，仅复用文件锁与临时文件替换）。"""
     target = raw_path(source, table, trade_date, data_root)
@@ -80,7 +84,7 @@ def load_raw(
     source: str,
     table: str,
     trade_date: date,
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
 ) -> pd.DataFrame | None:
     """读取指定原始层文件，不存在时返回 ``None``。"""
     path = raw_path(source, table, trade_date, data_root)
@@ -90,18 +94,19 @@ def load_raw(
 
 
 def cleanup_raw(
-    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    data_root: str | os.PathLike[str] | None = None,
     *,
     dry_run: bool = True,
     today: date | None = None,
     config_path: str | os.PathLike[str] | None = None,
 ) -> list[Path]:
     """清理过期原始层 ``.parquet`` 文件（依据 ``lifecycle.yaml`` 策略，仅清理 ``raw`` 子树并保留 ``.watermarks.json``）。"""
-    raw_root = Path(data_root) / RAW_ROOT
+    root = _resolve_root(data_root)
+    raw_root = root / RAW_ROOT
     if not raw_root.exists():
         return []
     return cleanup_expired(
-        root=data_root,
+        root=root,
         subdir=RAW_ROOT,
         dry_run=dry_run,
         today=today,

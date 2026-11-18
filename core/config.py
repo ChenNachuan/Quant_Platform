@@ -4,14 +4,39 @@
 ``load_secrets`` 返回值严禁写入 ``config_snapshot`` 或打印输出。
 """
 
+import contextvars
 import hashlib
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 #: 统一数据根目录。所有数据存储路径由此派生，不在各模块各自硬编码。
 DATA_ROOT = Path(
     os.environ.get("QUANT_DATA_ROOT", "/Users/nachuan/Documents/Quant_Data")
 )
+
+_data_root_var: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "data_root", default=None
+)
+
+
+def get_data_root() -> Path:
+    """返回当前执行上下文生效的数据根目录（默认取 ``DATA_ROOT``，可由 :func:`use_data_root` 临时覆盖）。"""
+    override = _data_root_var.get()
+    return override if override is not None else Path(DATA_ROOT)
+
+
+@contextmanager
+def use_data_root(path: str | Path) -> Iterator[Path]:
+    """在当前上下文内临时切换 :func:`get_data_root` 返回值，退出 ``with`` 块后自动恢复。"""
+    resolved = Path(path)
+    token = _data_root_var.set(resolved)
+    try:
+        yield resolved
+    finally:
+        _data_root_var.reset(token)
+
 
 try:
     import tomllib
@@ -46,7 +71,7 @@ def load_secrets(path: str = "config/.env") -> dict:
 
 
 def config_snapshot(path: str) -> str:
-    """计算配置文件的 SHA-256 摘要并生成 ``f"{path}@{file_hash}"`` 运行记录标识，绝不读取 ``.env``。"""
+    """计算配置文件的 SHA-256 摘要并生成 ``f\"{path}@{file_hash}\"`` 运行记录标识，绝不读取 ``.env``。"""
     with open(path, "rb") as f:
         file_hash = hashlib.sha256(f.read()).hexdigest()
     return f"{path}@{file_hash}"

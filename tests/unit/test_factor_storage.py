@@ -39,6 +39,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from core.config import use_data_root
 from research.factor.interface import Factor
 from research.factor.storage import (
     DEFAULT_BASE_DIR,
@@ -396,8 +397,8 @@ class TestDateContract:
     def test_nat_date_is_rejected_not_persisted(self, tmp_path, save):
         """NaT is refused by the column type, never written as the string "NaT".
 
-        The VARCHAR path stringified NaT to `"NaT"`, derived a `NaT.parquet`
-        year file from `str[:4]`, and hid the row from every later read.
+        The VARCHAR path stringified NaT to ``"NaT"``, derived a ``NaT.parquet``
+        year file from ``str[:4]``, and hid the row from every later read.
         """
         factor = Mom20D()
         result = pd.DataFrame(
@@ -653,7 +654,7 @@ class TestCrashSafeWrites:
 
 class TestMetadata:
     def test_metadata_has_lineage_and_coverage_fields(self, tmp_path):
-        """DoD: metadata.json carries depends_on / depends_hash / date_range."""
+        """DoD: metadata.json carries depends_on / depends_hash / data_sources / data_hash / date_range."""
         factor = Vol20D()
         result = frame([("20200102", "000001.SZ", 1.0), ("20210304", "000002.SZ", 2.0)])
         result = result.rename(columns={"mom_20d": "vol_20d"})
@@ -667,6 +668,8 @@ class TestMetadata:
         assert meta["version"] == "1.0"
         assert meta["depends_on"] == ["bars_daily", "factor:mom_20d"]
         assert isinstance(meta["depends_hash"], str) and len(meta["depends_hash"]) == 12
+        assert meta["data_sources"] == ["bars_daily"]
+        assert isinstance(meta["data_hash"], str) and len(meta["data_hash"]) == 64
         # date_range is ISO — the DATE column's natural serialisation
         assert meta["date_range"] == ["2020-01-02", "2021-03-04"]
         assert meta["row_count"] == 2
@@ -674,6 +677,37 @@ class TestMetadata:
         assert meta["compression"] == "zstd"
         assert meta["category"] == "time_series"
         assert meta["asset_types"] == ["equity"]
+
+    def test_metadata_explicit_data_sources_and_deterministic_data_hash(self, tmp_path):
+        factor = Mom20D()
+        save_factor_full(
+            factor,
+            frame([("20200102", "000001.SZ", 1.0)]),
+            str(tmp_path),
+            data_sources=["cn_stock_bars_daily"],
+        )
+        meta1 = read_meta(tmp_path, "mom_20d", "1.0")
+        assert meta1["data_sources"] == ["cn_stock_bars_daily"]
+
+        save_factor_full(
+            factor,
+            frame([("20200102", "000001.SZ", 2.0)]),
+            str(tmp_path),
+            data_sources=["cn_stock_bars_daily"],
+        )
+        meta2 = read_meta(tmp_path, "mom_20d", "1.0")
+        assert meta1["data_hash"] != meta2["data_hash"]
+
+    def test_use_data_root_routes_factor_storage_without_base_dir(self, tmp_path):
+        factor = Mom20D()
+        with use_data_root(tmp_path):
+            save_factor_full(factor, frame([("20200102", "000001.SZ", 3.5)]))
+            loaded = load_factor("mom_20d", "20200101", "20200131")
+            assert len(loaded) == 1
+            assert loaded["mom_20d"].item() == 3.5
+            assert (
+                tmp_path / "factors" / "mom_20d" / "v1.0" / "metadata.json"
+            ).is_file()
 
     def test_depends_hash_tracks_the_declaration(self, tmp_path):
         mom, vol = Mom20D(), Vol20D()
@@ -726,6 +760,8 @@ class TestMetadata:
         assert meta["factor_name"] == "mom_20d"
         assert meta["depends_on"] == ["bars_daily"]
         assert len(meta["depends_hash"]) == 12
+        assert meta["data_sources"] == ["bars_daily"]
+        assert len(meta["data_hash"]) == 64
         assert meta["date_range"] == ["2020-01-02", "2020-01-02"]
         assert meta["row_count"] == 1
 

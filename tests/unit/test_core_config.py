@@ -1,8 +1,17 @@
-"""Tests for core.config — three-layer loaders, merge semantics, snapshot."""
+"""Tests for core.config — three-layer loaders, merge semantics, snapshot, data root context."""
 
 import pytest
 
-from core.config import config_snapshot, load_config, load_secrets, load_strategy_config
+import core.config as core_config
+from core.config import (
+    DATA_ROOT,
+    config_snapshot,
+    get_data_root,
+    load_config,
+    load_secrets,
+    load_strategy_config,
+    use_data_root,
+)
 
 
 class TestLoadConfig:
@@ -112,3 +121,30 @@ class TestConfigSnapshot:
         cfg_file.write_text("a = 2\n")
         snap2 = config_snapshot(str(cfg_file))
         assert snap1 != snap2
+
+
+class TestDataRootContext:
+    def test_default_returns_data_root(self):
+        assert get_data_root() == DATA_ROOT
+
+    def test_respects_monkeypatch_on_module_data_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(core_config, "DATA_ROOT", tmp_path)
+        assert get_data_root() == tmp_path
+
+    def test_use_data_root_switches_and_restores_including_nested_and_error(
+        self, tmp_path
+    ):
+        outer = tmp_path / "outer"
+        inner = tmp_path / "inner"
+        before = get_data_root()
+
+        with use_data_root(outer) as returned:
+            assert returned == outer
+            assert get_data_root() == outer
+            with pytest.raises(RuntimeError, match="boom"):
+                with use_data_root(inner):
+                    assert get_data_root() == inner
+                    raise RuntimeError("boom")
+            assert get_data_root() == outer
+
+        assert get_data_root() == before

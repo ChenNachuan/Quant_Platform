@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import pandas as pd
-from core.config import DATA_ROOT
+from core.config import DATA_ROOT, _data_root_var
 
 # requests 异常并非内置 ConnectionError/TimeoutError 子类，需单独纳入重试集合
 try:
@@ -246,17 +246,20 @@ class SourceAdapter(ABC):
 
     def _latest_trade_date(self) -> date:
         """获取最近已发生的交易日（优先查交易所日历并截断至今日，防止探测未来交易日；失败则回退今日）。"""
+        root = _data_root_var.get()
+        if root is None:
+            root = Path(DATA_ROOT)
         cal_path = next(
             (
                 p
                 for p in (
-                    DATA_ROOT / "asset/cn_calendar/SSE.parquet",
-                    DATA_ROOT / "asset/cn_calendar/sse.parquet",
-                    DATA_ROOT / "asset/calendar/sse.parquet",
+                    root / "asset/cn_calendar/SSE.parquet",
+                    root / "asset/cn_calendar/sse.parquet",
+                    root / "asset/calendar/sse.parquet",
                 )
                 if p.exists()
             ),
-            DATA_ROOT / "asset/cn_calendar/SSE.parquet",
+            root / "asset/cn_calendar/SSE.parquet",
         )
         if cal_path.exists():
             try:

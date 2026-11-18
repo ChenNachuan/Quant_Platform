@@ -44,10 +44,19 @@ CacheKey = tuple[str, str, tuple[str, str], str]
 
 
 def _table_family() -> dict[str, tuple[str, str]]:
-    """运行时反转 ``data.data_api.TABLE_MAP``，映射表名到 ``(table_family, freq)``。"""
-    from data.data_api import TABLE_MAP
+    """根据 ``data.data_api.TableFamily`` 映射规范表名及兼容旧表名到 ``(table_family, freq)``。"""
+    from data.data_api import TableFamily
+    from data.storage_schema import TABLE_ALIASES
 
-    return {v: (str(k[0]), k[1]) for k, v in TABLE_MAP.items()}
+    mapping: dict[str, tuple[str, str]] = {}
+    for member in TableFamily:
+        family, _, freq = member.name.lower().rpartition("_")
+        pair = (family, freq)
+        mapping[member.value] = pair
+        legacy = TABLE_ALIASES.get(member.value)
+        if legacy:
+            mapping[legacy] = pair
+    return mapping
 
 
 def _default_table_loader(table_name: str, start: str, end: str) -> pd.DataFrame:
