@@ -19,15 +19,20 @@ import pytest
 from data.dqc.engine import ingest_with_dqc
 from data.ingestion import (
     NUMERIC_FIELDS,
+    _is_exempt,
+    _match_patterns,
     backfill_source_tag,
     cross_source_check,
+    cross_source_check_aggregate,
     get_field_overrides,
     get_primary_source,
     get_source_priority,
+    load_exemptions,
     load_source_priority,
     raw_exists,
     respond,
     response_level,
+    run_cross_check_for_date,
     should_cross_check,
     tolerance_for,
     write_asset,
@@ -767,28 +772,44 @@ class TestTieredCrossCheckTolerancesAndExemptions:
     def test_index_cross_check_skips_ti_and_exempts_known_fields(self):
         primary = pd.DataFrame(
             {
-                "ticker": ["885001.TI", "399001.SZ", "000012.SH", "000300.SH"],
-                "trade_date": [TRADE_DATE] * 4,
-                "open": [1000.0, 10000.0, 200.0, 4000.0],
-                "high": [1010.0, 10100.0, 201.0, 4020.0],
-                "low": [990.0, 9900.0, 199.0, 3980.0],
-                "close": [1005.0, 10050.0, 200.5, 4010.0],
-                "volume": [1e6, 5e10, 1e6, 1e9],
-                "amount": [1e9, 6e11, 2e8, 2e11],
+                "ticker": [
+                    "885001.TI",
+                    "899050.BJ",
+                    "399001.SZ",
+                    "399002.SZ",
+                    "000012.SH",
+                    "000101.SH",
+                    "000170.SH",
+                    "000300.SH",
+                ],
+                "trade_date": [TRADE_DATE] * 8,
+                "open": [1000.0, 900.0, 10000.0, 4000.0, 200.0, 120.0, 5000.0, 4000.0],
+                "high": [1010.0, 910.0, 10100.0, 4010.0, 201.0, 121.0, 5050.0, 4020.0],
+                "low": [990.0, 890.0, 9900.0, 3990.0, 199.0, 119.0, 4950.0, 3980.0],
+                "close": [1005.0, 905.0, 10050.0, 4005.0, 200.5, 120.2, 5010.0, 4010.0],
+                "volume": [1e6, 2e5, 5e10, 2e10, 1e6, 5e5, 8e6, 1e9],
+                "amount": [1e9, 3e6, 6e11, 3e11, 2e8, 1e8, 9e8, 2e11],
             }
         )
         secondary = pd.DataFrame(
             {
-                "ticker": ["399001.SZ", "000012.SH", "000300.SH"],
-                "trade_date": [TRADE_DATE] * 3,
-                "open": [10000.0, 200.0, 4000.0],
-                "high": [10100.0, 201.0, 4020.0],
-                "low": [9900.0, 199.0, 3980.0],
-                # 000012.SH close diff=0.15 <= bond 0.20; 000300.SH close diff=0.03 <= equity 0.05
-                "close": [10050.02, 200.65, 4010.03],
-                # 399001.SZ & 000012.SH volume/amount differ dramatically (exempted)
-                "volume": [1e9, 1e8, 1e9 * 1.003],  # 000300.SH rel diff 0.3% <= 0.5%
-                "amount": [1e10, 2e8, 2e11],
+                "ticker": [
+                    "399001.SZ",
+                    "399002.SZ",
+                    "000012.SH",
+                    "000101.SH",
+                    "000170.SH",
+                    "000300.SH",
+                ],
+                "trade_date": [TRADE_DATE] * 6,
+                "open": [10000.0, 4000.0, 200.0, 120.0, 5000.4, 4000.0],
+                "high": [10100.0, 4010.0, 201.0, 121.0, 5200.0, 4020.0],
+                "low": [9900.0, 3990.0, 199.0, 119.0, 4800.0, 3980.0],
+                # 000012.SH close diff=0.15 <= bond 0.20; 000300.SH diff=0.03 <= equity 0.05
+                # 000170.SH close/high/low/volume/amount all exempted (cross-border)
+                "close": [10050.02, 4005.01, 200.65, 120.30, 5150.0, 4010.03],
+                "volume": [1e9, 5e8, 1e8, 9e7, 1e4, 1e9 * 1.003],
+                "amount": [1e10, 8e9, 2e8, 1e8, 2e5, 2e11],
             }
         )
         res = cross_source_check(
@@ -798,9 +819,155 @@ class TestTieredCrossCheckTolerancesAndExemptions:
             TRADE_DATE,
             secondary_source="amazingdata",
         )
-        assert res.missing_in_secondary == 0  # .TI skipped before join
+        assert res.missing_in_secondary == 0  # .TI & 899*.BJ skipped before join
         assert res.missing_in_primary == 0
-        assert res.total_rows == 3
-        assert res.matched_rows == 3
+        assert res.total_rows == 6
+        assert res.matched_rows == 6
         assert res.mismatched_fields == {}
         assert respond(res) == "silent"
+
+    def test_wildcard_skip_and_full_index_exemptions_config(self):
+        tickers = pd.Series(["885001.TI", "899050.BJ", "000300.SH", "399003.SZ"])
+        assert _match_patterns(tickers, ("*.TI", "899*.BJ")).tolist() == [
+            True,
+            True,
+            False,
+            False,
+        ]
+        exemptions = load_exemptions("cn_stock_index_bars_daily")
+        for sz_full in (
+            "399001.SZ",
+            "399002.SZ",
+            "399003.SZ",
+            "399006.SZ",
+            "399289.SZ",
+        ):
+            assert exemptions[sz_full] == {"volume", "amount"}
+        for bond_idx in (
+            "000012.SH",
+            "000022.SH",
+            "000061.SH",
+            "000101.SH",
+            "000116.SH",
+        ):
+            assert exemptions[bond_idx] == {"volume"}
+        for cb_idx in ("000170.SH", "000867.SH", "000869.SH"):
+            assert exemptions[cb_idx] == {"close", "high", "low", "volume", "amount"}
+            assert tolerance_for(
+                "open", asset_type="cn_stock_index_bars_daily", ticker=cb_idx
+            ) == (0.50, "absolute")
+        assert _is_exempt(
+            pd.Series(["399002.SZ", "000300.SH"]), "volume", {"399*.SZ": {"volume"}}
+        ).tolist() == [True, False]
+
+
+class TestCrossSourceCheckAggregate:
+    def test_aggregate_matches_minute_totals_without_row_join(self):
+        df_a = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000001.SZ", "600519.SH", "600519.SH"],
+                "datetime": [
+                    "2024-06-14 09:31",
+                    "2024-06-14 09:32",
+                    "2024-06-14 09:31",
+                    "2024-06-14 09:32",
+                ],
+                "volume": [1000, 2000, 500, 500],
+                "amount": [10000.0, 20000.0, 800000.0, 800000.0],
+            }
+        )
+        # Different intraday bar split, identical daily totals per ticker
+        df_b = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "600519.SH", "600519.SH"],
+                "datetime": [
+                    "2024-06-14 09:31",
+                    "2024-06-14 09:31",
+                    "2024-06-14 09:33",
+                ],
+                "volume": [3000, 400, 600],
+                "amount": [30000.0, 640000.0, 960000.0],
+            }
+        )
+        res = cross_source_check_aggregate(
+            df_a,
+            df_b,
+            "cn_stock_bars_minute",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert res.matched_rows == 2
+        assert res.total_rows == 2
+        assert res.mismatched_fields == {}
+        assert respond(res) == "silent"
+
+    def test_aggregate_detects_mismatch_and_handles_missing_and_all_nan(self):
+        df_a = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000001.SZ", "000002.SZ", "600000.SH"],
+                "volume": [1000, 1000, float("nan"), 500],
+                "amount": [10000.0, 10000.0, float("nan"), 5000.0],
+            }
+        )
+        df_b = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000002.SZ", "300750.SZ"],
+                "volume": [2500, float("nan"), 900],
+                "amount": [20000.0, float("nan"), 9000.0],
+            }
+        )
+        res = cross_source_check_aggregate(
+            df_a,
+            df_b,
+            "cn_stock_bars_minute",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert res.matched_rows == 2  # 000001.SZ & 000002.SZ (both-NaN matches)
+        assert res.missing_in_secondary == 1  # 600000.SH
+        assert res.missing_in_primary == 1  # 300750.SZ
+        assert set(res.mismatched_fields) == {"volume"}
+        assert res.mismatched_fields["volume"].sample_tickers == ["000001.SZ"]
+        assert respond(res) == "ERROR"
+
+    def test_run_cross_check_for_date_uses_aggregate_for_minute_table(
+        self, tmp_path, monkeypatch
+    ):
+        from data.raw import save_raw
+
+        qdc_min = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000001.SZ"],
+                "trade_date": [TRADE_DATE, TRADE_DATE],
+                "datetime": ["2024-06-14 09:31", "2024-06-14 09:32"],
+                "open": [10.0, 10.1],
+                "high": [10.2, 10.2],
+                "low": [9.9, 10.0],
+                "close": [10.1, 10.15],
+                "volume": [1000, 2000],
+                "amount": [10050.0, 20250.0],
+            }
+        )
+        ad_min = pd.DataFrame(
+            {
+                "ticker": ["000001.SZ"],
+                "trade_date": [TRADE_DATE],
+                "datetime": ["2024-06-14 09:31"],
+                "open": [10.0],
+                "high": [10.2],
+                "low": [9.9],
+                "close": [10.15],
+                "volume": [3000],
+                "amount": [30300.0],
+            }
+        )
+        save_raw(qdc_min, "qdc", "cn_stock_bars_minute", TRADE_DATE, tmp_path)
+        save_raw(ad_min, "amazingdata", "cn_stock_bars_minute", TRADE_DATE, tmp_path)
+        monkeypatch.setattr(
+            "data.normalizers.get_normalizer", lambda _src: lambda _ds, df: df
+        )
+
+        levels = run_cross_check_for_date(
+            "cn_stock_bars_minute", TRADE_DATE, data_root=tmp_path
+        )
+        assert levels == {"amazingdata": "silent"}

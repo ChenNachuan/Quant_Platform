@@ -190,25 +190,38 @@ cross_check:
     adjfactor: 1.0e-6
     pe_pb: 0.02
     default: 0.001
-  # 剥离跳过列表：已知独家指数（如 SF .TI 概念指数）不参与跨源交叉校验
+  # 剥离跳过列表（支持通配符）：已知单源独家指数（如 SF .TI 概念指数、899 北交所细分）不参与跨源交叉校验
+  skip_tickers:
+    cn_stock_index_bars_daily: ["*.TI", "899*.BJ"]
+  # 兼容旧后缀配置（与 skip_tickers 自动合并）
   skip_suffixes:
     cn_stock_index_bars_daily: [".TI"]
   # 显式口径豁免：已知跨源统计口径差异字段不计入不一致
   exemptions:
     cn_stock_index_bars_daily:
       399001.SZ: [volume, amount]  # 深证成指：SF/QDC 全市场口径 vs AD 成份股口径
+      399002.SZ: [volume, amount]  # 深成指R：全市场口径 vs 成份股口径
+      399003.SZ: [volume, amount]  # 成份B指：全市场口径 vs 成份股口径
       399006.SZ: [volume, amount]  # 创业板指：SF/QDC 全市场口径 vs AD 成份股口径
+      399289.SZ: [volume, amount]  # 深证相关全市场口径指数
       000012.SH: [volume]          # 上证国债指数：手/张口径差异
       000022.SH: [volume]          # 上证公司债指数：手/张口径差异
+      000061.SH: [volume]          # 上证沪企债30：手/张口径差异
+      000101.SH: [volume]          # 上证信用债100：手/张口径差异
+      000116.SH: [volume]          # 上证信用债指数：手/张口径差异
+      000170.SH: [close, high, low, volume, amount]  # 跨境指数：交易日历/汇率/收盘时间差异
+      000867.SH: [close, high, low, volume, amount]  # 跨境指数
+      000869.SH: [close, high, low, volume, amount]  # 跨境指数
   # 按资产子类分级容差（按 YAML 顺序匹配，bond/cross_border 先于 equity 兜底）
   tolerance_overrides:
     cn_stock_index_bars_daily:
       bond:
-        tickers: ["000012.SH", "000013.SH", "000022.SH", "000061.SH", "399481.SZ"]
+        tickers: ["000012.SH", "000013.SH", "000022.SH", "000061.SH", "000101.SH", "000116.SH", "399481.SZ"]
         price: 0.20
         volume: 0.05
         amount: 0.05
       cross_border:
+        tickers: ["000170.SH", "000867.SH", "000869.SH"]
         prefixes: ["HSI", "HSCEI", "HSTECH", "SPX", "NDX"]
         price: 0.50
         volume: 0.02

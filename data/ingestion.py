@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -63,6 +64,7 @@ __all__ = [
     "tolerance_for",
     "_ticker_in_group",
     "cross_source_check",
+    "cross_source_check_aggregate",
     "response_level",
     "respond",
     "backfill_source_tag",
@@ -514,10 +516,30 @@ def load_tolerances(
 
 
 _BOND_INDEX_TICKERS = frozenset(
-    {"000012.SH", "000013.SH", "000022.SH", "000061.SH", "399481.SZ"}
+    {
+        "000012.SH",
+        "000013.SH",
+        "000022.SH",
+        "000061.SH",
+        "000101.SH",
+        "000116.SH",
+        "399481.SZ",
+    }
 )
+_CROSS_BORDER_TICKERS = frozenset({"000170.SH", "000867.SH", "000869.SH"})
 _CROSS_BORDER_PREFIXES = ("HSI", "HSCEI", "HSTECH", "SPX", "NDX")
 _EQUITY_INDEX_PREFIXES = ("000", "399", "899", "93", "97", "98", "47", "48")
+
+_AGGREGATE_CROSS_CHECK_TABLES = frozenset(
+    {
+        "cn_stock_bars_minute",
+        "cn_etf_bars_minute",
+        "cn_stock_tick",
+        "cn_stock_tick_l2",
+        "cn_etf_tick",
+        "cn_futures_tick_l2",
+    }
+)
 
 
 def _cross_check_section(
@@ -577,7 +599,7 @@ def _load_skip_rules(
     asset_type: str,
     *,
     path: str | os.PathLike[str] | None = None,
-) -> tuple[frozenset[str], tuple[str, ...]]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     section = _cross_check_section(path)
     skip_tickers_map = section.get("skip_tickers") or {}
     skip_suffixes_map = section.get("skip_suffixes") or {}
@@ -591,7 +613,61 @@ def _load_skip_rules(
         key = _lookup_key(skip_suffixes_map, asset_type)
         if key is not None:
             suffixes = [str(s) for s in (skip_suffixes_map.get(key) or ())]
-    return frozenset(tickers), tuple(suffixes)
+    return tuple(tickers), tuple(suffixes)
+
+
+def _match_patterns(series: pd.Series, patterns: Sequence[str]) -> pd.Series:
+    """按精确代码或 ``fnmatch`` 通配符（如 ``*.TI``、``899*.BJ``）匹配标的代码。"""
+    if not patterns or series.empty:
+        return pd.Series(False, index=series.index, dtype=bool)
+    s = series.astype(str)
+    exact = {p for p in patterns if not any(ch in p for ch in "*?[")}
+    globs = [p for p in patterns if any(ch in p for ch in "*?[")]
+    mask = s.isin(exact) if exact else pd.Series(False, index=series.index, dtype=bool)
+    if globs:
+        matched_unique = {
+            val
+            for val in s.unique()
+            if any(fnmatch.fnmatchcase(val, pat) for pat in globs)
+        }
+        if matched_unique:
+            mask = mask | s.isin(matched_unique)
+    return mask
+
+
+def _apply_skip_rules(
+    df_a: pd.DataFrame,
+    df_b: pd.DataFrame,
+    canonical: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    skip_tickers, skip_suffixes = _load_skip_rules(canonical)
+    if not skip_tickers and not skip_suffixes:
+        return df_a, df_b
+
+    def _keep_mask(series: pd.Series) -> pd.Series:
+        s = series.astype(str)
+        mask = pd.Series(True, index=series.index, dtype=bool)
+        if skip_tickers:
+            mask = mask & ~_match_patterns(s, skip_tickers)
+        if skip_suffixes:
+            mask = mask & ~s.str.endswith(skip_suffixes)
+        return mask
+
+    return df_a.loc[_keep_mask(df_a["ticker"])], df_b.loc[_keep_mask(df_b["ticker"])]
+
+
+def _is_exempt(
+    tickers: pd.Series,
+    field: str,
+    exemptions: Mapping[str, set[str]],
+) -> pd.Series:
+    """判断每个标的在指定字段上是否命中口径豁免（支持精确匹配与通配模式）。"""
+    if not exemptions or tickers.empty:
+        return pd.Series(False, index=tickers.index, dtype=bool)
+    patterns = [
+        pat for pat, fields in exemptions.items() if field in fields or "*" in fields
+    ]
+    return _match_patterns(tickers, patterns)
 
 
 def _ticker_in_group(
@@ -627,9 +703,13 @@ def _ticker_in_group(
     if group_name == "bond":
         return t in _BOND_INDEX_TICKERS
     if group_name == "cross_border":
-        return t.startswith(_CROSS_BORDER_PREFIXES)
+        return t in _CROSS_BORDER_TICKERS or t.startswith(_CROSS_BORDER_PREFIXES)
     if group_name == "equity":
-        if t in _BOND_INDEX_TICKERS or t.startswith(_CROSS_BORDER_PREFIXES):
+        if (
+            t in _BOND_INDEX_TICKERS
+            or t in _CROSS_BORDER_TICKERS
+            or t.startswith(_CROSS_BORDER_PREFIXES)
+        ):
             return False
         return t.startswith(_EQUITY_INDEX_PREFIXES) or t.endswith(
             (".SH", ".SZ", ".BJ", ".CSI")
@@ -777,20 +857,7 @@ def cross_source_check(
         else ["ticker"]
     )
     canonical = resolve_table_name(table)
-    skip_tickers, skip_suffixes = _load_skip_rules(canonical)
-    if skip_tickers or skip_suffixes:
-
-        def _keep_mask(series: pd.Series) -> pd.Series:
-            s = series.astype(str)
-            mask = pd.Series(True, index=series.index)
-            if skip_tickers:
-                mask = mask & ~s.isin(skip_tickers)
-            if skip_suffixes:
-                mask = mask & ~s.str.endswith(skip_suffixes)
-            return mask
-
-        df_a = df_a.loc[_keep_mask(df_a["ticker"])]
-        df_b = df_b.loc[_keep_mask(df_b["ticker"])]
+    df_a, df_b = _apply_skip_rules(df_a, df_b, canonical)
 
     if df_a.duplicated(join_keys).any() or df_b.duplicated(join_keys).any():
         raise ValueError(f"duplicate join keys {join_keys} in input frames")
@@ -874,9 +941,7 @@ def cross_source_check(
             bad = bad | one_missing
         is_exempt = pd.Series(False, index=both.index)
         if exemptions and not both.empty:
-            is_exempt = (
-                both["ticker"].astype(str).map(lambda t: field in exemptions.get(t, ()))
-            )
+            is_exempt = _is_exempt(both["ticker"], field, exemptions)
             bad = bad & ~is_exempt
         count = int(bad.sum())
         if not count:
@@ -898,6 +963,118 @@ def cross_source_check(
             trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
         ),
         primary_source=_primary_source_or(df_a, table),
+        secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
+        total_rows=int(len(merged)),
+        matched_rows=matched_rows,
+        mismatched_fields=mismatched,
+        missing_in_primary=int((merged["_merge"] == "right_only").sum()),
+        missing_in_secondary=int((merged["_merge"] == "left_only").sum()),
+    )
+
+
+def cross_source_check_aggregate(
+    df_a: pd.DataFrame,
+    df_b: pd.DataFrame,
+    asset_type: str,
+    trade_date: str | date | None = None,
+    agg_fields: Sequence[str] = ("volume", "amount"),
+    group_by: str | Sequence[str] = "ticker",
+    tolerances: Mapping[str, float] | None = None,
+    *,
+    secondary_source: str | None = None,
+) -> CrossCheckResult:
+    """对分钟线/Tick 等大表按 *group_by* 聚合汇总后比对总量，避免逐行 Join 开销。"""
+    group_cols = [group_by] if isinstance(group_by, str) else list(group_by)
+    if not group_cols:
+        raise ValueError("group_by must not be empty")
+    for col in group_cols:
+        if col not in df_a.columns or col not in df_b.columns:
+            raise ValueError(f"both frames need group_by column {col!r}")
+
+    canonical = resolve_table_name(asset_type)
+    if "ticker" in df_a.columns and "ticker" in df_b.columns:
+        df_a, df_b = _apply_skip_rules(df_a, df_b, canonical)
+
+    fields = [f for f in agg_fields if f in df_a.columns and f in df_b.columns]
+
+    def _aggregate(frame: pd.DataFrame) -> pd.DataFrame:
+        if not fields:
+            return frame[group_cols].drop_duplicates().reset_index(drop=True)
+        sub = frame[group_cols + fields].copy()
+        for f in fields:
+            sub[f] = pd.to_numeric(sub[f], errors="coerce")
+        if sub.empty:
+            return sub.drop_duplicates(subset=group_cols).reset_index(drop=True)
+        return (
+            sub.groupby(group_cols, sort=False, dropna=False)[fields]
+            .sum(min_count=1)
+            .reset_index()
+        )
+
+    agg_a = _aggregate(df_a)
+    agg_b = _aggregate(df_b)
+    merged = agg_a.merge(
+        agg_b, on=group_cols, how="outer", suffixes=("_a", "_b"), indicator=True
+    )
+    both = merged[merged["_merge"] == "both"]
+    matched_rows = int(len(both))
+
+    exemptions = load_exemptions(canonical)
+    has_overrides = (
+        bool(load_tolerance_overrides(canonical)) and "ticker" in both.columns
+    )
+
+    def _field_tol(field_name: str) -> tuple[float | pd.Series, str]:
+        base_tol, mode = tolerance_for(field_name, tolerances)
+        if not has_overrides or both.empty:
+            return base_tol, mode
+        unique_tickers = both["ticker"].astype(str).unique()
+        tol_map = {
+            t: tolerance_for(field_name, tolerances, asset_type=canonical, ticker=t)[0]
+            for t in unique_tickers
+        }
+        return both["ticker"].astype(str).map(tol_map).astype("float64"), mode
+
+    sample_col = "ticker" if "ticker" in both.columns else group_cols[0]
+    mismatched: dict[str, MismatchDetail] = {}
+    for field in fields:
+        a = pd.to_numeric(both[f"{field}_a"], errors="coerce").astype("float64")
+        b = pd.to_numeric(both[f"{field}_b"], errors="coerce").astype("float64")
+        na, nb = a.isna(), b.isna()
+        valid = ~(na | nb)
+        one_missing = na ^ nb
+        diff = (a - b).abs()
+        tol, mode = _field_tol(field)
+        if mode == "absolute":
+            bad = valid & (diff > tol)
+        else:
+            base = a.abs().clip(lower=1e-9)
+            bad = valid & ((diff / base) > tol)
+        bad = bad | one_missing
+        is_exempt = pd.Series(False, index=both.index, dtype=bool)
+        if exemptions and not both.empty and "ticker" in both.columns:
+            is_exempt = _is_exempt(both["ticker"], field, exemptions)
+            bad = bad & ~is_exempt
+        count = int(bad.sum())
+        if not count:
+            continue
+        valid_non_exempt = valid & ~is_exempt
+        mismatched[field] = MismatchDetail(
+            field=field,
+            mismatch_count=count,
+            mismatch_rate=(count / matched_rows) if matched_rows else 0.0,
+            max_abs_diff=float(diff[valid_non_exempt].max())
+            if bool(valid_non_exempt.any())
+            else 0.0,
+            sample_tickers=list(both.loc[bad, sample_col].astype(str).head(5)),
+        )
+
+    return CrossCheckResult(
+        table=asset_type,
+        trade_date=_as_date_str(
+            trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
+        ),
+        primary_source=_primary_source_or(df_a, asset_type),
         secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
         total_rows=int(len(merged)),
         matched_rows=matched_rows,
@@ -1570,13 +1747,26 @@ def run_cross_check_for_date(
             )
             continue
         backup_df.attrs["source"] = backup
-        res = cross_source_check(
-            primary_df,
-            backup_df,
-            canonical,
-            trade_date,
-            secondary_source=backup,
-        )
+        if (
+            canonical in _AGGREGATE_CROSS_CHECK_TABLES
+            and "ticker" in primary_df.columns
+            and "ticker" in backup_df.columns
+        ):
+            res = cross_source_check_aggregate(
+                primary_df,
+                backup_df,
+                canonical,
+                trade_date,
+                secondary_source=backup,
+            )
+        else:
+            res = cross_source_check(
+                primary_df,
+                backup_df,
+                canonical,
+                trade_date,
+                secondary_source=backup,
+            )
         level = respond(res)
         save_cross_check_result(res, level, data_root=data_root)
         levels[backup] = level
