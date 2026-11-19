@@ -1377,3 +1377,62 @@ class TestCrossDayChecks:
             assert rid in by_id
             assert by_id[rid].failing_count == len(df)
             assert by_id[rid].action_taken == "flag"
+
+
+class TestDqcDiagnosticFixes:
+    """Regression guards for C05 turnover, C02 universe fallback, and K11 diff samples."""
+
+    def test_C05_all_nan_turnover_on_bars_daily_passes(self):
+        from data.dqc.engine import run_all_checks
+
+        df = _make_clean_daily().copy()
+        df["turnover"] = np.nan  # Contract G1: all-NULL turnover in cn_stock_bars_daily
+        _hard, soft = run_all_checks(
+            df,
+            pd.Timestamp("2024-01-03").date(),
+            "bars_daily",
+            overrides={
+                "calendar_dates": CLEAN_DATES,
+                "universe": CLEAN_TICKERS,
+                "daily_tickers": CLEAN_TICKERS,
+                "today": TODAY,
+            },
+        )
+        by_id = {r.rule_id: r for r in soft}
+        assert by_id["C05"].failing_count == 0
+
+    def test_C02_universe_none_falls_back_to_df_tickers_and_empty_fails_closed(self):
+        from data.dqc.checks.custom_checks import check_row_count_vs_universe
+
+        df = _make_clean_daily()
+        assert not bool(check_row_count_vs_universe(df, universe=None).iloc[0])
+        assert bool(check_row_count_vs_universe(df, universe=[]).iloc[0])
+
+        # Multi-day df where one day drops below 95% of union tickers still triggers
+        extra = df[df["trade_date"] == "2024-01-02"].copy()
+        extra["trade_date"] = "2024-01-04"
+        extra = extra.iloc[:1]  # 1 ticker vs 2 unique tickers across frame (50% < 95%)
+        multi = pd.concat([df, extra], ignore_index=True)
+        assert bool(check_row_count_vs_universe(multi, universe=None).iloc[0])
+
+    def test_K11_sample_tickers_reports_symmetric_difference(self):
+        from data.dqc.engine import run_all_checks
+
+        df = _make_clean_daily()  # tickers: 000001.SZ, 000002.SZ
+        daily_ref = [f"60000{i}.SH" for i in range(6)]
+        _hard, soft = run_all_checks(
+            df,
+            pd.Timestamp("2024-01-03").date(),
+            "bars_daily",
+            overrides={"daily_tickers": daily_ref},
+        )
+        k11 = {r.rule_id: r for r in soft}["K11"]
+        assert k11.failing_count == len(df)
+        assert k11.sample_tickers == [
+            "000001.SZ",
+            "000002.SZ",
+            "600000.SH",
+            "600001.SH",
+            "600002.SH",
+        ]
+        assert "diff=8" in k11.sample_values[0]

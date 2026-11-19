@@ -1273,3 +1273,43 @@ class TestDqcReportTables:
         ]
         assert ov["prev_stats"]["close_mean"] == 20.0
         assert ov["prev_stats"]["prev_date"] == "2024-01-02"
+
+    def test_build_reference_overrides_falls_back_to_stock_basic_and_clean_score_100(
+        self, tmp_path
+    ):
+        from data.dqc import engine, report
+
+        basic_dir = tmp_path / "asset" / "cn_stock_basic"
+        basic_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000002.SZ", "000003.SZ", "999999.SZ"],
+                "list_date": ["2020-01-01"] * 4,
+                "delist_date": [None, None, None, "2023-12-31"],
+            }
+        ).to_parquet(basic_dir / "stock_basic.parquet", index=False)
+
+        ov = report.build_reference_overrides(
+            tmp_path, "cn_stock_bars_daily", date(2024, 1, 3)
+        )
+        assert ov["universe"] == ["000001.SZ", "000002.SZ", "000003.SZ"]
+
+        # Even without industry/stock_basic, normal daily batch gets accepted & 100.0
+        fresh_root = tmp_path / "fresh"
+        df = _dqc_daily_frame(n=3)
+        df["turnover"] = float("nan")
+        out = engine.ingest_with_dqc(
+            df,
+            self.DATA_DATE,
+            "bars_daily",
+            overrides={
+                "calendar_dates": ["2024-01-03"],
+                "daily_tickers": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "today": "2024-01-03",
+            },
+            data_root=fresh_root,
+        )
+        assert len(out) == 3
+        row = report.load_summary(fresh_root).iloc[0]
+        assert row["batch_status"] == "accepted"
+        assert row["quality_score"] == 100.0

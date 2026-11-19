@@ -535,8 +535,46 @@ def test_legacy_report_parquet_backcompat(tmp_path):
     loaded = report.load_summary(tmp_path)
     assert list(loaded.columns) == report.SUMMARY_COLUMNS
     assert loaded.iloc[0]["run_id"] == ""
+    assert loaded.iloc[0]["run_type"] == "daily"
     assert pd.isna(loaded.iloc[0]["quality_score"])
 
     report.append_summary(row, data_root=tmp_path)
     loaded2 = report.load_summary(tmp_path)
     assert len(loaded2) == 2
+
+
+def test_run_type_debug_purged_on_formal_ingest_and_hidden_in_dashboard(
+    tmp_path, monkeypatch
+):
+    from data.dqc import report
+
+    df = _daily_frame(5)
+    monkeypatch.setattr(engine, "run_all_checks", _fake_runner())
+
+    # Two debug runs on DATA_DATE
+    engine.ingest_with_dqc(
+        df, DATA_DATE, "bars_daily", data_root=tmp_path, run_type="debug"
+    )
+    engine.ingest_with_dqc(
+        df, DATA_DATE, "bars_daily", data_root=tmp_path, run_type="debug"
+    )
+    summary_debug = report.load_summary(tmp_path)
+    assert len(summary_debug) == 2
+    assert set(summary_debug["run_type"]) == {"debug"}
+    dash_no_debug = report.run_dashboard(tmp_path, last=10)
+    assert "debug" not in dash_no_debug
+    dash_with_debug = report.run_dashboard(tmp_path, last=10, include_debug=True)
+    assert "debug" in dash_with_debug
+
+    # Formal daily run purges old debug rows for same (data_date, table)
+    engine.ingest_with_dqc(
+        df, DATA_DATE, "bars_daily", data_root=tmp_path, run_type="daily"
+    )
+    summary_after = report.load_summary(tmp_path)
+    assert len(summary_after) == 1
+    assert summary_after.iloc[0]["run_type"] == "daily"
+
+    with pytest.raises(ValueError, match="run_type"):
+        engine.ingest_with_dqc(
+            df, DATA_DATE, "bars_daily", data_root=tmp_path, run_type="invalid"
+        )

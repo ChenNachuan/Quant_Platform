@@ -1811,6 +1811,7 @@ def ingest_table(
     overrides: dict[str, Any] | None = None,
     skip_dqc: bool = False,
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    run_type: str = "daily",
 ) -> IngestOutcome:
     """执行单表、单交易日的完整接入流水线（拉取 -> 落地 raw -> 标准化 -> DQC -> 写 asset -> 水位线 -> 交叉校验）。
 
@@ -1878,6 +1879,7 @@ def ingest_table(
                     overrides=ref,
                     data_root=data_root,
                     source_tag=source_tag,
+                    run_type=run_type,
                 )
             else:
                 schema = SCHEMA[canonical]
@@ -2029,6 +2031,7 @@ def run_ingestion(
     data_root: str | os.PathLike[str] = str(DATA_ROOT),
     fail_fast: bool = False,
     sleep_seconds: float = 0.0,
+    run_type: str = "daily",
 ) -> list[IngestOutcome]:
     """按 ``(dates, tables)`` 顺序批量执行入库并汇总每个批次的结果。"""
     outcomes: list[IngestOutcome] = []
@@ -2050,6 +2053,7 @@ def run_ingestion(
                     overrides=overrides,
                     skip_dqc=skip_dqc,
                     data_root=data_root,
+                    run_type=run_type,
                 )
                 outcomes.append(outcome)
             except Exception as exc:  # noqa: BLE001

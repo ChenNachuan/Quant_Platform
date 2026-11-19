@@ -86,7 +86,11 @@ def check_row_count_vs_universe(
     df: pd.DataFrame, universe=None, min_ratio: float = 0.95, **_
 ) -> pd.Series:
     """C02：单日去重标的数量须 >= ``len(universe) * min_ratio``。"""
-    if universe is None or len(universe) == 0:
+    if universe is None:
+        if "ticker" not in df.columns or df.empty:
+            return pd.Series([True], index=["__aggregate__"])
+        universe = set(df["ticker"].dropna().astype(str).unique())
+    if len(universe) == 0:
         return pd.Series([True], index=["__aggregate__"])
     ratios = df.groupby(_date_col(df) or "trade_date")["ticker"].nunique() / len(
         universe
@@ -405,10 +409,25 @@ def check_fund_vs_daily_tickers(
 ) -> pd.Series:
     """K11：基本面表与日线表标的集合对称差须 <= *max_diff*。"""
     if daily_tickers is None:
-        return pd.Series([True], index=["__aggregate__"])
-    fund_set = set(df["ticker"].unique()) if "ticker" in df.columns else set()
-    diff = fund_set.symmetric_difference(set(daily_tickers))
-    return pd.Series([len(diff) > max_diff], index=["__aggregate__"])
+        res = pd.Series([True], index=["__aggregate__"])
+        res.attrs["sample_tickers"] = []
+        res.attrs["sample_values"] = ["daily_tickers=None"]
+        return res
+    fund_set = (
+        set(df["ticker"].dropna().astype(str).unique())
+        if "ticker" in df.columns
+        else set()
+    )
+    daily_set = {str(t) for t in daily_tickers}
+    diff = sorted(fund_set.symmetric_difference(daily_set))
+    failed = len(diff) > max_diff
+    res = pd.Series([failed], index=["__aggregate__"])
+    if failed:
+        res.attrs["sample_tickers"] = diff[:5]
+        only_batch = len(fund_set - daily_set)
+        only_ref = len(daily_set - fund_set)
+        res.attrs["sample_values"] = [f"diff={len(diff)} (+{only_batch}/-{only_ref})"]
+    return res
 
 
 def value_distribution_shift(

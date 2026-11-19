@@ -204,11 +204,16 @@ cross_check:
       399003.SZ: [volume, amount]  # 成份B指：全市场口径 vs 成份股口径
       399006.SZ: [volume, amount]  # 创业板指：SF/QDC 全市场口径 vs AD 成份股口径
       399289.SZ: [volume, amount]  # 深证相关全市场口径指数
-      000012.SH: [volume]          # 上证国债指数：手/张口径差异
-      000022.SH: [volume]          # 上证公司债指数：手/张口径差异
-      000061.SH: [volume]          # 上证沪企债30：手/张口径差异
-      000101.SH: [volume]          # 上证信用债100：手/张口径差异
-      000116.SH: [volume]          # 上证信用债指数：手/张口径差异
+      000012.SH: [volume, amount]  # 上证国债指数：手/张口径及成交额口径差异
+      000022.SH: [volume, amount]  # 上证公司债指数：手/张口径及成交额口径差异
+      000061.SH: [volume, amount]  # 上证沪企债30：手/张口径及成交额口径差异
+      000101.SH: [volume, amount]  # 上证信用债100：手/张口径及成交额口径差异
+      000116.SH: [volume, amount]  # 上证信用债指数：手/张口径及成交额口径差异
+      399298.SZ: [volume, amount]  # 深证债券指数：AD vs SF 量额口径差异
+      399299.SZ: [volume, amount]  # 深证债券指数：AD vs SF 量额口径差异
+      399301.SZ: [volume, amount]  # 深证债券指数：AD vs SF 量额口径差异
+      399302.SZ: [volume, amount]  # 深证债券指数：AD vs SF 量额口径差异
+      399481.SZ: [volume, amount]  # 国证企债指数：AD vs SF 量额口径差异
       000170.SH: [close, high, low, volume, amount]  # 跨境指数：交易日历/汇率/收盘时间差异
       000867.SH: [close, high, low, volume, amount]  # 跨境指数
       000869.SH: [close, high, low, volume, amount]  # 跨境指数
@@ -216,7 +221,7 @@ cross_check:
   tolerance_overrides:
     cn_stock_index_bars_daily:
       bond:
-        tickers: ["000012.SH", "000013.SH", "000022.SH", "000061.SH", "000101.SH", "000116.SH", "399481.SZ"]
+        tickers: ["000012.SH", "000013.SH", "000022.SH", "000061.SH", "000101.SH", "000116.SH", "399298.SZ", "399299.SZ", "399301.SZ", "399302.SZ", "399481.SZ"]
         price: 0.20
         volume: 0.05
         amount: 0.05

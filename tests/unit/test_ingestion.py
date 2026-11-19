@@ -849,8 +849,13 @@ class TestTieredCrossCheckTolerancesAndExemptions:
             "000061.SH",
             "000101.SH",
             "000116.SH",
+            "399298.SZ",
+            "399299.SZ",
+            "399301.SZ",
+            "399302.SZ",
+            "399481.SZ",
         ):
-            assert exemptions[bond_idx] == {"volume"}
+            assert exemptions[bond_idx] == {"volume", "amount"}
         for cb_idx in ("000170.SH", "000867.SH", "000869.SH"):
             assert exemptions[cb_idx] == {"close", "high", "low", "volume", "amount"}
             assert tolerance_for(
@@ -859,6 +864,45 @@ class TestTieredCrossCheckTolerancesAndExemptions:
         assert _is_exempt(
             pd.Series(["399002.SZ", "000300.SH"]), "volume", {"399*.SZ": {"volume"}}
         ).tolist() == [True, False]
+
+    def test_bond_index_volume_and_amount_exemptions_silent(self):
+        bond_tickers = [
+            "000012.SH",
+            "000022.SH",
+            "000061.SH",
+            "000101.SH",
+            "000116.SH",
+            "399298.SZ",
+            "399299.SZ",
+            "399301.SZ",
+            "399302.SZ",
+            "399481.SZ",
+        ]
+        n = len(bond_tickers)
+        primary = pd.DataFrame(
+            {
+                "ticker": bond_tickers,
+                "trade_date": [TRADE_DATE] * n,
+                "open": [200.0] * n,
+                "high": [201.0] * n,
+                "low": [199.0] * n,
+                "close": [200.5] * n,
+                "volume": [1e6] * n,
+                "amount": [2e8] * n,
+            }
+        )
+        secondary = primary.copy()
+        secondary["volume"] = [5e7] * n
+        secondary["amount"] = [9e9] * n
+        res = cross_source_check(
+            primary,
+            secondary,
+            "cn_stock_index_bars_daily",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert res.mismatched_fields == {}
+        assert respond(res) == "silent"
 
 
 class TestCrossSourceCheckAggregate:

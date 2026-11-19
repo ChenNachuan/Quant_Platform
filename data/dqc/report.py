@@ -35,6 +35,7 @@ __all__ = [
     "DQC_REPORT_ROOT",
     "DETAIL_TABLE",
     "SUMMARY_TABLE",
+    "RUN_TYPES",
     "detail_path",
     "summary_path",
     "build_detail_rows",
@@ -44,6 +45,7 @@ __all__ = [
     "append_summary",
     "load_detail",
     "load_summary",
+    "purge_debug_runs",
     "load_quarantine_batches",
     "load_prev_day_stats",
     "build_reference_overrides",
@@ -63,6 +65,7 @@ DETAIL_COLUMNS = [
     "run_date",
     "run_time",
     "run_id",
+    "run_type",
     "data_date",
     "table",
     "rule_id",
@@ -80,6 +83,7 @@ DETAIL_COLUMNS = [
 SUMMARY_COLUMNS = [
     "run_time",
     "run_id",
+    "run_type",
     "data_date",
     "table",
     "total_rows",
@@ -106,6 +110,7 @@ QUARANTINE_COLUMNS = [
     "reject_reason",
 ]
 BATCH_STATUSES = ("accepted", "accepted_with_warnings", "rejected")
+RUN_TYPES = ("daily", "backfill", "debug")
 _DATETIME_COLUMNS = ("run_date", "run_time", "data_date")
 
 
@@ -165,8 +170,11 @@ def build_detail_rows(
     batch_rejected: bool = False,
     run_time: datetime | None = None,
     run_id: str = "",
+    run_type: str = "daily",
 ) -> list[dict]:
     """构建单批每条规则对应的 ``_dqc_results`` 明细行。"""
+    if run_type not in RUN_TYPES:
+        raise ValueError(f"bad run_type {run_type!r}; known: {list(RUN_TYPES)}")
     when = run_time or _now()
     rows: list[dict] = []
     for result in list(hard_results) + list(soft_results):
@@ -185,6 +193,7 @@ def build_detail_rows(
                 "run_date": when.date(),
                 "run_time": when,
                 "run_id": run_id,
+                "run_type": run_type,
                 "data_date": data_date,
                 "table": table,
                 "rule_id": result.rule_id,
@@ -223,12 +232,15 @@ def build_summary_row(
     quality_score: float | None = None,
     hard_results: Sequence[Any] | None = None,
     soft_results: Sequence[Any] | None = None,
+    run_type: str = "daily",
 ) -> dict:
     """构建单批对应的 ``_dqc_batch_summary`` 汇总行。"""
     if batch_status not in BATCH_STATUSES:
         raise ValueError(
             f"bad batch_status {batch_status!r}; known: {list(BATCH_STATUSES)}"
         )
+    if run_type not in RUN_TYPES:
+        raise ValueError(f"bad run_type {run_type!r}; known: {list(RUN_TYPES)}")
     total = int(total_rows)
     dropped = int(rows_dropped)
     flagged = int(rows_flagged)
@@ -243,6 +255,7 @@ def build_summary_row(
     return {
         "run_time": run_time or _now(),
         "run_id": run_id,
+        "run_type": run_type,
         "data_date": data_date,
         "table": table,
         "total_rows": total,
@@ -276,6 +289,8 @@ def _align_report_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         if col not in out.columns:
             if col == "run_id":
                 out[col] = ""
+            elif col == "run_type":
+                out[col] = "daily"
             elif col == "quality_score":
                 out[col] = float("nan")
             else:
@@ -346,6 +361,76 @@ def append_summary(
 ) -> Path:
     """追加一条汇总记录到汇总表。"""
     return _append_parquet(summary_path(data_root), [row], SUMMARY_COLUMNS)
+
+
+def _write_report_parquet_locked(
+    path: Path, frame: pd.DataFrame, columns: list[str]
+) -> None:
+    for col in _DATETIME_COLUMNS:
+        if col in frame.columns:
+            frame[col] = pd.to_datetime(frame[col])
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        frame[columns].to_parquet(tmp, **PARQUET_WRITE_CONFIG)
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _drop_debug_rows_from_file(
+    path: Path,
+    columns: list[str],
+    *,
+    data_date: date | None = None,
+    table: str | None = None,
+) -> int:
+    if not path.exists():
+        return 0
+    with FileLock(path):
+        df = _align_report_columns(pd.read_parquet(path), columns)
+        if df.empty:
+            return 0
+        mask = df["run_type"].fillna("daily") == "debug"
+        if data_date is not None:
+            dates = pd.to_datetime(df["data_date"], errors="coerce").dt.date
+            mask = mask & (dates == data_date)
+        if table is not None:
+            mask = mask & (df["table"].astype(str) == str(table))
+        removed = int(mask.sum())
+        if not removed:
+            return 0
+        kept = df.loc[~mask].reset_index(drop=True)
+        _write_report_parquet_locked(path, kept, columns)
+        return removed
+
+
+def purge_debug_runs(
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    *,
+    data_date: date | None = None,
+    table: str | None = None,
+) -> int:
+    """清除指定批次（或全部）的 ``run_type='debug'`` 历史记录，返回清理的汇总行数。"""
+    removed = _drop_debug_rows_from_file(
+        summary_path(data_root), SUMMARY_COLUMNS, data_date=data_date, table=table
+    )
+    if data_date is not None:
+        detail_files = [detail_path(data_date, data_root)]
+    else:
+        detail_root = Path(data_root) / DQC_REPORT_ROOT / DETAIL_TABLE
+        detail_files = sorted(detail_root.glob("month=*/data.parquet"))
+    for f in detail_files:
+        _drop_debug_rows_from_file(f, DETAIL_COLUMNS, data_date=data_date, table=table)
+    return removed
 
 
 def load_detail(data_root: str | os.PathLike[str] = str(DATA_ROOT)) -> pd.DataFrame:
@@ -525,6 +610,34 @@ def build_reference_overrides(
         ind_df = pd.read_parquet(ind)
         if "ticker" in ind_df.columns:
             overrides["universe"] = sorted(set(ind_df["ticker"].astype(str)))
+    if "universe" not in overrides:
+        basic = next(
+            (
+                p
+                for p in (
+                    root / "asset" / "cn_stock_basic" / "stock_basic.parquet",
+                    root / "asset" / "reference" / "stock_basic.parquet",
+                )
+                if p.exists()
+            ),
+            None,
+        )
+        if basic is not None:
+            basic_df = pd.read_parquet(basic)
+            if "ticker" in basic_df.columns:
+                active = basic_df
+                if "list_date" in active.columns:
+                    ld = pd.to_datetime(active["list_date"], errors="coerce").dt.date
+                    active = active[ld.isna() | (ld <= data_date)]
+                if "delist_date" in active.columns:
+                    dd = pd.to_datetime(active["delist_date"], errors="coerce").dt.date
+                    active = active[dd.isna() | (dd >= data_date)]
+                elif "list_status" in active.columns:
+                    active = active[active["list_status"] != "D"]
+                if not active.empty:
+                    overrides["universe"] = sorted(
+                        set(active["ticker"].dropna().astype(str))
+                    )
 
     bars_dir = next(
         (
@@ -564,6 +677,8 @@ def build_reference_overrides(
         overrides["prev_row_count"] = prev_stats.get("row_count", 0)
         overrides["prev_tickers"] = prev_stats.get("tickers", [])
         overrides["prev_stats"] = prev_stats
+        if "universe" not in overrides and prev_stats.get("tickers"):
+            overrides["universe"] = list(prev_stats["tickers"])
     return overrides
 
 
@@ -571,7 +686,10 @@ def build_reference_overrides(
 
 
 def run_dashboard(
-    data_root: str | os.PathLike[str] = str(DATA_ROOT), last: int = 10
+    data_root: str | os.PathLike[str] = str(DATA_ROOT),
+    last: int = 10,
+    *,
+    include_debug: bool = False,
 ) -> str:
     """使用 DuckDB 汇总批次状态计数、近期批次与高频失败规则。"""
     import duckdb
@@ -584,35 +702,52 @@ def run_dashboard(
     )
     con = duckdb.connect()
     lines: list[str] = []
-    by_status = con.execute(
-        "SELECT batch_status, count(*) AS batches, "
-        "round(avg(drop_rate), 4) AS avg_drop_rate, "
-        "round(avg(flag_rate), 4) AS avg_flag_rate "
-        "FROM read_parquet(?) GROUP BY 1 ORDER BY 1",
-        [str(summary)],
-    ).fetchdf()
-    lines.append("-- batch_status --")
-    lines.append(by_status.to_string(index=False))
     cols = {
         r[0]
         for r in con.execute(
             "DESCRIBE SELECT * FROM read_parquet(?)", [str(summary)]
         ).fetchall()
     }
+    where_clause = (
+        "WHERE coalesce(run_type, 'daily') != 'debug'"
+        if ("run_type" in cols and not include_debug)
+        else ""
+    )
+    by_status = con.execute(
+        "SELECT batch_status, count(*) AS batches, "
+        "round(avg(drop_rate), 4) AS avg_drop_rate, "
+        "round(avg(flag_rate), 4) AS avg_flag_rate "
+        f"FROM read_parquet(?) {where_clause} GROUP BY 1 ORDER BY 1",
+        [str(summary)],
+    ).fetchdf()
+    lines.append("-- batch_status --")
+    lines.append(by_status.to_string(index=False))
     tbl_expr = '"table"' if "table" in cols else 'asset_type AS "table"'
+    run_type_expr = "run_type, " if "run_type" in cols else ""
     recent = con.execute(
-        f"SELECT data_date, {tbl_expr}, batch_status, total_rows, rows_dropped, "
-        "rows_flagged, drop_rate, flag_rate, elapsed_seconds "
-        "FROM read_parquet(?) ORDER BY data_date DESC, run_time DESC LIMIT ?",
+        f"SELECT data_date, {tbl_expr}, {run_type_expr}batch_status, total_rows, "
+        "rows_dropped, rows_flagged, drop_rate, flag_rate, elapsed_seconds "
+        f"FROM read_parquet(?) {where_clause} ORDER BY data_date DESC, run_time DESC LIMIT ?",
         [str(summary), int(last)],
     ).fetchdf()
     lines.append(f"-- last {int(last)} batches --")
     lines.append(recent.to_string(index=False))
     if list(detail_glob.parent.glob("month=*/data.parquet")):
+        dcols = {
+            r[0]
+            for r in con.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)", [str(detail_glob)]
+            ).fetchall()
+        }
+        d_debug = (
+            " AND coalesce(run_type, 'daily') != 'debug'"
+            if ("run_type" in dcols and not include_debug)
+            else ""
+        )
         top = con.execute(
             "SELECT rule_id, rule_name, severity, count(*) AS failing_batches, "
             "round(max(failing_rate), 4) AS max_failing_rate "
-            "FROM read_parquet(?) WHERE failing_rows > 0 "
+            f"FROM read_parquet(?) WHERE failing_rows > 0{d_debug} "
             "GROUP BY 1, 2, 3 ORDER BY failing_batches DESC, rule_id LIMIT 10",
             [str(detail_glob)],
         ).fetchdf()
@@ -762,6 +897,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--data-root", default=str(DATA_ROOT))
     p.add_argument("--last", type=int, default=10)
+    p.add_argument(
+        "--include-debug",
+        action="store_true",
+        help="include run_type='debug' batches in summary",
+    )
 
     p = sub.add_parser(
         "reingest", help="re-download one date and re-run the full ingest"
@@ -806,7 +946,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_quarantine(batches)
             return 0
         if args.command == "dashboard":
-            print(run_dashboard(args.data_root, last=args.last))
+            print(
+                run_dashboard(
+                    args.data_root, last=args.last, include_debug=args.include_debug
+                )
+            )
             return 0
         if args.command == "reingest":
             return reingest(

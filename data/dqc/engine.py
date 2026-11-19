@@ -295,7 +295,12 @@ def _samples(df: pd.DataFrame, mask: pd.Series, rule: dict) -> tuple[list, list]
 
 
 def _build_result(
-    rule: dict, df: pd.DataFrame, mask: pd.Series, data_date: date | None = None
+    rule: dict,
+    df: pd.DataFrame,
+    mask: pd.Series,
+    data_date: date | None = None,
+    *,
+    raw: pd.Series | None = None,
 ) -> CheckResult:
     cfg = severity_config_for(rule["id"])
     total = len(df)
@@ -304,7 +309,15 @@ def _build_result(
         rate = 1.0 if failing else 0.0
     else:
         rate = (failing / total) if total else 0.0
-    tickers, values = _samples(df, mask, rule)
+    if (
+        failing > 0
+        and raw is not None
+        and ("sample_tickers" in raw.attrs or "sample_values" in raw.attrs)
+    ):
+        tickers = list(raw.attrs.get("sample_tickers", []))
+        values = list(raw.attrs.get("sample_values", []))
+    else:
+        tickers, values = _samples(df, mask, rule)
     return CheckResult(
         rule_id=rule["id"],
         rule_name=rule.get("name", rule["id"]),
@@ -357,7 +370,7 @@ def run_all_checks(
             raw = _evaluate_column_check(df, rule)
         else:
             raw = _evaluate_custom_check(df, rule, overrides)
-        result = _build_result(rule, df, _normalize_mask(raw, df), data_date)
+        result = _build_result(rule, df, _normalize_mask(raw, df), data_date, raw=raw)
         (hard if rule["severity"] == "HARD" else soft).append(result)
     return hard, soft
 
@@ -542,12 +555,15 @@ def ingest_with_dqc(
     data_root: str | os.PathLike = str(DATA_ROOT),
     target_path: str | os.PathLike | None = None,
     source_tag: str | None = None,
+    run_type: str = "daily",
 ) -> pd.DataFrame:
     """执行七步 DQC 入库流程并返回清洗后的 ``df_clean``。
 
     拒收时先写双报告表再移入隔离区并抛异常；接收时先按存储 Schema 投影校验
     并写入 Parquet（普通按日期覆盖，月度分区表执行 upsert），随后记录 DQC 报告。
     """
+    if run_type not in report.RUN_TYPES:
+        raise ValueError(f"bad run_type {run_type!r}; known: {list(report.RUN_TYPES)}")
     config = batch_config or BatchRejectConfig()
     table = table or str(dqc_group)
     run_id = str(uuid.uuid4())[:8]
@@ -562,6 +578,13 @@ def ingest_with_dqc(
             )
             merged_overrides.setdefault("prev_tickers", prev_stats.get("tickers", []))
             merged_overrides.setdefault("prev_stats", prev_stats)
+    if "universe" not in merged_overrides:
+        if merged_overrides.get("prev_tickers"):
+            merged_overrides["universe"] = list(merged_overrides["prev_tickers"])
+        elif "ticker" in df.columns and not df.empty:
+            merged_overrides["universe"] = sorted(
+                set(df["ticker"].dropna().astype(str))
+            )
     evaluation = evaluate_batch(
         df,
         data_date,
@@ -582,6 +605,7 @@ def ingest_with_dqc(
         batch_rejected=rejected,
         run_time=run_time,
         run_id=run_id,
+        run_type=run_type,
     )
     quality_score = report.compute_quality_score(hard_results, soft_results, len(df))
     summary_row = report.build_summary_row(
@@ -597,6 +621,7 @@ def ingest_with_dqc(
         run_time=run_time,
         run_id=run_id,
         quality_score=quality_score,
+        run_type=run_type,
     )
 
     if rejected:
@@ -656,6 +681,8 @@ def ingest_with_dqc(
             },
             run_id=run_id,
         )
+    if run_type in ("daily", "backfill"):
+        report.purge_debug_runs(data_root, data_date=data_date, table=table)
     report.append_detail(detail_rows, data_root=data_root)
     report.append_summary(summary_row, data_root=data_root)
     logger.info(

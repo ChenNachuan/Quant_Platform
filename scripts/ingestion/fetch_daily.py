@@ -85,6 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"数据根目录路径（默认 {DATA_ROOT}）",
     )
     parser.add_argument(
+        "--run-type",
+        choices=("daily", "backfill", "debug"),
+        default="daily",
+        help="DQC 运行类型标记（默认 daily）",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -124,6 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             skip_dqc=args.skip_dqc,
             data_root=data_root,
             fail_fast=args.fail_fast,
+            run_type=args.run_type,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"接入执行中断: {type(exc).__name__}: {exc}", file=sys.stderr)
