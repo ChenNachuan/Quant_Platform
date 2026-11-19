@@ -16,6 +16,7 @@ T1 schema is exercised on the write path before the read path under test.
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -36,12 +37,15 @@ from data.data_api import (
     DataAPI,
     TableFamily,
     _resolve_table,
+    _resolve_roots,
     clear_adj_cache,
     clear_api_cache,
     get_api,
     load_bars,
     load_bars_chunked,
     load_bars_result,
+    load_factor,
+    resolve_latest_parquet_glob,
     to_alphalens_factor,
     to_alphalens_prices,
 )
@@ -1090,3 +1094,429 @@ class TestBarsMetaAndResult:
             data_root=root,
         )
         assert multi.meta.source == "akshare:backfill,straightflush"
+
+
+# ---------------------------------------------------------------------------
+# Multi-schema catalog, migration, read_only, factor discovery & load_factor
+# ---------------------------------------------------------------------------
+def _write_factor_parquet(
+    path: Path,
+    rows: list[dict],
+    *,
+    frequency: str = "daily",
+    output_columns: list[str] | None = None,
+    write_meta: bool = True,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(rows)
+    if frequency == "daily":
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+    else:
+        df["date"] = pd.to_datetime(df["date"])
+    df.to_parquet(path, index=False)
+    if write_meta:
+        value_cols = output_columns or [
+            c for c in df.columns if c not in ("date", "ticker")
+        ]
+        meta = {
+            "factor_name": path.parent.parent.name,
+            "version": path.parent.name.lstrip("v"),
+            "frequency": frequency,
+            "output_columns": value_cols,
+        }
+        (path.parent / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+class TestResolveRootsAndSingleton:
+    def test_resolve_roots_variants(self, tmp_path):
+        platform = tmp_path / "lake"
+        asset = platform / "asset"
+        asset.mkdir(parents=True)
+
+        with use_data_root(platform):
+            assert _resolve_roots(None) == (platform.resolve(), asset.resolve())
+            assert _resolve_roots(platform) == (platform.resolve(), asset.resolve())
+            assert _resolve_roots(asset) == (platform.resolve(), asset.resolve())
+
+            # get_api normalizes None / platform_root / asset_root to a single cached instance
+            api_none = get_api(None)
+            api_platform = get_api(platform)
+            api_asset = get_api(asset)
+            assert api_none is api_platform is api_asset
+
+    def test_resolve_roots_legacy_fallback_without_asset_subdir(self, tmp_path):
+        custom = tmp_path / "custom_bars_dir"
+        custom.mkdir()
+        platform_root, asset_root = _resolve_roots(custom)
+        assert asset_root == custom.resolve()
+        assert platform_root == tmp_path.resolve()
+
+
+class TestResolveLatestParquetGlob:
+    def test_numeric_and_dotted_version_ordering(self, tmp_path):
+        fdir = tmp_path / "factors" / "daily" / "mom"
+        for ver in ("v2", "v9", "v10"):
+            _write_factor_parquet(
+                fdir / ver / "2024.parquet",
+                [{"date": "2024-01-02", "ticker": "600519.SH", "mom": 1.0}],
+                write_meta=False,
+            )
+        glob_str = resolve_latest_parquet_glob(fdir)
+        assert glob_str is not None
+        assert Path(glob_str).parts[-3] == "v10"
+
+        dotted = tmp_path / "factors" / "daily" / "rev"
+        for ver in ("v1.0", "v1.2", "v1.10"):
+            _write_factor_parquet(
+                dotted / ver / "2024.parquet",
+                [{"date": "2024-01-02", "ticker": "600519.SH", "rev": 1.0}],
+                write_meta=False,
+            )
+        glob_dotted = resolve_latest_parquet_glob(dotted)
+        assert glob_dotted is not None
+        assert Path(glob_dotted).parts[-3] == "v1.10"
+
+    def test_skips_empty_newer_version_and_handles_unversioned_or_empty(self, tmp_path):
+        fdir = tmp_path / "factors" / "daily" / "ofi"
+        _write_factor_parquet(
+            fdir / "v1" / "2024.parquet",
+            [{"date": "2024-01-02", "ticker": "600519.SH", "ofi": 0.5}],
+            write_meta=False,
+        )
+        (fdir / "v2").mkdir(parents=True)  # newer version exists but has no parquet yet
+        glob_str = resolve_latest_parquet_glob(fdir)
+        assert glob_str is not None
+        assert Path(glob_str).parts[-3] == "v1"
+
+        unver = tmp_path / "factors" / "daily" / "unver"
+        _write_factor_parquet(
+            unver / "2024.parquet",
+            [{"date": "2024-01-02", "ticker": "600519.SH", "unver": 0.1}],
+            write_meta=False,
+        )
+        assert resolve_latest_parquet_glob(unver) == str(unver / "**" / "*.parquet")
+
+        empty = tmp_path / "factors" / "daily" / "empty"
+        empty.mkdir(parents=True)
+        assert resolve_latest_parquet_glob(empty) is None
+
+
+class TestMultiSchemaCatalogAndCrossJoin:
+    @pytest.fixture
+    def full_platform(self, tmp_path: Path) -> Path:
+        root = tmp_path / "platform"
+        asset = root / "asset"
+        (asset / "cn_stock_bars_daily").mkdir(parents=True)
+        d1, d2 = date(2024, 1, 2), date(2024, 1, 3)
+        write_parquet_atomic(
+            pd.DataFrame(
+                [
+                    _bars_daily_row("600519.SH", d1, close=100.0, adjfactor=1.0),
+                    _bars_daily_row("000001.SZ", d1, close=20.0, adjfactor=1.0),
+                ]
+            ),
+            asset / "cn_stock_bars_daily" / f"{d1.isoformat()}.parquet",
+            table="cn_stock_bars_daily",
+        )
+        write_parquet_atomic(
+            pd.DataFrame(
+                [_bars_daily_row("600519.SH", d2, close=105.0, adjfactor=1.0)]
+            ),
+            asset / "cn_stock_bars_daily" / f"{d2.isoformat()}.parquet",
+            table="cn_stock_bars_daily",
+        )
+
+        # Hierarchical factors: daily multi-version (v1 & v2) + minute
+        _write_factor_parquet(
+            root / "factors" / "daily" / "cn_stock_ofi" / "v1" / "2024.parquet",
+            [{"date": "2024-01-02", "ticker": "600519.SH", "ofi": 1.0}],
+            frequency="daily",
+        )
+        _write_factor_parquet(
+            root / "factors" / "daily" / "cn_stock_ofi" / "v2" / "2024.parquet",
+            [
+                {"date": "2024-01-02", "ticker": "600519.SH", "ofi": 2.5},
+                {"date": "2024-01-03", "ticker": "600519.SH", "ofi": 3.5},
+            ],
+            frequency="daily",
+        )
+        _write_factor_parquet(
+            root
+            / "factors"
+            / "minute"
+            / "cn_stock_micro_imb"
+            / "v1"
+            / "2024-01.parquet",
+            [
+                {
+                    "date": "2024-01-02 09:31:00",
+                    "ticker": "600519.SH",
+                    "micro_imb": 0.4,
+                },
+                {
+                    "date": "2024-01-02 14:55:00",
+                    "ticker": "600519.SH",
+                    "micro_imb": -0.2,
+                },
+            ],
+            frequency="minute",
+            output_columns=["micro_imb"],
+        )
+
+        # Legacy flat factor + conflict priority test (flat cn_stock_ofi must be skipped)
+        _write_factor_parquet(
+            root / "factors" / "cn_stock_ofi" / "v1" / "2024.parquet",
+            [{"date": "2024-01-02", "ticker": "600519.SH", "ofi": -999.0}],
+            frequency="daily",
+        )
+        _write_factor_parquet(
+            root / "factors" / "legacy_rev" / "v1.0" / "2024.parquet",
+            [{"date": "2024-01-02", "ticker": "600519.SH", "legacy_rev": 0.8}],
+            frequency="daily",
+        )
+
+        # DQC: top-level parquet + subdir + whitelisted Hive dir + non-whitelisted dir
+        dqc = root / "dqc"
+        dqc.mkdir(parents=True)
+        pd.DataFrame(
+            [{"data_date": "2024-01-02", "batch_status": "accepted"}]
+        ).to_parquet(dqc / "_dqc_batch_summary.parquet", index=False)
+        (dqc / "batch_summary").mkdir()
+        pd.DataFrame([{"data_date": "2024-01-02", "rows": 2}]).to_parquet(
+            dqc / "batch_summary" / "2024-01.parquet", index=False
+        )
+        hive_dir = dqc / "_dqc_results" / "month=2026-11"
+        hive_dir.mkdir(parents=True)
+        pd.DataFrame([{"rule_id": "C01", "failing_rows": 0}]).to_parquet(
+            hive_dir / "data.parquet", index=False
+        )
+        non_hive_dir = dqc / "custom_sub" / "month=2026-11"
+        non_hive_dir.mkdir(parents=True)
+        pd.DataFrame([{"rule_id": "C02", "month": "inside_col"}]).to_parquet(
+            non_hive_dir / "data.parquet", index=False
+        )
+
+        # Quarantine: parquet + .rejection.json sidecar
+        qdir = root / "quarantine" / "cn_stock_bars_daily"
+        qdir.mkdir(parents=True)
+        pd.DataFrame([_bars_daily_row("600519.SH", d1, close=1.0)]).to_parquet(
+            qdir / "2024-01-02.parquet", index=False
+        )
+        (qdir / "2024-01-02.rejection.json").write_text(
+            '{"reason": "test"}', encoding="utf-8"
+        )
+
+        return root
+
+    def test_auto_discovery_schemas_hive_whitelist_and_cross_join(self, full_platform):
+        with DataAPI(full_platform) as api:
+            tables = api.query(
+                "SELECT table_schema, table_name FROM information_schema.tables "
+                "WHERE table_catalog = current_database() AND table_type = 'VIEW' "
+                "ORDER BY 1, 2"
+            )
+            registered = set(zip(tables["table_schema"], tables["table_name"]))
+            assert ("asset", "cn_stock_bars_daily") in registered
+            assert ("asset", "bars_daily") in registered
+            assert ("factor_daily", "cn_stock_ofi") in registered
+            assert ("factor_daily", "legacy_rev") in registered
+            assert ("factor_minute", "cn_stock_micro_imb") in registered
+            assert ("dqc", "_dqc_batch_summary") in registered
+            assert ("dqc", "batch_summary") in registered
+            assert ("dqc", "_dqc_results") in registered
+            assert ("dqc", "custom_sub") in registered
+            assert ("quarantine", "cn_stock_bars_daily") in registered
+
+            # Layered layout takes priority over legacy flat layout on collision, and picks v2
+            joined = api.query(
+                "SELECT f.date, f.ticker, f.ofi, a.close "
+                "FROM factor_daily.cn_stock_ofi f "
+                "JOIN asset.cn_stock_bars_daily a "
+                "  ON f.ticker = a.ticker AND f.date = a.trade_date "
+                "ORDER BY f.date"
+            )
+            assert joined["ofi"].tolist() == [2.5, 3.5]
+            assert joined["close"].tolist() == [100.0, 105.0]
+
+            # Unprefixed backward compatibility via search_path = 'asset,main'
+            unprefixed = api.query("SELECT COUNT(*) AS n FROM bars_daily")
+            assert unprefixed["n"].iloc[0] == 3
+
+            # Hive whitelist: _dqc_results parses month=..., custom_sub keeps internal month col
+            res_df = api.query("SELECT rule_id, month FROM dqc._dqc_results")
+            assert res_df["month"].tolist() == ["2026-11"]
+            custom_df = api.query("SELECT rule_id, month FROM dqc.custom_sub")
+            assert custom_df["month"].tolist() == ["inside_col"]
+
+            # Quarantine ignores .rejection.json
+            q_df = api.query("SELECT ticker, close FROM quarantine.cn_stock_bars_daily")
+            assert q_df["close"].tolist() == [1.0]
+
+    def test_live_parquet_append_and_incremental_register_views(self, full_platform):
+        api = DataAPI(full_platform)
+        api.register_views()
+        assert (
+            api.query("SELECT COUNT(*) AS n FROM factor_daily.cn_stock_ofi")["n"].iloc[
+                0
+            ]
+            == 2
+        )
+
+        # Append a new year parquet inside already-registered v2 dir -> visible immediately
+        _write_factor_parquet(
+            full_platform
+            / "factors"
+            / "daily"
+            / "cn_stock_ofi"
+            / "v2"
+            / "2025.parquet",
+            [{"date": "2025-01-02", "ticker": "600519.SH", "ofi": 4.5}],
+            frequency="daily",
+            write_meta=False,
+        )
+        assert (
+            api.query("SELECT COUNT(*) AS n FROM factor_daily.cn_stock_ofi")["n"].iloc[
+                0
+            ]
+            == 3
+        )
+
+        # Create brand-new factor directory -> needs register_views() refresh
+        _write_factor_parquet(
+            full_platform / "factors" / "daily" / "new_alpha" / "v1" / "2024.parquet",
+            [{"date": "2024-01-02", "ticker": "600519.SH", "new_alpha": 9.9}],
+            frequency="daily",
+        )
+        api.register_views()
+        assert (
+            api.query("SELECT new_alpha FROM factor_daily.new_alpha")["new_alpha"].iloc[
+                0
+            ]
+            == 9.9
+        )
+        api.close()
+
+    def test_read_only_mode_concurrency_and_guard(self, full_platform):
+        # Initialize persistent catalog first
+        with DataAPI(full_platform) as rw:
+            assert rw.catalog_path.is_file()
+
+        with DataAPI(full_platform, read_only=True) as ro:
+            assert ro.query("SELECT COUNT(*) AS n FROM bars_daily")["n"].iloc[0] == 3
+            assert (
+                ro.query("SELECT COUNT(*) AS n FROM factor_daily.cn_stock_ofi")[
+                    "n"
+                ].iloc[0]
+                == 2
+            )
+            assert (
+                ro.query("SELECT COUNT(*) AS n FROM dqc._dqc_results")["n"].iloc[0] == 1
+            )
+            assert (
+                ro.query("SELECT COUNT(*) AS n FROM quarantine.cn_stock_bars_daily")[
+                    "n"
+                ].iloc[0]
+                == 1
+            )
+
+            # load_bars & load_factor succeed with read_only API without triggering DDL
+            bars_df = load_bars(start="2024-01-02", end="2024-01-03", api=ro)
+            assert len(bars_df) == 3
+            fac_df = load_factor(
+                "cn_stock_ofi", start="2024-01-02", end="2024-01-03", api=ro
+            )
+            assert fac_df["ofi"].tolist() == [2.5, 3.5]
+
+            # reconnect keeps search_path and skips DDL
+            ro.reconnect()
+            assert ro.query("SELECT COUNT(*) AS n FROM bars_daily")["n"].iloc[0] == 3
+
+            # Explicit write/DDL calls raise RuntimeError
+            with pytest.raises(RuntimeError, match="read-only"):
+                ro.register_views()
+            with pytest.raises(RuntimeError, match="read-only"):
+                ro.migrate_catalog()
+
+    def test_migrate_legacy_flat_catalog(self, full_platform):
+        import duckdb as duckdb_mod
+
+        catalog = full_platform / "catalog.duckdb"
+        legacy = duckdb_mod.connect(str(catalog))
+        daily_glob = str(full_platform / "asset" / "cn_stock_bars_daily" / "*.parquet")
+        legacy.execute(
+            f"CREATE OR REPLACE VIEW cn_stock_bars_daily AS SELECT * FROM read_parquet('{daily_glob}')"
+        )
+        legacy.execute(
+            "CREATE OR REPLACE VIEW bars_daily AS SELECT * FROM cn_stock_bars_daily"
+        )
+        legacy.close()
+
+        with DataAPI(full_platform) as api:
+            main_views = api.query(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_catalog = current_database() AND table_schema = 'main' AND table_type = 'VIEW'"
+            )
+            assert main_views.empty
+            assert api.query("SELECT COUNT(*) AS n FROM bars_daily")["n"].iloc[0] == 3
+            assert (
+                api.query("SELECT COUNT(*) AS n FROM asset.bars_daily")["n"].iloc[0]
+                == 3
+            )
+            # Migration is idempotent
+            assert api.migrate_catalog() is False
+
+    def test_load_factor_daily_minute_and_columns(self, full_platform):
+        _write_factor_parquet(
+            full_platform / "factors" / "daily" / "multi_col" / "v1" / "2024.parquet",
+            [
+                {"date": "2024-01-02", "ticker": "600519.SH", "a": 1.0, "b": 2.0},
+                {"date": "2024-01-02", "ticker": "000001.SZ", "a": 3.0, "b": 4.0},
+            ],
+            frequency="daily",
+            output_columns=["a", "b"],
+        )
+
+        df_daily = load_factor(
+            "cn_stock_ofi",
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="daily",
+            symbols="600519.SH",
+            data_root=full_platform,
+        )
+        assert df_daily["ofi"].tolist() == [2.5]
+
+        # Minute frequency with date-only end expands to 23:59:59.999999
+        df_min = load_factor(
+            "cn_stock_micro_imb",
+            start="2024-01-02",
+            end="2024-01-02",
+            freq="minute",
+            data_root=full_platform,
+        )
+        assert df_min["micro_imb"].tolist() == [0.4, -0.2]
+
+        # Column projection on multi-column factor
+        df_sub = load_factor(
+            "multi_col",
+            start="2024-01-02",
+            end="2024-01-02",
+            columns=["b"],
+            data_root=full_platform,
+        )
+        assert list(df_sub.columns) == ["date", "ticker", "b"]
+        assert df_sub["b"].tolist() == [4.0, 2.0]  # sorted by (date, ticker)
+
+        # DataAPI.load_factor delegation
+        with DataAPI(full_platform) as api:
+            via_method = api.load_factor(
+                "multi_col", start="2024-01-02", end="2024-01-02"
+            )
+            assert list(via_method.columns) == ["date", "ticker", "a", "b"]
+
+        with pytest.raises(NotImplementedError):
+            load_factor("cn_stock_ofi", freq="tick", data_root=full_platform)
+        with pytest.raises(ValueError, match="unsupported factor freq"):
+            load_factor("cn_stock_ofi", freq="weekly", data_root=full_platform)
+        with pytest.raises(ValueError, match="invalid requested columns"):
+            load_factor("multi_col", columns=["date"], data_root=full_platform)
