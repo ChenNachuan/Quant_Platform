@@ -138,9 +138,10 @@ cn_etf_basic:
   priority: [straightflush, amazingdata]
 
 cn_etf_bars_daily:
-  priority: [straightflush, qdc, amazingdata]
+  priority: [qdc, amazingdata]  # SF 扶摇基金接口仅提供前复权口径且不支持 adjust=none；主源切换为 QDC（不复权）+ AmazingData 交叉校验
   field_override:
-    adjfactor: qdc          # QDC cn_etf_adj 覆盖复权与折算（Tushare 无 fund_daily 权限）
+    volume: amazingdata   # QDC tdx_mootdx 按整百股截断，成交量以 AD 为准（2012 年无 AD raw 时自动保留 QDC）
+    amount: amazingdata   # QDC 早年存在 float32/整数元舍入，成交额以 AD 为准（2012 年无 AD raw 时自动保留 QDC）
 
 cn_etf_bars_minute:
   priority: [qdc, amazingdata]
@@ -198,6 +199,11 @@ cross_check:
     cn_stock_index_bars_daily: [".TI"]
   # 显式口径豁免：已知跨源统计口径差异字段不计入不一致
   exemptions:
+    cn_etf_bars_daily:
+      "2022-08-22..2022-08-31":
+        "*": [open]           # 仅历史段跳过 open 比对（AD 低成交 ETF open=0.0 缺陷，asset 保留 QDC open）
+      "2022-11-09":
+        "*": [open]           # 仅该日跳过 open 比对（AD 510370.SH open=0.0 缺陷，asset 保留 QDC open）
     cn_stock_index_bars_daily:
       399001.SZ: [volume, amount]  # 深证成指：SF/QDC 全市场口径 vs AD 成份股口径
       399002.SZ: [volume, amount]  # 深成指R：全市场口径 vs 成份股口径

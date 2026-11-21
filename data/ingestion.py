@@ -580,12 +580,30 @@ def load_tolerance_overrides(
     }
 
 
+def _date_matches_spec(target_date: str, spec: str) -> bool:
+    """判断 ``YYYY-MM-DD`` 日期字符串是否命中单日或 ``start..end`` 闭区间规则。"""
+    s = spec.strip()
+    if ".." in s:
+        start_s, end_s = s.split("..", 1)
+        start_s, end_s = start_s.strip(), end_s.strip()
+        if start_s and target_date < start_s:
+            return False
+        if end_s and target_date > end_s:
+            return False
+        return bool(start_s or end_s)
+    return target_date == s
+
+
 def load_exemptions(
     asset_type: str,
     *,
+    trade_date: str | date | None = None,
     path: str | os.PathLike[str] | None = None,
 ) -> dict[str, set[str]]:
-    """读取 ``cross_check.exemptions`` 中指定表的 ``{ticker: set(fields)}`` 口径豁免映射。"""
+    """读取 ``cross_check.exemptions`` 中指定表的 ``{ticker: set(fields)}`` 口径豁免映射。
+
+    同时支持按 ``"YYYY-MM-DD"`` 或 ``"YYYY-MM-DD..YYYY-MM-DD"`` 嵌套定义仅针对特定历史日期段的豁免。
+    """
     section = _cross_check_section(path)
     all_exemptions = section.get("exemptions") or {}
     if not isinstance(all_exemptions, dict):
@@ -596,10 +614,21 @@ def load_exemptions(
     table_exemptions = all_exemptions.get(key) or {}
     if not isinstance(table_exemptions, dict):
         return {}
-    return {
-        str(ticker): {str(f) for f in (fields or ())}
-        for ticker, fields in table_exemptions.items()
-    }
+    date_str = _as_date_str(trade_date)[:10] if trade_date is not None else ""
+    result: dict[str, set[str]] = {}
+
+    def _merge(ticker: str, fields: Any) -> None:
+        t = str(ticker)
+        result.setdefault(t, set()).update(str(f) for f in (fields or ()))
+
+    for entry_key, entry_val in table_exemptions.items():
+        if isinstance(entry_val, dict):
+            if date_str and _date_matches_spec(date_str, str(entry_key)):
+                for ticker, fields in entry_val.items():
+                    _merge(str(ticker), fields)
+        else:
+            _merge(str(entry_key), entry_val)
+    return result
 
 
 def _load_skip_rules(
@@ -888,7 +917,10 @@ def cross_source_check(
     )
     both = merged[merged["_merge"] == "both"]
     matched_rows = int(len(both))
-    exemptions = load_exemptions(canonical)
+    resolved_trade_date = _as_date_str(
+        trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
+    )
+    exemptions = load_exemptions(canonical, trade_date=resolved_trade_date or None)
     base_tols = dict(tolerances) if tolerances is not None else load_tolerances()
     table_overrides = load_tolerance_overrides(canonical)
 
@@ -983,9 +1015,7 @@ def cross_source_check(
 
     return CrossCheckResult(
         table=table,
-        trade_date=_as_date_str(
-            trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
-        ),
+        trade_date=resolved_trade_date,
         primary_source=_primary_source_or(df_a, table),
         secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
         total_rows=int(len(merged)),
@@ -1043,7 +1073,10 @@ def cross_source_check_aggregate(
     both = merged[merged["_merge"] == "both"]
     matched_rows = int(len(both))
 
-    exemptions = load_exemptions(canonical)
+    resolved_trade_date = _as_date_str(
+        trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
+    )
+    exemptions = load_exemptions(canonical, trade_date=resolved_trade_date or None)
     base_tols = dict(tolerances) if tolerances is not None else load_tolerances()
     table_overrides = (
         load_tolerance_overrides(canonical) if "ticker" in both.columns else {}
@@ -1098,9 +1131,7 @@ def cross_source_check_aggregate(
 
     return CrossCheckResult(
         table=asset_type,
-        trade_date=_as_date_str(
-            trade_date if trade_date is not None else _frame_trade_date(df_a, df_b)
-        ),
+        trade_date=resolved_trade_date,
         primary_source=_primary_source_or(df_a, asset_type),
         secondary_source=secondary_source or str(df_b.attrs.get("source", "secondary")),
         total_rows=int(len(merged)),
@@ -1600,9 +1631,20 @@ def _apply_field_overrides(
     out = df.copy()
     norm_dataset = _resolve_normalizer_dataset(canonical)
     for ov_src, fields in by_source.items():
-        ov_raw, _ = _obtain_raw(
-            ov_src, canonical, trade_date, data_root=data_root, from_raw=from_raw
-        )
+        try:
+            ov_raw, _ = _obtain_raw(
+                ov_src, canonical, trade_date, data_root=data_root, from_raw=from_raw
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "field_override source %r raw missing for %s %s; keeping primary %r fields %s",
+                ov_src,
+                canonical,
+                trade_date,
+                primary_src,
+                fields,
+            )
+            continue
         ov_norm = get_normalizer(ov_src)(norm_dataset, ov_raw)
         join_keys = [
             c
@@ -1617,7 +1659,11 @@ def _apply_field_overrides(
         for field in valid_fields:
             ov_col = f"{field}_ov"
             if ov_col in merged.columns:
-                merged[field] = merged[ov_col].combine_first(merged[field])
+                combined = merged[ov_col].combine_first(merged[field])
+                if str(out[field].dtype) == "Int64":
+                    merged[field] = combined.astype("Int64")
+                else:
+                    merged[field] = combined
                 merged = merged.drop(columns=[ov_col])
         out = merged
     return out
@@ -1757,6 +1803,15 @@ def run_cross_check_for_date(
                 effective_primary,
             )
             primary_df = fallback_df
+        if effective_primary == primary_src:
+            primary_df = _apply_field_overrides(
+                primary_df,
+                effective_primary,
+                canonical,
+                trade_date,
+                data_root=data_root,
+                from_raw=True,
+            )
     primary_df = primary_df.copy()
     primary_df.attrs["source"] = effective_primary
 

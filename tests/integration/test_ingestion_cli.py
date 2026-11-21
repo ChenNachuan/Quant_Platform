@@ -817,39 +817,40 @@ class TestAmazingPullAndAdapters:
     ):
         date_ms = 1794528000000  # 2026-11-13 Asia/Shanghai
         n = 10
-        sf_sparse = pd.DataFrame(
-            {
-                "thscode": [f"5100{i:02d}.SH" for i in range(n)],
-                "date_ms": [date_ms] * n,
-                "open_price": [float("nan")] + [2.5] * (n - 1),
-                "high_price": [float("nan")] + [2.6] * (n - 1),
-                "low_price": [float("nan")] + [2.4] * (n - 1),
-                "close_price": [2.44] + [2.55] * (n - 1),
-                "volume": [0] + [100000] * (n - 1),
-                "turnover": [0] + [255000] * (n - 1),  # 整型成交额同时验证转 float64
-            }
-        )
-        qdc_adj = pd.DataFrame(
+        qdc_sparse = pd.DataFrame(
             {
                 "symbol": [f"5100{i:02d}.XSHG" for i in range(n)],
                 "ts": [date_ms] * n,
+                "open": [float("nan")] + [2.5] * (n - 1),
+                "high": [float("nan")] + [2.6] * (n - 1),
+                "low": [float("nan")] + [2.4] * (n - 1),
+                "close": [2.44] + [2.55] * (n - 1),
+                "volume": [0] + [100000] * (n - 1),
+                "amount": [0] + [255000] * (n - 1),  # 整型成交额同时验证转 float64
+            }
+        )
+        ad_backup = pd.DataFrame(
+            {
+                "code": [f"5100{i:02d}.SH" for i in range(n)],
+                "kline_time": ["2026-11-13"] * n,
                 "open": [2.44] + [2.5] * (n - 1),
                 "high": [2.44] + [2.6] * (n - 1),
                 "low": [2.44] + [2.4] * (n - 1),
                 "close": [2.44] + [2.55] * (n - 1),
                 "volume": [0] + [100000] * (n - 1),
                 "amount": [0.0] + [255000.0] * (n - 1),
-                "adjfactor": [1.0] * n,
             }
         )
         save_raw(
-            sf_sparse,
-            "straightflush",
+            qdc_sparse,
+            "qdc",
             "cn_etf_bars_daily",
             date(2026, 11, 13),
             tmp_path,
         )
-        save_raw(qdc_adj, "qdc", "cn_etf_bars_daily", date(2026, 11, 13), tmp_path)
+        save_raw(
+            ad_backup, "amazingdata", "cn_etf_bars_daily", date(2026, 11, 13), tmp_path
+        )
 
         outcome = ingest_table(
             "cn_etf_bars_daily",
@@ -859,18 +860,18 @@ class TestAmazingPullAndAdapters:
             data_root=tmp_path,
         )
         assert outcome.status == "success"
-        assert outcome.source == "straightflush"
+        assert outcome.source == "qdc"
         assert outcome.fallback_from is None
         assert outcome.row_count == 9
         meta = pq.read_schema(outcome.asset_path).metadata
-        assert meta[b"source_tag"] == b"straightflush"
+        assert meta[b"source_tag"] == b"qdc"
 
-        # 超过 20%（3/10 = 30%）时应拒收并回退至备源 qdc:backfill
-        sf_corrupt = sf_sparse.copy()
-        sf_corrupt.loc[:2, "open_price"] = float("nan")
+        # 超过 20%（3/10 = 30%）时应拒收并回退至备源 amazingdata:backfill
+        qdc_corrupt = qdc_sparse.copy()
+        qdc_corrupt.loc[:2, "open"] = float("nan")
         save_raw(
-            sf_corrupt,
-            "straightflush",
+            qdc_corrupt,
+            "qdc",
             "cn_etf_bars_daily",
             date(2026, 11, 13),
             tmp_path,
@@ -884,9 +885,71 @@ class TestAmazingPullAndAdapters:
             data_root=tmp_path,
         )
         assert fb.status == "success"
-        assert fb.source == "qdc"
-        assert fb.fallback_from == "straightflush"
-        assert pq.read_schema(fb.asset_path).metadata[b"source_tag"] == b"qdc:backfill"
+        assert fb.source == "amazingdata"
+        assert fb.fallback_from == "qdc"
+        assert (
+            pq.read_schema(fb.asset_path).metadata[b"source_tag"]
+            == b"amazingdata:backfill"
+        )
+
+    def test_etf_field_overrides_ad_volume_amount_qdc_close_and_skips_open(
+        self, tmp_path: Path
+    ):
+        trade_day = date(2022, 8, 22)
+        date_ms = 1661097600000  # 2022-08-22 00:00:00 Asia/Shanghai
+        qdc_raw = pd.DataFrame(
+            {
+                "symbol": ["511830.XSHG", "510300.XSHG"],
+                "ts": [date_ms, date_ms],
+                "open": [99.995, 4.000],
+                "high": [100.000, 4.050],
+                "low": [99.990, 3.980],
+                "close": [99.995, 4.020],
+                "volume": [0, 10000],  # QDC 整百截断
+                "amount": [1000.0, 40200.0],  # QDC 整数元近似
+            }
+        )
+        ad_raw = pd.DataFrame(
+            {
+                "code": ["511830.SH", "510300.SH"],
+                "kline_time": ["2022-08-22", "2022-08-22"],
+                "open": [0.0, 4.000],  # AD open=0 缺陷，asset 保留 QDC 且跨源跳过
+                "high": [100.000, 4.050],
+                "low": [99.990, 3.980],
+                "close": [99.995, 4.020],
+                "volume": [10, 10050],  # AD 精确成交量
+                "amount": [999.95, 40401.25],  # AD 精确成交额
+            }
+        )
+        save_raw(qdc_raw, "qdc", "cn_etf_bars_daily", trade_day, tmp_path)
+        save_raw(ad_raw, "amazingdata", "cn_etf_bars_daily", trade_day, tmp_path)
+
+        outcome = ingest_table(
+            "cn_etf_bars_daily",
+            trade_day,
+            from_raw=True,
+            cross_check=True,
+            data_root=tmp_path,
+        )
+        assert outcome.status == "success"
+        assert outcome.source == "qdc"
+        assert outcome.cross_check_levels == {"amazingdata": "silent"}
+
+        landed = (
+            pd.read_parquet(outcome.asset_path)
+            .sort_values("ticker")
+            .reset_index(drop=True)
+        )
+        assert list(landed["ticker"]) == ["510300.SH", "511830.SH"]
+        # open/close 保持 QDC（511830.SH 未被 AD 的 0.0 污染）
+        assert landed.loc[1, "open"] == pytest.approx(99.995)
+        assert landed.loc[1, "close"] == pytest.approx(99.995)
+        # volume/amount 使用 AD 精确值
+        assert list(landed["volume"]) == [10050, 10]
+        assert list(landed["amount"]) == [
+            pytest.approx(40401.25),
+            pytest.approx(999.95),
+        ]
 
     def test_amazing_pull_supports_index_table(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

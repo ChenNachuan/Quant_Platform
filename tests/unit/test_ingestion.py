@@ -295,7 +295,7 @@ class TestOneSidedNaNSemantics:
             0,
             0.0,
         ]
-        res = cross_source_check(primary, secondary, "cn_etf_bars_daily")
+        res = cross_source_check(primary, secondary, "cn_stock_bars_daily")
         assert res.mismatched_fields == {}
 
         # 反例1：有成交（volume > 0）时单边缺少 open 仍报不一致
@@ -303,19 +303,19 @@ class TestOneSidedNaNSemantics:
         nz_b = secondary.copy()
         nz_a.at[0, "volume"] = 100
         nz_b.at[0, "volume"] = 100
-        res_nz = cross_source_check(nz_a, nz_b, "cn_etf_bars_daily")
+        res_nz = cross_source_check(nz_a, nz_b, "cn_stock_bars_daily")
         assert "open" in res_nz.mismatched_fields
 
         # 反例2：零成交但备源填充的 open != close 仍报不一致
         bad_fill_b = secondary.copy()
         bad_fill_b.at[0, "open"] = c0 + 0.5
-        res_bad_fill = cross_source_check(primary, bad_fill_b, "cn_etf_bars_daily")
+        res_bad_fill = cross_source_check(primary, bad_fill_b, "cn_stock_bars_daily")
         assert "open" in res_bad_fill.mismatched_fields
 
         # 反例3：零成交但双源 close 不一致，OHLC 也不豁免
         bad_close_b = secondary.copy()
         bad_close_b.at[0, "close"] = c0 + 0.5
-        res_bad_close = cross_source_check(primary, bad_close_b, "cn_etf_bars_daily")
+        res_bad_close = cross_source_check(primary, bad_close_b, "cn_stock_bars_daily")
         assert {"open", "high", "low", "close"} <= set(res_bad_close.mismatched_fields)
 
 
@@ -413,7 +413,7 @@ class TestSourcePriorityConfig:
             "amazingdata": 2,
             "tushare": 3,
         }
-        daily_history_primary_overrides = {"cn_stock_fundamental"}
+        daily_history_primary_overrides = {"cn_stock_fundamental", "cn_etf_bars_daily"}
         for table, entry in cfg.items():
             if table == "cross_check":
                 continue
@@ -445,7 +445,10 @@ class TestSourcePriorityConfig:
         ]
         assert get_source_priority("fundamental") == ["qdc", "straightflush"]
         assert get_field_overrides("bars_daily") == {"adjfactor": "qdc"}
-        assert get_field_overrides("cn_etf_bars_daily") == {"adjfactor": "qdc"}
+        assert get_field_overrides("cn_etf_bars_daily") == {
+            "volume": "amazingdata",
+            "amount": "amazingdata",
+        }
         assert get_field_overrides("fundamental") == {
             "total_market_cap": "straightflush",
             "float_market_cap": "straightflush",
@@ -459,7 +462,7 @@ class TestSourcePriorityConfig:
         assert get_primary_source("cn_stock_fundamental_consensus") == "qdc"
         assert get_primary_source("cn_stock_tick") == "qdc"
         assert get_primary_source("cn_etf_tick") == "qdc"
-        assert get_primary_source("cn_etf_bars_daily") == "straightflush"
+        assert get_primary_source("cn_etf_bars_daily") == "qdc"
 
     def test_source_capabilities_yaml_valid(self):
         from pathlib import Path
@@ -1015,3 +1018,100 @@ class TestCrossSourceCheckAggregate:
             "cn_stock_bars_minute", TRADE_DATE, data_root=tmp_path
         )
         assert levels == {"amazingdata": "silent"}
+
+    def test_etf_open_is_exempt_in_cross_check(self):
+        for defect_day in (date(2022, 8, 22), date(2022, 8, 31), date(2022, 11, 9)):
+            qdc_df = pd.DataFrame(
+                {
+                    "ticker": ["511830.SH", "510300.SH"],
+                    "trade_date": [defect_day, defect_day],
+                    "open": [99.995, 4.000],
+                    "high": [100.0, 4.050],
+                    "low": [99.990, 3.980],
+                    "close": [99.995, 4.020],
+                    "volume": pd.Series([10, 1000], dtype="Int64"),
+                    "amount": [1000.0, 4020.0],
+                }
+            )
+            ad_df = qdc_df.copy()
+            ad_df.loc[0, "open"] = 0.0
+            res = cross_source_check(
+                qdc_df,
+                ad_df,
+                "cn_etf_bars_daily",
+                defect_day,
+                secondary_source="amazingdata",
+            )
+            assert res.matched_rows == 2
+            assert res.mismatched_fields == {}
+            assert respond(res) == "silent"
+
+        # 非历史缺陷段（如最新日期）不豁免 open，应正常报出不一致
+        qdc_normal = qdc_df.copy()
+        qdc_normal["trade_date"] = TRADE_DATE
+        ad_normal = qdc_normal.copy()
+        ad_normal.loc[0, "open"] = 0.0
+        res_normal = cross_source_check(
+            qdc_normal,
+            ad_normal,
+            "cn_etf_bars_daily",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert set(res_normal.mismatched_fields) == {"open"}
+
+    def test_apply_field_overrides_preserves_int64_and_skips_missing_raw(
+        self, tmp_path
+    ):
+        from data.ingestion import _apply_field_overrides
+        from data.raw import save_raw
+
+        primary_df = pd.DataFrame(
+            {
+                "ticker": ["511950.SH", "510300.SH"],
+                "trade_date": [TRADE_DATE, TRADE_DATE],
+                "close": [100.0, 4.0],
+                "volume": pd.Series([1200, 5000], dtype="Int64"),
+                "amount": [120000.0, 20000.0],
+            }
+        )
+        # 无备源 raw（如 2012 年无 AD）时保持主源原值而不抛 FileNotFoundError
+        unchanged = _apply_field_overrides(
+            primary_df,
+            "qdc",
+            "cn_etf_bars_daily",
+            date(2012, 1, 4),
+            data_root=tmp_path,
+            from_raw=True,
+        )
+        assert list(unchanged["volume"]) == [1200, 5000]
+        assert str(unchanged["volume"].dtype) == "Int64"
+
+        # 仅覆盖重合标的，未覆盖标的保留主源值且 volume 维持 Int64
+        ad_raw = pd.DataFrame(
+            {
+                "code": ["511950.SH"],
+                "kline_time": [TRADE_DATE.isoformat()],
+                "open": [100.0],
+                "high": [100.1],
+                "low": [99.9],
+                "close": [100.0],
+                "volume": [1263],
+                "amount": [126300.45],
+            }
+        )
+        save_raw(ad_raw, "amazingdata", "cn_etf_bars_daily", TRADE_DATE, tmp_path)
+        merged = _apply_field_overrides(
+            primary_df,
+            "qdc",
+            "cn_etf_bars_daily",
+            TRADE_DATE,
+            data_root=tmp_path,
+            from_raw=True,
+        )
+        assert list(merged["volume"]) == [1263, 5000]
+        assert str(merged["volume"].dtype) == "Int64"
+        assert list(merged["amount"]) == [
+            pytest.approx(126300.45),
+            pytest.approx(20000.0),
+        ]
