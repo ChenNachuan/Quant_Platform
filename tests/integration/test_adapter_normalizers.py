@@ -167,6 +167,23 @@ class TestStraightFlushNormalizer:
         dup_out = normalize_straightflush("index", dup_raw)
         assert dup_out["ticker"].tolist() == ["000510.CSI", "000510.SH"]
 
+    def test_drops_ti_proprietary_indices(self):
+        date_ms = int(datetime(2026, 11, 13, 0, 0, tzinfo=_SHANGHAI).timestamp() * 1000)
+        raw = pd.DataFrame(
+            {
+                "thscode": ["000300.SH", "883979.TI", "885001.TI", "399001.SZ"],
+                "date_ms": [date_ms, date_ms, date_ms, date_ms],
+                "open_price": [4000.0, -0.05, 1200.0, 10900.0],
+                "high_price": [4020.0, -0.01, 1210.0, 11000.0],
+                "low_price": [3990.0, -0.08, 1190.0, 10850.0],
+                "close_price": [4016.0, -0.041, 1205.0, 10968.0],
+                "volume": [17934199800, 0, 1000000, 55925521000],
+                "turnover": [460245657530.0, 0.0, 10000000.0, 885054040000.0],
+            }
+        )
+        out = normalize_straightflush("index", raw)
+        assert out["ticker"].tolist() == ["000300.SH", "399001.SZ"]
+
 
 class TestAmazingdataIndexNormalizer:
     def test_scales_sh_index_volume_lots_to_shares_and_passes_schema(self):

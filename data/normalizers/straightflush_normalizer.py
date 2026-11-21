@@ -2,6 +2,7 @@
 
 映射规则：
 * ``thscode`` -> ``ticker``（裸代码按前缀补全交易所后缀）。
+* 指数过滤：``dataset == "index"`` 时直接抛弃同花顺自编指数（``*.TI``），仅保留交易所/指数公司权威指数。
 * 指数后缀对齐：对 ``000xxx.CSI``（上交所同步发布的中证指数，如 ``000510.CSI``、``000860.CSI``）
   在不与既有 ``.SH`` 代码冲突的前提下统一映射为 ``.SH``，对齐 QDC 与 AmazingData。
 * ``date_ms``（``Asia/Shanghai`` 毫秒时间戳）-> ``trade_date``（``datetime.date``）。
@@ -79,6 +80,8 @@ def normalize(dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
     if "ticker" in df.columns and len(df) > 0:
         df["ticker"] = df["ticker"].astype(str).map(_qualify_prefix_ticker)
         if dataset == "index":
+            # 抛弃同花顺自编 .TI 指数
+            df = df.loc[~df["ticker"].str.endswith(".TI")].copy()
             existing_tickers = set(df["ticker"])
             df["ticker"] = df["ticker"].map(
                 lambda t: (
