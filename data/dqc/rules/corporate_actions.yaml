@@ -1,0 +1,92 @@
+# DQC rules — corporate_actions (cn_stock_corporate_actions)
+
+rules:
+  # ---- Completeness ----
+  - id: C13
+    name: required_non_null
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_required_non_null"
+    params: {}
+    applicability: [reference]
+    threshold: "schema non-nullable columns have zero nulls"
+    threshold_source: fixed
+    boundary: "notnull: any missing required column or null value fails"
+    description: "Required schema columns must not contain nulls"
+
+  # ---- Legality ----
+  - id: L17
+    name: equity_ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^((60|68|50|51|52|53|55|56|58)\\d{4}\\.SH|(00|30|15|16)\\d{4}\\.SZ|(43|83|87|92)\\d{4}\\.BJ)$"
+    applicability: [daily, reference]
+    threshold: "valid equity/ETF/LOF ticker matching exchange prefix"
+    threshold_source: fixed
+    boundary: "full regex match: invalid prefix or exchange mismatch fails"
+    description: "Equity ticker format validation"
+
+  - id: L15
+    name: enum_values_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_enum_values"
+    params: {}
+    applicability: [reference]
+    threshold: "enum columns match schema allowed sets"
+    threshold_source: fixed
+    boundary: "in allowed set: any value outside allowed enum set fails"
+    description: "Enum value validation"
+
+  - id: L16
+    name: date_columns_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_columns_valid"
+    params: {}
+    applicability: [reference]
+    threshold: "non-null date/datetime columns parse cleanly"
+    threshold_source: fixed
+    boundary: "valid date/datetime: any non-null unparseable value fails"
+    description: "Multi-column date format validation"
+
+  - id: L18
+    name: non_negative_nullable
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_non_negative_nullable"
+    params: {}
+    applicability: [daily, reference]
+    threshold: "non-null numeric values satisfy schema positive/non_negative and finite checks"
+    threshold_source: fixed
+    boundary: "ge 0 or gt 0 per schema: negative or inf fails, 0 passes for non_negative"
+    description: "Nullable numeric positivity and non-negativity validation"
+
+  # ---- Consistency ----
+  - id: K13
+    name: unique_key_no_duplicates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_unique_key"
+    params: {}
+    applicability: [reference]
+    threshold: "schema unique key has zero duplicate rows"
+    threshold_source: fixed
+    boundary: "eq 0 duplicates: any duplicated primary key fails"
+    description: "Primary key uniqueness validation"
+
+  # ---- Timeliness ----
+  - id: T11
+    name: no_future_ex_date
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_date_col"
+    params:
+      column: ex_date
+    applicability: [reference]
+    threshold: "ex_date > today triggers soft flag (announced upcoming events)"
+    threshold_source: fixed
+    boundary: "le today: ex_date <= today passes, upcoming ex_date flags soft warning"
+    description: "Upcoming announced ex_date soft flag"

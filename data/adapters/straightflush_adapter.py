@@ -5,10 +5,13 @@
 * HTTP 429 / 5xx 及业务码 ``4001/5001/5002/5003`` 触发可重试异常。
 * A 股日线显式传入 ``adjust="none"``（接口默认前复权），保证拉取未复权原始价。
 * ``/api/*/historical-batch`` 单次最多传 10 个 ``thscode``，时间参数为 ``Asia/Shanghai`` 毫秒时间戳。
+* ``stock_basic`` 通过 ``/api/meta/tickers/list`` 分页拉取 A 股基础档案；
+  ``corporate_actions`` 通过 ``/api/dump/market-dumps/adjustment-factors/download-url`` 拉取全历史除权除息文件。
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from datetime import date, datetime
@@ -41,10 +44,20 @@ _RETRYABLE_BUSINESS_CODES = frozenset({4001, 5001, 5002, 5003})
 _AUTH_BUSINESS_CODES = frozenset({2001, 2003})
 _EMPTY_BUSINESS_CODES = frozenset({3001, 3002})
 
-_SUPPORTED_DATASETS = ["stock", "etf", "index", "futures", "option", "calendar"]
+_SUPPORTED_DATASETS = [
+    "stock",
+    "stock_basic",
+    "corporate_actions",
+    "etf",
+    "index",
+    "futures",
+    "option",
+    "calendar",
+]
 
 _META_DATASET_MAP: dict[str, str] = {
     "stock": "a-share",
+    "stock_basic": "a-share",
     "etf": "fund-etf",
     "index": "a-share-index",
     "futures": "futures",
@@ -92,7 +105,7 @@ def _dedup_preserve_order(codes: list[str]) -> list[str]:
 
 
 class StraightFlushAdapter(SourceAdapter):
-    """通过同花顺扶摇 HTTP API 拉取原始行情数据。"""
+    """通过同花顺扶摇 HTTP API 拉取原始行情、基础档案与公司行动数据。"""
 
     requests_per_second = 5.0
 
@@ -226,6 +239,10 @@ class StraightFlushAdapter(SourceAdapter):
 
         if dataset == "calendar":
             df = self._fetch_calendar(trade_date)
+        elif dataset == "stock_basic":
+            df = self._fetch_stock_basic()
+        elif dataset == "corporate_actions":
+            df = self._fetch_corporate_actions(trade_date)
         else:
             start_ms, end_ms = _shanghai_day_bounds_ms(trade_date)
             thscodes = self._resolve_thscodes(dataset)
@@ -276,6 +293,60 @@ class StraightFlushAdapter(SourceAdapter):
             row_count=len(df),
             watermark=trade_date.strftime("%Y%m%d"),
         )
+
+    def _fetch_stock_basic(self) -> pd.DataFrame:
+        items: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            payload = self._request_json(
+                "/api/meta/tickers/list",
+                params={
+                    "asset_type": "a-share",
+                    "limit": _TICKER_LIST_PAGE_LIMIT,
+                    "offset": offset,
+                },
+            )
+            batch = (payload.get("data") or {}).get("item") or []
+            items.extend(batch)
+            if len(batch) < _TICKER_LIST_PAGE_LIMIT:
+                break
+            offset += _TICKER_LIST_PAGE_LIMIT
+        df = pd.DataFrame(items)
+        if self._symbols and "thscode" in df.columns:
+            df = df[df["thscode"].isin(self._symbols)].reset_index(drop=True)
+        return df
+
+    def _fetch_corporate_actions(self, trade_date: date) -> pd.DataFrame:
+        payload = self._request_json(
+            "/api/dump/market-dumps/adjustment-factors/download-url"
+        )
+        data = payload.get("data") or {}
+        presigned_url = data.get("presigned_url") or data.get("download_url")
+        if not presigned_url:
+            raise ValueError("Fuyao adjustment-factors response missing presigned_url")
+        session = self._ensure_session()
+        resp = session.get(str(presigned_url), timeout=FETCH_TIMEOUT)
+        resp.raise_for_status()
+        df = pd.read_parquet(io.BytesIO(resp.content))
+        if df.empty:
+            return df
+        if "ex_date_ms" in df.columns:
+            ex_dt = (
+                pd.to_datetime(
+                    pd.to_numeric(df["ex_date_ms"], errors="coerce"),
+                    unit="ms",
+                    utc=True,
+                )
+                .dt.tz_convert(_SHANGHAI_TZ)
+                .dt.date
+            )
+            df = df[ex_dt.notna() & (ex_dt <= trade_date)].copy()
+        elif "ex_date" in df.columns:
+            ex_dt = pd.to_datetime(df["ex_date"], errors="coerce").dt.date
+            df = df[ex_dt.notna() & (ex_dt <= trade_date)].copy()
+        if self._symbols and "thscode" in df.columns:
+            df = df[df["thscode"].isin(self._symbols)].copy()
+        return df.reset_index(drop=True)
 
     def _fetch_batch_bars(
         self,

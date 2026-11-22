@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import pandas as pd
+import pyarrow.parquet as pq
 
+from core.config import DATA_ROOT
 from data.dqc.severity import severity_config_for
 from data.quarantine import QUARANTINE_ROOT
 from data.storage_ops import (
@@ -29,7 +31,6 @@ from data.storage_ops import (
     partition_path,
 )
 from data.storage_schema import PARTITION_PATHS, resolve_table_name
-from core.config import DATA_ROOT
 
 __all__ = [
     "DQC_REPORT_ROOT",
@@ -112,6 +113,31 @@ QUARANTINE_COLUMNS = [
 BATCH_STATUSES = ("accepted", "accepted_with_warnings", "rejected")
 RUN_TYPES = ("daily", "backfill", "debug")
 _DATETIME_COLUMNS = ("run_date", "run_time", "data_date")
+
+_STOCK_UNIVERSE_TABLES = frozenset(
+    {
+        "cn_stock_bars_daily",
+        "cn_stock_bars_minute",
+        "cn_stock_fundamental",
+        "cn_stock_daily_status",
+        "cn_stock_industry",
+        "factor",
+        "reference",
+    }
+)
+_CA_DATE_TABLES = frozenset({"cn_stock_bars_daily", "cn_etf_bars_daily"})
+_PREV_STATS_COLS = (
+    "ticker",
+    "trade_date",
+    "close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "pre_close",
+    "total_market_cap",
+)
 
 
 def _now() -> datetime:
@@ -511,11 +537,11 @@ def load_prev_day_stats(
     table: str,
     data_date: date,
 ) -> dict[str, Any]:
-    """从前一个可用日分区 Parquet 提取行数、标的列表及均值统计（严格早于 *data_date*）。"""
+    """从前一个可用日/月分区 Parquet 提取行数、标的列表及均值统计（严格早于 *data_date*）。"""
     root = Path(data_root)
     canonical = resolve_table_name(table)
     template = PARTITION_PATHS.get(canonical)
-    if not template or "{date}" not in template:
+    if not template or ("{date}" not in template and "{month}" not in template):
         return {}
     table_dir = partition_path(canonical, data_date, root).parent
     if not table_dir.exists() and canonical == "cn_stock_bars_daily":
@@ -524,23 +550,73 @@ def load_prev_day_stats(
             table_dir = legacy_dir
     if not table_dir.exists():
         return {}
-    date_str = data_date.strftime("%Y-%m-%d")
-    prior = [
-        f
-        for f in table_dir.glob("*.parquet")
-        if len(f.stem) == 10 and f.stem < date_str
-    ]
-    if not prior:
-        return {}
-    prev_file = max(prior)
-    prev_df = pd.read_parquet(prev_file)
+
+    prev_date_str = ""
+    prev_df = pd.DataFrame()
+    if "{date}" in template:
+        date_str = data_date.strftime("%Y-%m-%d")
+        prior = [
+            f
+            for f in table_dir.glob("*.parquet")
+            if len(f.stem) == 10 and f.stem < date_str
+        ]
+        if not prior:
+            return {}
+        prev_file = max(prior)
+        prev_date_str = prev_file.stem
+        avail = set(pq.read_schema(prev_file).names)
+        cols = [c for c in _PREV_STATS_COLS if c in avail]
+        prev_df = pd.read_parquet(prev_file, columns=cols or None)
+    else:
+        cur_month = data_date.strftime("%Y-%m")
+        month_files = sorted(
+            (
+                f
+                for f in table_dir.glob("*.parquet")
+                if len(f.stem) == 7 and f.stem <= cur_month
+            ),
+            reverse=True,
+        )
+        for mf in month_files:
+            try:
+                avail = set(pq.read_schema(mf).names)
+            except Exception:  # noqa: BLE001
+                continue
+            if "trade_date" not in avail:
+                continue
+            dates_only = pd.read_parquet(mf, columns=["trade_date"])
+            if dates_only.empty:
+                continue
+            td_all = pd.to_datetime(dates_only["trade_date"], errors="coerce").dt.date
+            earlier = td_all[td_all.notna() & (td_all < data_date)]
+            if earlier.empty:
+                continue
+            target_prev_date = earlier.max()
+            cols = [c for c in _PREV_STATS_COLS if c in avail]
+            sub = pd.read_parquet(mf, columns=cols or None)
+            sub_td = pd.to_datetime(sub["trade_date"], errors="coerce").dt.date
+            prev_df = sub.loc[sub_td == target_prev_date].reset_index(drop=True)
+            prev_date_str = target_prev_date.strftime("%Y-%m-%d")
+            break
+        if prev_df.empty or not prev_date_str:
+            return {}
+
     stats: dict[str, Any] = {
-        "prev_date": prev_file.stem,
+        "prev_date": prev_date_str,
         "row_count": int(len(prev_df)),
     }
     if "ticker" in prev_df.columns:
         stats["tickers"] = sorted(set(prev_df["ticker"].dropna().astype(str)))
-    for col in ("close", "open", "high", "low", "volume", "amount"):
+    for col in (
+        "close",
+        "open",
+        "high",
+        "low",
+        "volume",
+        "amount",
+        "pre_close",
+        "total_market_cap",
+    ):
         if col in prev_df.columns:
             series = pd.to_numeric(prev_df[col], errors="coerce").dropna()
             if not series.empty:
@@ -548,12 +624,37 @@ def load_prev_day_stats(
     return stats
 
 
+def _active_tickers_from_basic(path: Path, data_date: date) -> list[str]:
+    if not path.exists():
+        return []
+    basic_df = pd.read_parquet(path)
+    if "ticker" not in basic_df.columns:
+        return []
+    active = basic_df
+    if "list_date" in active.columns:
+        ld = pd.to_datetime(active["list_date"], errors="coerce").dt.date
+        active = active[ld.isna() | (ld <= data_date)]
+    if "delist_date" in active.columns:
+        dd = pd.to_datetime(active["delist_date"], errors="coerce").dt.date
+        if "list_status" in active.columns:
+            still_listed = dd.isna() & (active["list_status"] != "D")
+            active = active[still_listed | (dd >= data_date)]
+        else:
+            active = active[dd.isna() | (dd >= data_date)]
+    elif "list_status" in active.columns:
+        active = active[active["list_status"] != "D"]
+    if active.empty:
+        return []
+    return sorted(set(active["ticker"].dropna().astype(str)))
+
+
 def build_reference_overrides(
     data_root: str | os.PathLike[str], table: str, data_date: date
 ) -> dict:
     """从本地存储装配检查所需的参考数据 ``overrides``；缺失表保持缺省以触发 fail-closed。"""
     root = Path(data_root)
-    overrides: dict[str, Any] = {"today": data_date}
+    canonical = resolve_table_name(table)
+    overrides: dict[str, Any] = {"today": data_date, "table": canonical}
 
     cal = next(
         (
@@ -574,105 +675,120 @@ def build_reference_overrides(
                 pd.to_datetime(cal_df["trade_date"]).dt.strftime("%Y-%m-%d").unique()
             )
 
-    ca = next(
-        (
-            p
-            for p in (
-                root
-                / "asset"
-                / "cn_stock_corporate_actions"
-                / "corporate_actions.parquet",
-                root / "asset" / "reference" / "corporate_actions.parquet",
-            )
-            if p.exists()
-        ),
-        None,
-    )
-    if ca is not None:
-        ca_df = pd.read_parquet(ca)
-        if "ex_date" in ca_df.columns:
-            overrides["ca_dates"] = sorted(
-                pd.to_datetime(ca_df["ex_date"]).dt.strftime("%Y-%m-%d").unique()
-            )
-
-    ind = next(
-        (
-            p
-            for p in (
-                root / "asset" / "cn_stock_industry" / "industry.parquet",
-                root / "asset" / "reference" / "industry.parquet",
-            )
-            if p.exists()
-        ),
-        None,
-    )
-    if ind is not None:
-        ind_df = pd.read_parquet(ind)
-        if "ticker" in ind_df.columns:
-            overrides["universe"] = sorted(set(ind_df["ticker"].astype(str)))
-    if "universe" not in overrides:
-        basic = next(
+    if canonical in _CA_DATE_TABLES:
+        ca = next(
             (
                 p
                 for p in (
-                    root / "asset" / "cn_stock_basic" / "stock_basic.parquet",
-                    root / "asset" / "reference" / "stock_basic.parquet",
+                    root
+                    / "asset"
+                    / "cn_stock_corporate_actions"
+                    / "corporate_actions.parquet",
+                    root / "asset" / "reference" / "corporate_actions.parquet",
                 )
                 if p.exists()
             ),
             None,
         )
-        if basic is not None:
-            basic_df = pd.read_parquet(basic)
-            if "ticker" in basic_df.columns:
-                active = basic_df
-                if "list_date" in active.columns:
-                    ld = pd.to_datetime(active["list_date"], errors="coerce").dt.date
-                    active = active[ld.isna() | (ld <= data_date)]
-                if "delist_date" in active.columns:
-                    dd = pd.to_datetime(active["delist_date"], errors="coerce").dt.date
-                    active = active[dd.isna() | (dd >= data_date)]
-                elif "list_status" in active.columns:
-                    active = active[active["list_status"] != "D"]
-                if not active.empty:
-                    overrides["universe"] = sorted(
-                        set(active["ticker"].dropna().astype(str))
+        if ca is not None:
+            ca_df = pd.read_parquet(ca, columns=["ex_date"])
+            if "ex_date" in ca_df.columns:
+                overrides["ca_dates"] = sorted(
+                    pd.to_datetime(ca_df["ex_date"]).dt.strftime("%Y-%m-%d").unique()
+                )
+
+    if canonical in _STOCK_UNIVERSE_TABLES:
+        ind = next(
+            (
+                p
+                for p in (
+                    root / "asset" / "cn_stock_industry" / "industry.parquet",
+                    root / "asset" / "reference" / "industry.parquet",
+                )
+                if p.exists()
+            ),
+            None,
+        )
+        if ind is not None:
+            ind_df = pd.read_parquet(ind)
+            if "ticker" in ind_df.columns:
+                overrides["universe"] = sorted(set(ind_df["ticker"].astype(str)))
+        if "universe" not in overrides:
+            basic = next(
+                (
+                    p
+                    for p in (
+                        root / "asset" / "cn_stock_basic" / "stock_basic.parquet",
+                        root / "asset" / "reference" / "stock_basic.parquet",
                     )
-
-    bars_dir = next(
-        (
-            d
-            for d in (
-                root / "asset" / "cn_stock_bars_daily",
-                root / "asset" / "bars_daily",
+                    if p.exists()
+                ),
+                None,
             )
-            if d.exists()
-        ),
-        None,
-    )
-    if bars_dir is not None:
-        prior = [
-            f
-            for f in bars_dir.glob("*.parquet")
-            if f.stem <= data_date.strftime("%Y-%m-%d")
-        ]
-        if prior:
-            prev = pd.read_parquet(max(prior))
-            if "ticker" in prev.columns:
-                overrides["daily_tickers"] = sorted(set(prev["ticker"].astype(str)))
+            if basic is not None:
+                tickers = _active_tickers_from_basic(basic, data_date)
+                if tickers:
+                    overrides["universe"] = tickers
 
-    template = PARTITION_PATHS.get(table)
+        bars_dir = next(
+            (
+                d
+                for d in (
+                    root / "asset" / "cn_stock_bars_daily",
+                    root / "asset" / "bars_daily",
+                )
+                if d.exists()
+            ),
+            None,
+        )
+        if bars_dir is not None:
+            prior = [
+                f
+                for f in bars_dir.glob("*.parquet")
+                if f.stem <= data_date.strftime("%Y-%m-%d")
+            ]
+            if prior:
+                prev = pd.read_parquet(max(prior), columns=["ticker"])
+                if "ticker" in prev.columns:
+                    overrides["daily_tickers"] = sorted(set(prev["ticker"].astype(str)))
+    elif canonical in ("cn_etf_bars_daily", "cn_etf_bars_minute"):
+        etf_basic = root / "asset" / "cn_etf_basic" / "etf_basic.parquet"
+        tickers = _active_tickers_from_basic(etf_basic, data_date)
+        if tickers:
+            overrides["universe"] = tickers
+        if canonical == "cn_etf_bars_minute":
+            etf_bars_dir = root / "asset" / "cn_etf_bars_daily"
+            if etf_bars_dir.exists():
+                prior = [
+                    f
+                    for f in etf_bars_dir.glob("*.parquet")
+                    if f.stem <= data_date.strftime("%Y-%m-%d")
+                ]
+                if prior:
+                    prev = pd.read_parquet(max(prior), columns=["ticker"])
+                    if "ticker" in prev.columns:
+                        overrides["daily_tickers"] = sorted(
+                            set(prev["ticker"].astype(str))
+                        )
+    elif canonical == "cn_stock_index_bars_daily":
+        idx_basic = root / "asset" / "cn_stock_index_basic" / "index_basic.parquet"
+        tickers = _active_tickers_from_basic(idx_basic, data_date)
+        if tickers:
+            overrides["universe"] = tickers
+
+    template = PARTITION_PATHS.get(canonical)
     if template and ("{date}" in template or "{month}" in template):
-        target = partition_path(table, data_date, root)
+        target = partition_path(canonical, data_date, root)
         if target.exists():
-            stored = pd.read_parquet(target)
-            if is_monthly_partition(table) and "trade_date" in stored.columns:
-                td = pd.to_datetime(stored["trade_date"], errors="coerce").dt.date
-                stored = stored[td == data_date].reset_index(drop=True)
-            if {"ticker", "adjfactor"} <= set(stored.columns):
+            col_names = set(pq.read_schema(target).names)
+            if {"ticker", "adjfactor"} <= col_names:
+                stored = pd.read_parquet(target)
+                if is_monthly_partition(canonical) and "trade_date" in stored.columns:
+                    td = pd.to_datetime(stored["trade_date"], errors="coerce").dt.date
+                    stored = stored[td == data_date].reset_index(drop=True)
                 overrides["previous_adjfactor"] = stored
 
-    prev_stats = load_prev_day_stats(root, table, data_date)
+    prev_stats = load_prev_day_stats(root, canonical, data_date)
     if prev_stats:
         overrides["prev_row_count"] = prev_stats.get("row_count", 0)
         overrides["prev_tickers"] = prev_stats.get("tickers", [])

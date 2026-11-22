@@ -16,6 +16,8 @@ from core.asset_rules import PREFIX_EXCHANGE
 __all__ = [
     "SOURCE_COLUMN_MAP",
     "UNIFIED_COLUMNS",
+    "_MINUTE_COLUMNS",
+    "_CORPORATE_ACTIONS_COLUMNS",
     "get_normalizer",
     "normalize",
 ]
@@ -38,6 +40,36 @@ UNIFIED_COLUMNS: list[str] = [
     "quality_flag",
 ]
 
+_MINUTE_COLUMNS: list[str] = [
+    "ticker",
+    "trade_date",
+    "datetime",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "quality_flag",
+]
+
+_CORPORATE_ACTIONS_COLUMNS: list[str] = [
+    "ticker",
+    "ex_date",
+    "event_type",
+    "announce_date",
+    "record_date",
+    "detail",
+    "cash_dividend",
+    "stock_dividend",
+    "rights_price",
+    "rights_ratio",
+]
+
+_BAR_DATASETS: frozenset[str] = frozenset(
+    {"stock", "stock_minute", "etf", "index", "convertible", "futures", "option"}
+)
+
 #: 归一化后行情表必需的核心字段（缺任一字段即显式报错，其余可填充默认值）。
 _REQUIRED_BAR_COLS: frozenset[str] = frozenset(
     {"ticker", "trade_date", "open", "high", "low", "close", "volume", "amount"}
@@ -57,6 +89,17 @@ _NUMERIC_COLS: tuple[str, ...] = (
 _FLOAT_COLS: frozenset[str] = frozenset(
     {"open", "high", "low", "close", "amount", "adjfactor", "turnover"}
 )
+
+_MARKET_BY_PREFIX: dict[str, str] = {
+    "60": "主板",
+    "00": "主板",
+    "30": "创业板",
+    "68": "科创板",
+    "43": "北交所",
+    "83": "北交所",
+    "87": "北交所",
+    "92": "北交所",
+}
 
 #: 各数据源原始列名 -> 统一标准列名映射表（集中收口维护）。
 SOURCE_COLUMN_MAP: dict[str, dict[str, str]] = {
@@ -153,13 +196,39 @@ def _qualify_prefix_ticker(code: str) -> str:
     return f"{val}.{exchange}"
 
 
-def _ms_to_shanghai_date(series: pd.Series) -> pd.Series:
-    """将 Unix 毫秒时间戳按 ``Asia/Shanghai`` 时区转为 ``datetime.date``。"""
+def _infer_stock_market(ticker: str) -> str:
+    """按标的代码前两位推断市场板块（主板/创业板/科创板/北交所）。"""
+    return _MARKET_BY_PREFIX.get(str(ticker).strip()[:2], "")
+
+
+def _safe_date_series(series: pd.Series) -> pd.Series:
+    """将日期字符串 / 日期对象安全转为 ``datetime.date``（缺失记为 ``None``）。"""
+    if series.empty:
+        return pd.Series(dtype="object")
+    cleaned = series.where(series.notna(), None)
+    text = cleaned.map(
+        lambda v: (
+            None
+            if v is None or (isinstance(v, float) and pd.isna(v))
+            else (v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v).strip())
+        )
+    )
+    parsed = pd.to_datetime(text, format="mixed", errors="coerce").dt.date
+    return parsed.where(parsed.notna(), None)
+
+
+def _ms_to_shanghai_datetime(series: pd.Series) -> pd.Series:
+    """将 Unix 毫秒时间戳按 ``Asia/Shanghai`` 时区转为无时区 ``datetime64[ns]``。"""
     return (
         pd.to_datetime(pd.to_numeric(series, errors="coerce"), unit="ms", utc=True)
         .dt.tz_convert("Asia/Shanghai")
-        .dt.date
+        .dt.tz_localize(None)
     )
+
+
+def _ms_to_shanghai_date(series: pd.Series) -> pd.Series:
+    """将 Unix 毫秒时间戳按 ``Asia/Shanghai`` 时区转为 ``datetime.date``。"""
+    return _ms_to_shanghai_datetime(series).dt.date
 
 
 def _normalize_calendar_frame(
@@ -208,6 +277,112 @@ def _coerce_and_finalize_bars(df: pd.DataFrame) -> pd.DataFrame:
     return df.reindex(columns=UNIFIED_COLUMNS)
 
 
+def _coerce_and_finalize_minute_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """统一执行分钟线数值转型、``datetime`` 标准化与列排序。"""
+    if df.empty:
+        out = pd.DataFrame(columns=_MINUTE_COLUMNS)
+        out["quality_flag"] = pd.Series(dtype="int64")
+        return out
+
+    out = df.copy()
+    for col in ("open", "high", "low", "close", "amount"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
+
+    if "volume" in out.columns:
+        vol = pd.to_numeric(out["volume"], errors="coerce").round()
+        out["volume"] = (
+            vol.astype("int64") if vol.notna().all() else vol.astype("Int64")
+        )
+
+    if "datetime" in out.columns:
+        dt_series = pd.to_datetime(out["datetime"], errors="coerce")
+        if getattr(dt_series.dtype, "tz", None) is not None:
+            dt_series = dt_series.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+        out["datetime"] = dt_series
+        if "trade_date" not in out.columns or out["trade_date"].isna().any():
+            out["trade_date"] = out["datetime"].dt.date
+
+    if "trade_date" in out.columns:
+        out["trade_date"] = _safe_date_series(out["trade_date"])
+
+    out["quality_flag"] = 0
+    out = out.reindex(columns=_MINUTE_COLUMNS)
+    if not out.empty:
+        out = (
+            out.drop_duplicates(subset=["ticker", "trade_date", "datetime"])
+            .sort_values(["ticker", "trade_date", "datetime"])
+            .reset_index(drop=True)
+        )
+    return out
+
+
+def _finalize_corporate_actions(rows_df: pd.DataFrame) -> pd.DataFrame:
+    """标准化并按 ``[ticker, ex_date, event_type]`` 合并同日同类型公司行动事件。"""
+    if rows_df.empty:
+        return pd.DataFrame(columns=_CORPORATE_ACTIONS_COLUMNS)
+
+    work = rows_df.copy()
+    work["ex_date"] = _safe_date_series(work["ex_date"])
+    work = work[work["ex_date"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=_CORPORATE_ACTIONS_COLUMNS)
+
+    for col in ("announce_date", "record_date"):
+        if col in work.columns:
+            work[col] = _safe_date_series(work[col])
+        else:
+            work[col] = None
+
+    for col in ("cash_dividend", "stock_dividend", "rights_price", "rights_ratio"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce").astype("float64")
+        else:
+            work[col] = float("nan")
+
+    if "detail" not in work.columns:
+        work["detail"] = ""
+    else:
+        work["detail"] = work["detail"].fillna("").astype(str)
+
+    if work.duplicated(subset=["ticker", "ex_date", "event_type"]).any():
+
+        def _first_non_null(s: pd.Series):
+            non_null = s.dropna()
+            return non_null.iloc[0] if len(non_null) else None
+
+        def _join_details(s: pd.Series) -> str:
+            parts: list[str] = []
+            for item in s:
+                txt = str(item).strip()
+                if txt and txt not in parts:
+                    parts.append(txt)
+            return "; ".join(parts)
+
+        work = work.groupby(
+            ["ticker", "ex_date", "event_type"], as_index=False, sort=False
+        ).agg(
+            {
+                "announce_date": _first_non_null,
+                "record_date": _first_non_null,
+                "detail": _join_details,
+                "cash_dividend": lambda s: s.sum(min_count=1),
+                "stock_dividend": lambda s: s.sum(min_count=1),
+                "rights_price": _first_non_null,
+                "rights_ratio": lambda s: s.sum(min_count=1),
+            }
+        )
+
+    for col in ("cash_dividend", "stock_dividend", "rights_price", "rights_ratio"):
+        work[col] = pd.to_numeric(work[col], errors="coerce").astype("float64")
+
+    return (
+        work.reindex(columns=_CORPORATE_ACTIONS_COLUMNS)
+        .sort_values(["ticker", "ex_date", "event_type"])
+        .reset_index(drop=True)
+    )
+
+
 def get_normalizer(source: str) -> Callable[[str, pd.DataFrame], pd.DataFrame]:
     """返回指定 *source* 对应的 ``normalize`` 函数；未知数据源抛出 ``ValueError``。"""
     module_path = _NORMALIZER_MODULES.get(source)
@@ -222,12 +397,12 @@ def normalize(
     raw_df: pd.DataFrame,
     dataset: str = "stock",
 ) -> pd.DataFrame:
-    """统一标准化入口：映射列名、转换类型与单位并输出 ``UNIFIED_COLUMNS``，不做 DQC 校验。"""
+    """统一标准化入口：映射列名、转换类型与单位并输出规范格式，不做 DQC 校验。"""
     col_map = SOURCE_COLUMN_MAP.get(source)
     if col_map is None:
         raise ValueError(f"no normalizer for source: {source!r}")
 
-    if dataset != "calendar" and not raw_df.empty:
+    if dataset in _BAR_DATASETS and not raw_df.empty:
         mapped_cols = set(raw_df.rename(columns=col_map).columns)
         missing = _REQUIRED_BAR_COLS - mapped_cols
         if missing:

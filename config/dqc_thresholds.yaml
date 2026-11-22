@@ -3,7 +3,7 @@
 # 若某规则未在本文件配置，则回退使用对应规则 YAML 中的默认内联参数。
 
 thresholds:
-  # ---- Completeness C01-C12 ----
+  # ---- Completeness C01-C15 ----
   C01:
     params:
       comparison: "eq"
@@ -13,7 +13,7 @@ thresholds:
       min_ratio: 0.95
   C03:
     params:
-      expected_bars: 240
+      expected_bars: [240, 241]
     escalation_threshold: 0.05
   C04:
     value: null
@@ -49,8 +49,19 @@ thresholds:
     params:
       max_new_rate: 0.05
       max_drop_rate: 0.02
+  C13:
+    params: {}
+    escalation_threshold: 0.01
+  C14:
+    params:
+      max_null_rate: 0.01
+      columns: [pre_close, up_limit, down_limit, limit_pct]
+  C15:
+    params:
+      max_gap_days: 12
+    escalation_threshold: 0.0
 
-  # ---- Legality L01-L14 ----
+  # ---- Legality L01-L27 ----
   L01:
     value: 0
     escalation_threshold: 0.01
@@ -100,8 +111,52 @@ thresholds:
   L14:
     value: "ISO8601"
     escalation_threshold: 0.01
+  L15:
+    params: {}
+    escalation_threshold: 0.01
+  L16:
+    params: {}
+    escalation_threshold: 0.01
+  L17:
+    value: "^((60|68|50|51|52|53|55|56|58)\\d{4}\\.SH|(00|30|15|16)\\d{4}\\.SZ|(43|83|87|92)\\d{4}\\.BJ)$"
+    escalation_threshold: 0.01
+  L18:
+    params: {}
+    escalation_threshold: 0.01
+  L19:
+    value: "^(5[123568]\\d{4}\\.SH|15\\d{4}\\.SZ)$"
+    escalation_threshold: 0.01
+  L20:
+    params:
+      main_limit: 0.10
+      chinext_star_limit: 0.20
+      tolerance: 0.005
+  L21:
+    value: "^[A-Za-z0-9_]+\\.(SH|SZ|BJ|CSI|CNI|SI|CI|TI|DC|TS)$"
+    escalation_threshold: 0.01
+  L22:
+    params:
+      tolerance: 0.0
+  L23:
+    params:
+      max_rel_gap: 0.01
+    escalation_threshold: 0.01
+  L24:
+    value: "^[A-Z]{1,2}\\d{4}\\.(CFFEX|SHFE|DCE|CZCE|INE|GFEX)$"
+    escalation_threshold: 0.01
+  L25:
+    params:
+      positive_cols: [settle]
+      non_negative_cols: [open_interest]
+    escalation_threshold: 0.01
+  L26:
+    params: {}
+    escalation_threshold: 0.01
+  L27:
+    value: null
+    escalation_threshold: 0.01
 
-  # ---- Consistency K01-K12 ----
+  # ---- Consistency K01-K15 ----
   K01:
     params:
       max_gap: 0.10
@@ -144,8 +199,19 @@ thresholds:
     params:
       col: close
       max_mean_shift: 0.10
+  K13:
+    params: {}
+    escalation_threshold: 0.0
+  K14:
+    params:
+      start_col: list_date
+      end_col: delist_date
+    escalation_threshold: 0.01
+  K15:
+    params: {}
+    escalation_threshold: 0.01
 
-  # ---- Timeliness T01-T09 ----
+  # ---- Timeliness T01-T12 ----
   T01:
     params:
       max_stale_days: 1
@@ -172,3 +238,12 @@ thresholds:
   T09:
     params:
       max_change_rate: 0.0001
+  T10:
+    params:
+      column: list_date
+    escalation_threshold: 0.0
+  T11:
+    params:
+      column: ex_date
+  T12:
+    params: {}

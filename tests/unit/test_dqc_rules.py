@@ -1436,3 +1436,357 @@ class TestDqcDiagnosticFixes:
             "600002.SH",
         ]
         assert "diff=8" in k11.sample_values[0]
+
+
+NEW_YAML_FILES = [
+    "calendar.yaml",
+    "stock_basic.yaml",
+    "corporate_actions.yaml",
+    "daily_status.yaml",
+    "etf_bars_daily.yaml",
+    "index_bars_daily.yaml",
+    "etf_bars_minute.yaml",
+    "futures_bars_daily.yaml",
+    "tabular.yaml",
+]
+ALL_YAML_FILES = YAML_FILES + NEW_YAML_FILES
+
+
+class TestExtendedDqcRuleCoverage:
+    """验证新增 9 个 YAML、52/52 规范表全覆盖及 C13-C15/L15-L27/K13-K15/T10-T12。"""
+
+    def test_all_14_yaml_files_exist_and_consistent(self):
+        from data.dqc.engine import DQC_RULE_FILES
+
+        assert set(DQC_RULE_FILES.values()) == set(ALL_YAML_FILES)
+        by_id = {}
+        for fname in ALL_YAML_FILES:
+            path = RULES_DIR / fname
+            assert path.exists(), f"{fname} missing"
+            with open(path, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            assert isinstance(data.get("rules"), list) and len(data["rules"]) > 0
+            for rule in data["rules"]:
+                for field in REQUIRED_FIELDS:
+                    assert field in rule, (
+                        f"{rule.get('id', '?')} in {fname}: missing {field}"
+                    )
+                assert rule["severity"] in VALID_SEVERITIES
+                assert rule["type"] in VALID_TYPES
+                if rule["type"] == "column_check":
+                    assert rule["condition"] in VALID_CONDITIONS
+                else:
+                    assert "function" in rule
+                if rule["severity"] == "HARD":
+                    assert len(rule["boundary"]) > 0
+                by_id.setdefault(rule["id"], []).append((fname, rule))
+
+        assert len(by_id) == 69
+        for rid, occurrences in by_id.items():
+            if len(occurrences) > 1:
+                base_fname, base = occurrences[0]
+                for fname, rule in occurrences[1:]:
+                    for field in sorted(set(base) | set(rule)):
+                        if field == "filter":
+                            continue
+                        assert base.get(field) == rule.get(field), (
+                            f"{rid}: {field} differs between {base_fname} and {fname}"
+                        )
+
+    def test_all_52_canonical_tables_mapped_to_dqc_group(self):
+        from data.dqc.engine import DQC_RULE_FILES
+        from data.ingestion import TABLE_TO_DQC_GROUP
+        from data.storage_schema import PARTITION_PATHS
+
+        missing = set(PARTITION_PATHS) - set(TABLE_TO_DQC_GROUP)
+        assert not missing, f"tables missing DQC group: {missing}"
+        assert len(TABLE_TO_DQC_GROUP) == len(PARTITION_PATHS) == 52
+        for table, grp in TABLE_TO_DQC_GROUP.items():
+            assert grp in DQC_RULE_FILES, f"{table} -> unknown DQC group {grp!r}"
+
+    def test_extended_rules_clean_and_dirty_triggers(self):
+        from data.dqc.engine import run_all_checks
+
+        today = pd.Timestamp("2025-03-03").date()
+
+        # 1. cn_calendar: clean + gap > 12 failure (C15)
+        cal_clean = pd.DataFrame(
+            {
+                "trade_date": [
+                    pd.Timestamp("2025-03-03").date(),
+                    pd.Timestamp("2025-03-04").date(),
+                ]
+            }
+        )
+        hard, soft = run_all_checks(
+            cal_clean, today, "calendar", overrides={"today": today}
+        )
+        assert all(r.failing_count == 0 for r in hard)
+        assert {r.rule_id: r for r in soft}["T08"].failing_count == len(cal_clean)
+
+        cal_gap = pd.DataFrame(
+            {
+                "trade_date": [
+                    pd.Timestamp("2025-01-02").date(),
+                    pd.Timestamp("2025-02-05").date(),
+                ]
+            }
+        )
+        hard_gap, _ = run_all_checks(
+            cal_gap, today, "calendar", overrides={"today": today}
+        )
+        assert {r.rule_id: r for r in hard_gap}["C15"].failing_count == 2
+
+        # 2. cn_stock_basic: clean + K14 date order + T10 future list_date
+        sb_clean = pd.DataFrame(
+            [
+                {
+                    "ticker": "000001.SZ",
+                    "name": "平安银行",
+                    "exchange": "SZ",
+                    "market": "主板",
+                    "list_status": "L",
+                    "list_date": pd.Timestamp("1991-04-03").date(),
+                    "delist_date": pd.NaT,
+                    "is_hs": "S",
+                    "old_code": None,
+                }
+            ]
+        )
+        hard, soft = run_all_checks(
+            sb_clean, today, "stock_basic", overrides={"today": today}
+        )
+        assert all(r.failing_count == 0 for r in hard + soft)
+
+        sb_bad = sb_clean.copy()
+        sb_bad["delist_date"] = sb_bad["delist_date"].astype("object")
+        sb_bad.loc[0, "delist_date"] = pd.Timestamp("1990-01-01").date()
+        sb_bad.loc[0, "list_date"] = pd.Timestamp("2026-01-01").date()
+        hard_bad, _ = run_all_checks(
+            sb_bad, today, "stock_basic", overrides={"today": today}
+        )
+        by_id = {r.rule_id: r for r in hard_bad}
+        assert by_id["K14"].failing_count == 1
+        assert by_id["T10"].failing_count == 1
+
+        # 3. cn_stock_corporate_actions: clean + T11 future ex_date (SOFT) + L18 negative
+        ca_clean = pd.DataFrame(
+            [
+                {
+                    "ticker": "000001.SZ",
+                    "ex_date": pd.Timestamp("2025-03-03").date(),
+                    "event_type": "dividend",
+                    "detail": "10派2.5元",
+                    "cash_dividend": 0.25,
+                    "stock_dividend": 0.0,
+                    "rights_price": np.nan,
+                    "rights_ratio": np.nan,
+                    "announce_date": pd.NaT,
+                    "record_date": pd.NaT,
+                }
+            ]
+        )
+        hard, soft = run_all_checks(
+            ca_clean, today, "corporate_actions", overrides={"today": today}
+        )
+        assert all(r.failing_count == 0 for r in hard + soft)
+
+        ca_dirty = ca_clean.copy()
+        ca_dirty.loc[0, "cash_dividend"] = -1.0
+        ca_dirty.loc[0, "ex_date"] = pd.Timestamp("2025-06-01").date()
+        hard_d, soft_d = run_all_checks(
+            ca_dirty, today, "corporate_actions", overrides={"today": today}
+        )
+        assert {r.rule_id: r for r in hard_d}["L18"].failing_count == 1
+        assert {r.rule_id: r for r in soft_d}["T11"].failing_count == 1
+
+        # 4. cn_stock_daily_status: clean + K15 contradiction + C14 SOFT nullable rate
+        ds_clean = pd.DataFrame(
+            [
+                {
+                    "ticker": "000001.SZ",
+                    "trade_date": today,
+                    "pre_close": 10.0,
+                    "up_limit": 11.0,
+                    "down_limit": 9.0,
+                    "limit_pct": 0.1,
+                    "is_st": False,
+                    "is_suspend": False,
+                    "is_limit_up": False,
+                    "is_limit_down": False,
+                    "touched_limit_up": False,
+                    "touched_limit_down": False,
+                    "is_xr": False,
+                }
+            ]
+        )
+        hard, soft = run_all_checks(
+            ds_clean,
+            today,
+            "daily_status",
+            overrides={
+                "calendar_dates": ["2025-03-03"],
+                "universe": ["000001.SZ"],
+                "today": today,
+            },
+        )
+        assert all(r.failing_count == 0 for r in hard + soft)
+
+        ds_dirty = ds_clean.copy()
+        ds_dirty.loc[0, "is_limit_up"] = True
+        ds_dirty.loc[0, "touched_limit_up"] = False
+        ds_dirty.loc[0, "up_limit"] = np.nan
+        hard_d, soft_d = run_all_checks(
+            ds_dirty,
+            today,
+            "daily_status",
+            overrides={
+                "calendar_dates": ["2025-03-03"],
+                "universe": ["000001.SZ"],
+                "today": today,
+            },
+        )
+        assert {r.rule_id: r for r in hard_d}["K15"].failing_count == 1
+        assert {r.rule_id: r for r in soft_d}["C14"].failing_count == 1
+
+        # 5. cn_etf_bars_daily: clean + L19 invalid ETF ticker + L20 limit move
+        etf_clean = pd.DataFrame(
+            [
+                {
+                    "ticker": "510300.SH",
+                    "trade_date": today,
+                    "open": 4.0,
+                    "high": 4.1,
+                    "low": 3.9,
+                    "close": 4.05,
+                    "volume": 1000,
+                    "amount": 4050.0,
+                    "adjfactor": 1.0,
+                    "suspend": False,
+                    "prev_close": 4.0,
+                }
+            ]
+        )
+        hard, soft = run_all_checks(
+            etf_clean,
+            today,
+            "etf_bars_daily",
+            overrides={
+                "calendar_dates": ["2025-03-03"],
+                "universe": ["510300.SH"],
+                "today": today,
+            },
+        )
+        assert all(r.failing_count == 0 for r in hard + soft)
+
+        etf_dirty = etf_clean.copy()
+        etf_dirty.loc[0, "ticker"] = "000001.SZ"  # stock code in ETF table
+        etf_dirty.loc[0, "close"] = 4.6  # +15% > 10.5%
+        hard_d, soft_d = run_all_checks(
+            etf_dirty,
+            today,
+            "etf_bars_daily",
+            overrides={
+                "calendar_dates": ["2025-03-03"],
+                "universe": ["000001.SZ"],
+                "today": today,
+            },
+        )
+        assert {r.rule_id: r for r in hard_d}["L19"].failing_count == 1
+        assert {r.rule_id: r for r in soft_d}["L20"].failing_count == 1
+
+        # 6. cn_stock_index_bars_daily: L22 strict OHLC soft warning passes L23 (<= 1% gap)
+        idx_df = pd.DataFrame(
+            [
+                {
+                    "ticker": "000300.SH",
+                    "trade_date": today,
+                    "open": 3900.0,
+                    "high": 3920.0,
+                    "low": 3880.0,
+                    "close": 3925.0,  # 0.127% > high -> L22 SOFT only, L23 HARD passes
+                    "volume": 1000000,
+                    "amount": 5000000000.0,
+                }
+            ]
+        )
+        hard, soft = run_all_checks(
+            idx_df,
+            today,
+            "index_bars_daily",
+            overrides={
+                "calendar_dates": ["2025-03-03"],
+                "universe": ["000300.SH"],
+                "today": today,
+            },
+        )
+        assert all(r.failing_count == 0 for r in hard)
+        assert {r.rule_id: r for r in soft}["L22"].failing_count == 1
+
+        # 7. tabular generic check on cn_stock_industry
+        ind_df = pd.DataFrame(
+            [
+                {
+                    "ticker": "000001.SZ",
+                    "industry_l1": "银行",
+                    "industry_l2": "股份制银行",
+                    "industry_l3": None,
+                    "classification": "sw",
+                    "effective_date": pd.Timestamp("2024-01-01").date(),
+                }
+            ]
+        )
+        hard, soft = run_all_checks(
+            ind_df,
+            today,
+            "tabular",
+            overrides={"table": "cn_stock_industry", "today": today},
+        )
+        assert all(r.failing_count == 0 for r in hard + soft)
+
+        ind_bad = ind_df.copy()
+        ind_bad.loc[0, "classification"] = "invalid_cls"
+        hard_b, _ = run_all_checks(
+            ind_bad,
+            today,
+            "tabular",
+            overrides={"table": "cn_stock_industry", "today": today},
+        )
+        assert {r.rule_id: r for r in hard_b}["L15"].failing_count == 1
+
+    def test_monthly_prev_day_stats_and_etf_universe_isolation(self, tmp_path):
+        from datetime import date
+        from data.dqc.report import build_reference_overrides, load_prev_day_stats
+
+        # Seed stock_basic + monthly daily_status + monthly index_bars
+        (tmp_path / "asset" / "cn_stock_basic").mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {"ticker": ["000001.SZ", "000002.SZ"], "list_status": ["L", "L"]}
+        ).to_parquet(
+            tmp_path / "asset" / "cn_stock_basic" / "stock_basic.parquet", index=False
+        )
+
+        ds_dir = tmp_path / "asset" / "cn_stock_daily_status"
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "ticker": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2025, 2, 28), date(2025, 2, 28)],
+                "pre_close": [10.0, 20.0],
+            }
+        ).to_parquet(ds_dir / "2025-02.parquet", index=False)
+
+        stats = load_prev_day_stats(tmp_path, "cn_stock_daily_status", date(2025, 3, 3))
+        assert stats["prev_date"] == "2025-02-28"
+        assert stats["row_count"] == 2
+        assert stats["tickers"] == ["000001.SZ", "000002.SZ"]
+
+        # ETF and Index must NOT receive stock_basic universe when their own basic tables are absent
+        ov_etf = build_reference_overrides(
+            tmp_path, "cn_etf_bars_daily", date(2025, 3, 3)
+        )
+        assert "universe" not in ov_etf
+        ov_idx = build_reference_overrides(
+            tmp_path, "cn_stock_index_bars_daily", date(2025, 3, 3)
+        )
+        assert "universe" not in ov_idx

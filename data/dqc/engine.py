@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-import importlib
 import copy
+import importlib
 import logging
 import os
 import time
@@ -50,7 +50,7 @@ from data.storage_ops import (
     upsert_parquet_atomic,
     write_parquet_atomic,
 )
-from data.storage_schema import SCHEMA
+from data.storage_schema import PARTITION_PATHS, SCHEMA, resolve_table_name
 
 __all__ = [
     "DqcRuleGroup",
@@ -72,7 +72,20 @@ RULES_DIR: Path = Path(__file__).resolve().parent / "rules"
 
 #: DQC 规则集分组字面量类型。
 DqcRuleGroup = Literal[
-    "bars_daily", "bars_minute", "fundamental", "factor", "reference"
+    "bars_daily",
+    "bars_minute",
+    "fundamental",
+    "factor",
+    "reference",
+    "calendar",
+    "stock_basic",
+    "corporate_actions",
+    "daily_status",
+    "etf_bars_daily",
+    "index_bars_daily",
+    "etf_bars_minute",
+    "futures_bars_daily",
+    "tabular",
 ]
 
 # dqc_group -> 规则文件名映射
@@ -82,6 +95,31 @@ DQC_RULE_FILES: dict[str, str] = {
     "fundamental": "fundamental.yaml",
     "factor": "factor.yaml",
     "reference": "reference.yaml",
+    "calendar": "calendar.yaml",
+    "stock_basic": "stock_basic.yaml",
+    "corporate_actions": "corporate_actions.yaml",
+    "daily_status": "daily_status.yaml",
+    "etf_bars_daily": "etf_bars_daily.yaml",
+    "index_bars_daily": "index_bars_daily.yaml",
+    "etf_bars_minute": "etf_bars_minute.yaml",
+    "futures_bars_daily": "futures_bars_daily.yaml",
+    "tabular": "tabular.yaml",
+}
+
+# 专用规则组默认对应的规范表名（供 C13/L16/L18/L26/K13 等按 Schema 驱动的检查使用）
+_DQC_GROUP_DEFAULT_TABLE: dict[str, str] = {
+    "bars_daily": "cn_stock_bars_daily",
+    "bars_minute": "cn_stock_bars_minute",
+    "fundamental": "cn_stock_fundamental",
+    "factor": "factor",
+    "calendar": "cn_calendar",
+    "stock_basic": "cn_stock_basic",
+    "corporate_actions": "cn_stock_corporate_actions",
+    "daily_status": "cn_stock_daily_status",
+    "etf_bars_daily": "cn_etf_bars_daily",
+    "index_bars_daily": "cn_stock_index_bars_daily",
+    "etf_bars_minute": "cn_etf_bars_minute",
+    "futures_bars_daily": "cn_futures_bars_daily",
 }
 
 # 规则集版本号（YAML 中不维护版本字段，由引擎统一标记：patch 改阈值，minor 增规则，major 改语义）
@@ -207,12 +245,19 @@ def _apply_condition(series: pd.Series, condition: str, value) -> pd.Series:
         return series != value
     if condition == "ne":
         return series == value
+    if condition == "in":
+        return ~series.isin(value)
     if condition == "range":
         return (series <= value[0]) | (series >= value[1])
     if condition == "regex":
         return ~series.astype(str).str.match(value, na=False)
     if condition == "notnull":
         return series.isna()
+    if condition == "isbool":
+        is_bool = series.map(
+            lambda x: isinstance(x, (bool, np.bool_)) if pd.notna(x) else True
+        )
+        return ~is_bool
     if condition == "isbool_notnull":
         is_bool = series.map(
             lambda x: isinstance(x, (bool, np.bool_)) if pd.notna(x) else False
@@ -349,6 +394,8 @@ def run_all_checks(
     外部参考数据通过 *overrides* 注入；跨表规则（K06–K08）仅在传入 *cross_df* 时运行。
     """
     overrides = dict(overrides or {})
+    if "table" not in overrides and dqc_group in _DQC_GROUP_DEFAULT_TABLE:
+        overrides["table"] = _DQC_GROUP_DEFAULT_TABLE[dqc_group]
     hard: list[CheckResult] = []
     soft: list[CheckResult] = []
     for rule in _load_rules(dqc_group):
@@ -356,14 +403,13 @@ def run_all_checks(
         if fn_path.startswith(CROSS_FUNCTION_PREFIX):
             if cross_df is None:
                 continue
-            if dqc_group == "bars_daily":
+            if dqc_group in ("bars_daily", "etf_bars_daily"):
                 daily_df, minute_df = df, cross_df
-            elif dqc_group == "bars_minute":
+            elif dqc_group in ("bars_minute", "etf_bars_minute"):
                 daily_df, minute_df = cross_df, df
             else:
                 raise ValueError(
-                    f"cross rules need bars_daily/bars_minute frames, "
-                    f"got dqc_group={dqc_group!r}"
+                    f"cross rules need daily/minute frames, got dqc_group={dqc_group!r}"
                 )
             raw = _evaluate_cross_check(rule, daily_df, minute_df, overrides)
         elif rule["type"] == "column_check":
@@ -385,7 +431,21 @@ def build_schema(table: str) -> DataFrameSchema:
 
 
 def _landing_path(table: str, data_date: date, data_root: str | os.PathLike) -> Path:
-    return partition_path(table, data_date, data_root)
+    canonical = resolve_table_name(table)
+    template = PARTITION_PATHS.get(canonical)
+    if template is None:
+        return partition_path(table, data_date, data_root)
+    if "{date}" in template or "{month}" in template:
+        return partition_path(canonical, data_date, data_root)
+    if "{year}" in template:
+        return Path(data_root) / template.format(year=data_date.strftime("%Y"))
+    if "{exchange}" in template:
+        return Path(data_root) / template.format(exchange="SSE")
+    if "{symbol}" in template:
+        raise ValueError(
+            f"table {canonical!r} uses symbol partition; pass target_path explicitly"
+        )
+    return Path(data_root) / template
 
 
 def _expand_to_partitions(df: pd.DataFrame, mask: pd.Series) -> pd.Series:
@@ -566,10 +626,12 @@ def ingest_with_dqc(
         raise ValueError(f"bad run_type {run_type!r}; known: {list(report.RUN_TYPES)}")
     config = batch_config or BatchRejectConfig()
     table = table or str(dqc_group)
+    canonical = resolve_table_name(table)
     run_id = str(uuid.uuid4())[:8]
     started = time.monotonic()
     run_time = datetime.now(timezone.utc).replace(tzinfo=None)
     merged_overrides = dict(overrides or {})
+    merged_overrides.setdefault("table", canonical)
     if "prev_row_count" not in merged_overrides:
         prev_stats = report.load_prev_day_stats(data_root, table, data_date)
         if prev_stats:
@@ -645,23 +707,35 @@ def ingest_with_dqc(
 
     # 第 7 步：Schema 校验并原子落盘
     schema = build_schema(table)
-    projected = df_clean[[c for c in schema.columns if c in df_clean.columns]]
-    validated = schema.validate(normalize_missing_floats(projected, table))
+    projected = df_clean[[c for c in schema.columns if c in df_clean.columns]].copy()
+    for col_name, col_schema in schema.columns.items():
+        if col_name not in projected.columns and col_schema.nullable:
+            projected[col_name] = None
+    validated = schema.validate(normalize_missing_floats(projected, canonical))
     path = (
         Path(target_path)
         if target_path is not None
         else _landing_path(table, data_date, data_root)
     )
-    if target_path is None and is_monthly_partition(table):
+    if target_path is None and is_monthly_partition(canonical):
         upsert_parquet_atomic(
             validated,
             path,
-            table=table,
+            table=canonical,
             partition_dates=[data_date],
             source_tag=source_tag,
         )
     else:
-        write_parquet_atomic(validated, path, table=table, source_tag=source_tag)
+        if target_path is None and canonical == "cn_calendar" and path.exists():
+            existing_cal = pd.read_parquet(path, columns=["trade_date"])
+            merged_cal = (
+                pd.concat([existing_cal, validated], ignore_index=True)
+                .drop_duplicates(subset=["trade_date"])
+                .sort_values("trade_date")
+                .reset_index(drop=True)
+            )
+            validated = schema.validate(merged_cal)
+        write_parquet_atomic(validated, path, table=canonical, source_tag=source_tag)
 
     flagged_rate = (
         float((df_clean["quality_flag"] != 0).mean()) if len(df_clean) else 0.0

@@ -340,7 +340,14 @@ class TestAkshareAdapter:
 class TestTushareAdapter:
     def test_list_datasets(self):
         t = TushareAdapter(token="fake")
-        assert t.list_datasets() == ["stock"]
+        assert t.list_datasets() == [
+            "stock",
+            "etf",
+            "stock_basic",
+            "fundamental",
+            "daily_status",
+            "corporate_actions",
+        ]
 
     def test_minimal_fetch(self):
         t = TushareAdapter(token="fake")
@@ -359,11 +366,46 @@ class TestTushareAdapter:
         with pytest.raises(ValueError, match="unsupported"):
             t.fetch("option", date(2026, 1, 5))
 
+    def test_fetch_etf_merges_fund_adj(self):
+        t = TushareAdapter(token="fake")
+        fund_df = pd.DataFrame(
+            {
+                "ts_code": ["159916.SZ", "150018.SZ"],
+                "trade_date": ["20120416", "20120416"],
+                "close": [1.73, 1.01],
+                "vol": [0.23, 100.0],
+                "amount": [0.0398, 10.1],
+            }
+        )
+        adj_df = pd.DataFrame({"ts_code": ["159916.SZ"], "adj_factor": [1.25]})
+        mock_pro = MagicMock()
+        mock_pro.fund_daily.return_value = fund_df
+        mock_pro.fund_adj.return_value = adj_df
+        with patch("tushare.pro_api", return_value=mock_pro):
+            result = t.fetch("etf", date(2012, 4, 16))
+        assert result.source == "tushare"
+        assert result.dataset == "etf"
+        assert result.row_count == 2
+        assert (
+            result.df.loc[result.df["ts_code"] == "159916.SZ", "adj_factor"].iloc[0]
+            == 1.25
+        )
+
 
 class TestAmazingdataAdapter:
     def test_list_datasets(self):
         a = AmazingdataAdapter()
-        assert a.list_datasets() == ["stock", "etf", "index", "calendar", "option"]
+        assert a.list_datasets() == [
+            "stock",
+            "stock_minute",
+            "stock_basic",
+            "daily_status",
+            "corporate_actions",
+            "etf",
+            "index",
+            "calendar",
+            "option",
+        ]
 
     def test_requests_per_second(self):
         assert AmazingdataAdapter.requests_per_second == 2.0
@@ -569,6 +611,10 @@ class TestQdcAdapter:
         assert q._mode == "cli"
         assert q.list_datasets() == [
             "stock",
+            "stock_minute",
+            "fundamental",
+            "daily_status",
+            "corporate_actions",
             "etf",
             "index",
             "convertible",
@@ -928,6 +974,8 @@ class TestStraightFlushAdapter:
         s = StraightFlushAdapter(token="fake", secrets_path=tmp_path / "missing.env")
         assert s.list_datasets() == [
             "stock",
+            "stock_basic",
+            "corporate_actions",
             "etf",
             "index",
             "futures",

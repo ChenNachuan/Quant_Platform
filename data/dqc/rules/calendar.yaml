@@ -1,0 +1,56 @@
+# DQC rules — calendar (cn_calendar)
+
+rules:
+  # ---- Completeness ----
+  - id: C15
+    name: calendar_gap_free
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_calendar_gaps"
+    params:
+      max_gap_days: 12
+    applicability: [reference]
+    threshold: "trading calendar non-empty and max consecutive gap <= 12 calendar days"
+    threshold_source: fixed
+    boundary: "le 12: calendar gap at exactly 12 days passes, above 12 days fails"
+    description: "Trading calendar internal gap check"
+
+  # ---- Legality ----
+  - id: L14
+    name: date_format
+    severity: HARD
+    type: column_check
+    columns: [trade_date]
+    condition: "date_format"
+    value: "ISO8601"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "ISO 8601 date format"
+    threshold_source: fixed
+    boundary: "valid ISO 8601 date: non-parseable dates fail"
+    description: "Date format must be ISO 8601"
+
+  # ---- Timeliness ----
+  - id: T04
+    name: date_ascending
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_ascending"
+    params: {}
+    applicability: [daily, minute, fund]
+    threshold: "strictly ascending with no duplicates within partition"
+    threshold_source: fixed
+    boundary: "strictly increasing: equal consecutive dates (duplicates) FAIL"
+    description: "Dates must be strictly ascending with no duplicates"
+
+  - id: T08
+    name: calendar_forward
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_calendar_forward"
+    params:
+      min_forward_days: 30
+    applicability: [reference]
+    threshold: "calendar extends >= 30 trading days"
+    threshold_source: fixed
+    boundary: "ge 30: exactly 30 forward trading days passes, 29 fails"
+    description: "Calendar forward coverage"

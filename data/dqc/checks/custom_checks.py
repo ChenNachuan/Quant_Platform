@@ -11,7 +11,21 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
+import numpy as np
 import pandas as pd
+
+from core.asset_rules import (
+    EXCHANGE_MAP,
+    validate_equity_ticker,
+    validate_etf_ticker,
+    validate_fund_ticker,
+    validate_futures_ticker,
+    validate_index_ticker,
+    validate_stock_ticker,
+)
+from data.storage_schema import SCHEMA, resolve_table_name
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────
@@ -62,7 +76,14 @@ def _is_suspended(df: pd.DataFrame) -> pd.Series:
     return _bool_series(df[c])
 
 
-# ── 完整性 C01–C10 ──────────────────────────────────────────────────────
+def _resolve_schema_for(table: str | None):
+    if not table:
+        return None
+    canonical = resolve_table_name(table)
+    return SCHEMA.get(canonical)
+
+
+# ── 完整性 C01–C15 ──────────────────────────────────────────────────────
 
 
 def check_row_count_vs_calendar(
@@ -100,11 +121,15 @@ def check_row_count_vs_universe(
 
 
 def check_minute_bar_count(
-    df: pd.DataFrame, expected_bars: int = 240, **_
+    df: pd.DataFrame, expected_bars: int | Sequence[int] = (240, 241), **_
 ) -> pd.Series:
-    """C03：每只标的每日分钟线根数须等于 *expected_bars*（默认 240）。"""
+    """C03：每只标的每日分钟线根数须属于 *expected_bars*（默认 (240, 241)）。"""
     counts = df.groupby(["ticker", _date_col(df) or "trade_date"]).size()
-    has_bad = bool((counts != expected_bars).any())
+    if isinstance(expected_bars, (list, tuple, set, frozenset)):
+        allowed = {int(v) for v in expected_bars}
+        has_bad = bool((~counts.isin(allowed)).any())
+    else:
+        has_bad = bool((counts != int(expected_bars)).any())
     return pd.Series([has_bad], index=["__aggregate__"])
 
 
@@ -234,7 +259,71 @@ def ticker_set_drift(
     return pd.Series(False, index=df.index)
 
 
-# ── 合法性 L03–L05, L12 ─────────────────────────────────────────────────
+def check_required_non_null(
+    df: pd.DataFrame,
+    table: str | None = None,
+    columns: Sequence[str] | None = None,
+    **_,
+) -> pd.Series:
+    """C13：按存储 Schema（或指定列表）校验非空必填列零缺失。"""
+    target_cols: list[str]
+    if columns is not None:
+        target_cols = list(columns)
+    else:
+        schema = _resolve_schema_for(table)
+        if schema is not None:
+            target_cols = [
+                c
+                for c, col_schema in schema.columns.items()
+                if not col_schema.nullable and c != "quality_flag"
+            ]
+        else:
+            target_cols = [c for c in ("ticker", "trade_date") if c in df.columns]
+    failed = pd.Series(False, index=df.index)
+    for col in target_cols:
+        if col not in df.columns:
+            return pd.Series(True, index=df.index)
+        failed = failed | df[col].isna()
+    return failed
+
+
+def check_daily_status_nullable_rate(
+    df: pd.DataFrame,
+    max_null_rate: float = 0.01,
+    columns: Sequence[str] = ("pre_close", "up_limit", "down_limit", "limit_pct"),
+    **_,
+) -> pd.Series:
+    """C14：非停牌状态下每日状态核心限价列空值率须 <= *max_null_rate*。"""
+    if df.empty:
+        return pd.Series([False], index=["__aggregate__"])
+    in_scope = (
+        ~_bool_series(df["is_suspend"])
+        if "is_suspend" in df.columns
+        else pd.Series(True, index=df.index)
+    )
+    if not in_scope.any():
+        return pd.Series([False], index=["__aggregate__"])
+    sub = df.loc[in_scope]
+    for col in columns:
+        if col in sub.columns and sub[col].isna().mean() > max_null_rate:
+            return pd.Series([True], index=["__aggregate__"])
+    return pd.Series([False], index=["__aggregate__"])
+
+
+def check_calendar_gaps(df: pd.DataFrame, max_gap_days: int = 12, **_) -> pd.Series:
+    """C15：交易日历区间内非空且相邻交易日间隔须 <= *max_gap_days*。"""
+    dc = _date_col(df) or "trade_date"
+    if df.empty or dc not in df.columns:
+        return pd.Series([True], index=["__aggregate__"])
+    dates = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values().unique()
+    if len(dates) == 0:
+        return pd.Series([True], index=["__aggregate__"])
+    diffs = pd.Series(dates).diff().dt.days.dropna()
+    has_gap = bool((diffs > max_gap_days).any())
+    return pd.Series([has_gap], index=["__aggregate__"])
+
+
+# ── 合法性 L03–L05, L12, L15–L26 ────────────────────────────────────────
 
 
 def check_ohlc_relation(df: pd.DataFrame, tolerance: float = 0.0, **_) -> pd.Series:
@@ -243,6 +332,19 @@ def check_ohlc_relation(df: pd.DataFrame, tolerance: float = 0.0, **_) -> pd.Ser
     upper = df[["open", "close"]].max(axis=1)
     failed = (df["low"] > lower + tolerance) | (df["high"] < upper - tolerance)
     return failed
+
+
+def check_ohlc_relation_rel_tol(
+    df: pd.DataFrame, max_rel_gap: float = 0.01, **_
+) -> pd.Series:
+    """L23：检查 ``low <= high`` 且 ``open/close`` 超出 ``[low, high]`` 的相对偏差 <= *max_rel_gap*。"""
+    bad_hl = df["low"] > df["high"]
+    lower = df[["open", "close"]].min(axis=1)
+    upper = df[["open", "close"]].max(axis=1)
+    denom = df["close"].abs().replace(0, 1.0)
+    gap_lo = ((df["low"] - lower) / denom).clip(lower=0.0)
+    gap_hi = ((upper - df["high"]) / denom).clip(lower=0.0)
+    return bad_hl | (gap_lo > max_rel_gap) | (gap_hi > max_rel_gap)
 
 
 def check_price_limit_stock(
@@ -277,6 +379,25 @@ def check_price_limit_stock(
     return change > limit + tolerance
 
 
+def check_price_limit_etf(
+    df: pd.DataFrame,
+    main_limit: float = 0.10,
+    chinext_star_limit: float = 0.20,
+    tolerance: float = 0.005,
+    **_,
+) -> pd.Series:
+    """L20：ETF 日涨跌幅软校验（58 科创板 ETF 按 20%，其余按 10%，含份额折算等软告警）。"""
+    pc = _prev_close(df)
+    if pc.isna().all():
+        return pd.Series([False] * len(df), index=df.index)
+    change = ((df["close"] - pc) / pc).abs()
+    tickers = df["ticker"].astype(str)
+    limit = pd.Series(main_limit, index=df.index)
+    is_star = tickers.str.startswith("58")
+    limit = limit.where(~is_star, chinext_star_limit)
+    return (change > limit + tolerance).fillna(False)
+
+
 def check_price_limit_futures(
     df: pd.DataFrame,
     tolerance: float = 0.005,
@@ -306,7 +427,168 @@ def check_factor_nan_rate(
     return pd.Series([rate > max_nan_rate], index=["__aggregate__"])
 
 
-# ── 一致性 K01–K05, K09–K11 ─────────────────────────────────────────────
+_DEFAULT_ENUMS: dict[str, set[str]] = {
+    "exchange": set(EXCHANGE_MAP.keys()),
+    "event_type": {"dividend", "split", "rights", "bonus"},
+    "classification": {"citics", "sw", "ths", "tdx"},
+    "bs_flag": {"B", "S", "N", "A"},
+    "asset_class": {"stock", "bond", "fund", "other"},
+    "list_status": {"L", "D", "P"},
+}
+
+
+def check_enum_values(
+    df: pd.DataFrame,
+    table: str | None = None,
+    enum_map: dict[str, Sequence[str]] | None = None,
+    **_,
+) -> pd.Series:
+    """L15：校验表内枚举列取值属于允许集合。"""
+    del table
+    allowed_map = dict(_DEFAULT_ENUMS)
+    if enum_map:
+        for k, vals in enum_map.items():
+            allowed_map[k] = set(vals)
+    failed = pd.Series(False, index=df.index)
+    for col, allowed in allowed_map.items():
+        if col not in df.columns:
+            continue
+        s = df[col]
+        bad = s.notna() & ~s.astype(str).isin(allowed)
+        failed = failed | bad
+    return failed
+
+
+def check_date_columns_valid(
+    df: pd.DataFrame,
+    table: str | None = None,
+    columns: Sequence[str] | None = None,
+    **_,
+) -> pd.Series:
+    """L16：校验表内日期/时间列非空值均可合法解析为日期时间。"""
+    target_cols: list[str]
+    if columns is not None:
+        target_cols = list(columns)
+    else:
+        schema = _resolve_schema_for(table)
+        if schema is not None:
+            target_cols = [
+                c
+                for c, col_schema in schema.columns.items()
+                if c in df.columns
+                and any(
+                    tok in str(col_schema.dtype).lower() for tok in ("date", "datetime")
+                )
+            ]
+        else:
+            target_cols = [
+                c
+                for c in df.columns
+                if (c.endswith(("_date", "date")) or c == "datetime")
+                and c != "data_date"
+            ]
+    failed = pd.Series(False, index=df.index)
+    for col in target_cols:
+        if col not in df.columns:
+            continue
+        s = df[col]
+        non_null = s.notna()
+        if not non_null.any():
+            continue
+        parsed = pd.to_datetime(s[non_null], errors="coerce")
+        bad_idx = parsed.index[parsed.isna()]
+        if len(bad_idx):
+            failed.loc[bad_idx] = True
+    return failed
+
+
+def check_non_negative_nullable(
+    df: pd.DataFrame,
+    table: str | None = None,
+    positive_cols: Sequence[str] | None = None,
+    non_negative_cols: Sequence[str] | None = None,
+    **_,
+) -> pd.Series:
+    """L18：校验可空数值列非空值满足正数/非负及有限性约束。"""
+    pos_cols: list[str] = list(positive_cols or [])
+    nn_cols: list[str] = list(non_negative_cols or [])
+    if positive_cols is None and non_negative_cols is None:
+        schema = _resolve_schema_for(table)
+        if schema is not None:
+            for c, col_schema in schema.columns.items():
+                if c not in df.columns or c == "quality_flag":
+                    continue
+                check_names = {getattr(chk, "name", "") for chk in col_schema.checks}
+                if "positive" in check_names:
+                    pos_cols.append(c)
+                elif "non_negative" in check_names:
+                    nn_cols.append(c)
+    failed = pd.Series(False, index=df.index)
+    for col in pos_cols:
+        if col not in df.columns:
+            continue
+        num = pd.to_numeric(df[col], errors="coerce")
+        bad = df[col].notna() & (num.isna() | ~np.isfinite(num) | (num <= 0))
+        failed = failed | bad
+    for col in nn_cols:
+        if col not in df.columns:
+            continue
+        num = pd.to_numeric(df[col], errors="coerce")
+        bad = df[col].notna() & (num.isna() | ~np.isfinite(num) | (num < 0))
+        failed = failed | bad
+    return failed
+
+
+_TICKER_VALIDATORS = {
+    "stock_ticker": validate_stock_ticker,
+    "equity_ticker": validate_equity_ticker,
+    "etf_ticker": validate_etf_ticker,
+    "fund_ticker": validate_fund_ticker,
+    "index_ticker": validate_index_ticker,
+    "futures_ticker": validate_futures_ticker,
+}
+
+
+def check_schema_contract(df: pd.DataFrame, table: str | None = None, **_) -> pd.Series:
+    """L26：依据 ``SCHEMA[table]`` 校验非空代码正则、枚举及数值范围契约。"""
+    schema = _resolve_schema_for(table)
+    if schema is None or df.empty:
+        return pd.Series(False, index=df.index)
+    failed = pd.Series(False, index=df.index)
+    for col_name, col_schema in schema.columns.items():
+        if col_name not in df.columns:
+            if not col_schema.nullable:
+                return pd.Series(True, index=df.index)
+            continue
+        s = df[col_name]
+        non_null = s.notna()
+        if not non_null.any():
+            continue
+        for chk in col_schema.checks:
+            cname = getattr(chk, "name", "") or ""
+            if cname in _TICKER_VALIDATORS:
+                fn = _TICKER_VALIDATORS[cname]
+                uniq_vals = s[non_null].astype(str).unique()
+                bad_vals = {v for v in uniq_vals if not fn(v)}
+                if bad_vals:
+                    failed = failed | (non_null & s.astype(str).isin(bad_vals))
+            elif cname == "positive":
+                num = pd.to_numeric(s, errors="coerce")
+                failed = failed | (
+                    non_null & (num.isna() | ~np.isfinite(num) | (num <= 0))
+                )
+            elif cname == "non_negative":
+                num = pd.to_numeric(s, errors="coerce")
+                failed = failed | (
+                    non_null & (num.isna() | ~np.isfinite(num) | (num < 0))
+                )
+            elif cname in _DEFAULT_ENUMS:
+                allowed = _DEFAULT_ENUMS[cname]
+                failed = failed | (non_null & ~s.astype(str).isin(allowed))
+    return failed
+
+
+# ── 一致性 K01–K05, K09–K15 ─────────────────────────────────────────────
 
 
 def check_open_gap(
@@ -453,11 +735,70 @@ def value_distribution_shift(
     return pd.Series(False, index=df.index)
 
 
+def check_unique_key(
+    df: pd.DataFrame,
+    table: str | None = None,
+    key_cols: Sequence[str] | None = None,
+    **_,
+) -> pd.Series:
+    """K13：按存储 Schema ``unique`` 主键列检验无重复记录。"""
+    keys: list[str]
+    if key_cols is not None:
+        keys = list(key_cols)
+    else:
+        schema = _resolve_schema_for(table)
+        keys = list(schema.unique) if schema is not None else []
+    if not keys or df.empty:
+        return pd.Series(False, index=df.index)
+    if any(k not in df.columns for k in keys):
+        return pd.Series(True, index=df.index)
+    return df.duplicated(subset=keys, keep=False)
+
+
+def check_date_order_pair(
+    df: pd.DataFrame,
+    start_col: str = "list_date",
+    end_col: str = "delist_date",
+    **_,
+) -> pd.Series:
+    """K14：校验成对日期列满足 ``end_col >= start_col``（任一为空跳过）。"""
+    if start_col not in df.columns or end_col not in df.columns or df.empty:
+        return pd.Series(False, index=df.index)
+    s = pd.to_datetime(df[start_col], errors="coerce")
+    e = pd.to_datetime(df[end_col], errors="coerce")
+    return (s.notna() & e.notna() & (e < s)).fillna(False)
+
+
+def check_daily_status_consistency(df: pd.DataFrame, **_) -> pd.Series:
+    """K15：校验 ``cn_stock_daily_status`` 涨跌停价、触板标志及停牌逻辑自洽。"""
+    if df.empty:
+        return pd.Series(False, index=df.index)
+    failed = pd.Series(False, index=df.index)
+    if "up_limit" in df.columns and "down_limit" in df.columns:
+        ul = df["up_limit"]
+        dl = df["down_limit"]
+        failed = failed | (ul.notna() & dl.notna() & (ul < dl))
+    if "is_limit_up" in df.columns and "is_limit_down" in df.columns:
+        lu = _bool_series(df["is_limit_up"])
+        ld = _bool_series(df["is_limit_down"])
+        failed = failed | (lu & ld)
+        if "touched_limit_up" in df.columns:
+            tlu = _bool_series(df["touched_limit_up"])
+            failed = failed | (lu & ~tlu)
+        if "touched_limit_down" in df.columns:
+            tld = _bool_series(df["touched_limit_down"])
+            failed = failed | (ld & ~tld)
+        if "is_suspend" in df.columns:
+            sus = _bool_series(df["is_suspend"])
+            failed = failed | (sus & (lu | ld))
+    return failed
+
+
 check_row_count_vs_prev_day = row_count_vs_prev_day
 check_ticker_set_drift = ticker_set_drift
 check_value_distribution_shift = value_distribution_shift
 
-# ── 时效性 T01–T09 ──────────────────────────────────────────────────────
+# ── 时效性 T01–T12 ──────────────────────────────────────────────────────
 
 
 def check_daily_freshness(
@@ -506,6 +847,40 @@ def check_no_future_dates(df: pd.DataFrame, today=None, **_) -> pd.Series:
     return pd.Series([has_future], index=["__aggregate__"])
 
 
+def check_no_future_date_col(
+    df: pd.DataFrame,
+    table: str | None = None,
+    column: str | None = None,
+    today=None,
+    **_,
+) -> pd.Series:
+    """T10/T11/T12：检查指定日期列（或首匹配主日期列）是否存在晚于 *today* 的记录。"""
+    del table
+    if df.empty:
+        return pd.Series(False, index=df.index)
+    col = column
+    if col is None:
+        col = _col(
+            df,
+            "trade_date",
+            "date",
+            "nav_date",
+            "ex_date",
+            "ann_date",
+            "list_date",
+            "surv_date",
+            "float_date",
+            "effective_date",
+        )
+    if col is None or col not in df.columns:
+        return pd.Series(False, index=df.index)
+    ref = (
+        pd.to_datetime(today) if today is not None else pd.Timestamp.today().normalize()
+    )
+    dates = pd.to_datetime(df[col], errors="coerce")
+    return (dates.notna() & (dates > ref)).fillna(False)
+
+
 def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
     """T04：分区内时间须严格递增无重复（分钟线按 ``(ticker, trade_date)`` 检查 ``datetime``，其余按 ``ticker`` 检查日期）。"""
     dc = _date_col(df) or "trade_date"
@@ -517,20 +892,12 @@ def check_date_ascending(df: pd.DataFrame, **_) -> pd.Series:
         return bad.fillna(False)
 
     dates = pd.to_datetime(df[dc])
-    failed = pd.Series(False, index=df.index)
-    grp_col = "ticker" if "ticker" in df.columns else None
-    if grp_col:
-        for _, group in df.groupby(grp_col):
-            gdates = dates.loc[group.index]
-            diff = gdates.diff()
-            bad = (diff <= pd.Timedelta(0)) & diff.notna()
-            failed.loc[group.index] = bad.fillna(False)
+    if "ticker" in df.columns:
+        diff = dates.groupby(df["ticker"]).diff()
     else:
         diff = dates.diff()
-        failed = ((diff <= pd.Timedelta(0)) & diff.notna()).reindex(
-            df.index, fill_value=False
-        )
-    return failed
+    bad = (diff <= pd.Timedelta(0)) & diff.notna()
+    return bad.fillna(False).reindex(df.index, fill_value=False).astype(bool)
 
 
 def check_minute_timestamp_order(df: pd.DataFrame, **_) -> pd.Series:

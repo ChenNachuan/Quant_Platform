@@ -414,21 +414,27 @@ class TestSourcePriorityConfig:
             "tushare": 3,
         }
         daily_history_primary_overrides = {"cn_stock_fundamental", "cn_etf_bars_daily"}
+        static_metadata_primary = {"cn_stock_basic"}
         for table, entry in cfg.items():
             if table == "cross_check":
                 continue
             priority = entry["priority"]
             assert priority, f"{table}: empty priority"
-            assert priority[0] != "tushare", f"{table}: tushare must not be primary"
-            if table in daily_history_primary_overrides:
-                assert priority[0] == "qdc", (
-                    f"{table}: daily-history override must use qdc as primary"
+            if table in static_metadata_primary:
+                assert priority[0] == "tushare", (
+                    f"{table}: static metadata primary must be tushare"
                 )
             else:
-                ranks = [global_rank[s] for s in priority]
-                assert ranks == sorted(ranks), (
-                    f"{table}: priority {priority} violates straightflush->qdc->amazingdata->tushare order"
-                )
+                assert priority[0] != "tushare", f"{table}: tushare must not be primary"
+                if table in daily_history_primary_overrides:
+                    assert priority[0] == "qdc", (
+                        f"{table}: daily-history override must use qdc as primary"
+                    )
+                else:
+                    ranks = [global_rank[s] for s in priority]
+                    assert ranks == sorted(ranks), (
+                        f"{table}: priority {priority} violates straightflush->qdc->amazingdata->tushare order"
+                    )
             overrides = entry.get("field_override") or {}
             for field, src in overrides.items():
                 assert src != "tushare", (
@@ -443,16 +449,19 @@ class TestSourcePriorityConfig:
             "qdc",
             "amazingdata",
         ]
-        assert get_source_priority("fundamental") == ["qdc", "straightflush"]
+        assert get_source_priority("cn_stock_basic") == [
+            "tushare",
+            "amazingdata",
+            "straightflush",
+        ]
+        assert get_field_overrides("cn_stock_basic") == {"old_code": "amazingdata"}
+        assert get_source_priority("fundamental") == ["qdc", "tushare"]
         assert get_field_overrides("bars_daily") == {"adjfactor": "qdc"}
         assert get_field_overrides("cn_etf_bars_daily") == {
             "volume": "amazingdata",
             "amount": "amazingdata",
         }
-        assert get_field_overrides("fundamental") == {
-            "total_market_cap": "straightflush",
-            "float_market_cap": "straightflush",
-        }
+        assert get_field_overrides("fundamental") == {}
         assert get_field_overrides("bars_minute") == {}
         assert get_source_priority("reference", "calendar") == [
             "straightflush",
@@ -1115,3 +1124,116 @@ class TestCrossSourceCheckAggregate:
             pytest.approx(126300.45),
             pytest.approx(20000.0),
         ]
+
+
+class TestEtfK02RepairAndExemption:
+    @staticmethod
+    def _sample_tushare_etf_raw() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ts_code": [
+                    "159910.SZ",
+                    "510300.SH",
+                    "000001.SZ",
+                    "161725.SZ",
+                    "501001.SH",
+                ],
+                "trade_date": ["20140505"] * 5,
+                "open": [0.692, 2.20, 1.0, 1.0, 1.0],
+                "high": [0.692, 2.22, 1.0, 1.0, 1.0],
+                "low": [0.692, 2.18, 1.0, 1.0, 1.0],
+                "close": [0.692, 2.21, 1.0, 1.0, 1.0],
+                "vol": [0.01, 1000.0, 50.0, 50.0, 50.0],
+                "amount": [0.0007, 2210.0, 5.0, 5.0, 5.0],
+                "adj_factor": [1.0, 1.1, 1.0, 1.0, 1.0],
+            }
+        )
+
+    def test_tushare_etf_normalizer_filters_non_etf_tickers_and_scales_units(self):
+        from data.normalizers import normalize
+
+        ts_raw = self._sample_tushare_etf_raw()
+        ts_norm = normalize("tushare", ts_raw, dataset="etf")
+        assert list(ts_norm["ticker"]) == ["159910.SZ", "510300.SH"]
+        assert int(ts_norm.loc[ts_norm["ticker"] == "159910.SZ", "volume"].iloc[0]) == 1
+        assert float(
+            ts_norm.loc[ts_norm["ticker"] == "159910.SZ", "amount"].iloc[0]
+        ) == pytest.approx(0.7)
+
+    def test_repair_etf_k02_patches_only_mismatched_rows_from_tushare(self, tmp_path):
+        from data.ingestion import _repair_etf_k02_from_tushare
+        from data.raw import save_raw
+
+        defect_day = date(2014, 5, 5)
+        save_raw(
+            self._sample_tushare_etf_raw(),
+            "tushare",
+            "cn_etf_bars_daily",
+            defect_day,
+            tmp_path,
+        )
+        df = pd.DataFrame(
+            {
+                "ticker": ["159910.SZ", "510300.SH"],
+                "trade_date": [defect_day, defect_day],
+                "open": [0.692, 2.20],
+                "high": [0.692, 2.22],
+                "low": [0.692, 2.18],
+                "close": [0.692, 2.21],
+                "volume": pd.Series([1, 123456], dtype="Int64"),
+                "amount": [0.0, 272837.76],
+                "adjfactor": [1.0, 1.05],
+            }
+        )
+        repaired = _repair_etf_k02_from_tushare(
+            df, defect_day, data_root=tmp_path, from_raw=True
+        )
+        assert str(repaired["volume"].dtype) == "Int64"
+        assert list(repaired["volume"]) == [1, 123456]
+        assert list(repaired["amount"]) == [
+            pytest.approx(0.7),
+            pytest.approx(272837.76),
+        ]
+        # Prices and adjfactor remain from primary (QDC)
+        assert list(repaired["adjfactor"]) == [pytest.approx(1.0), pytest.approx(1.05)]
+
+    def test_etf_amount_is_exempt_on_configured_defect_date(self):
+        defect_day = date(2014, 5, 5)
+        primary_df = pd.DataFrame(
+            {
+                "ticker": ["159910.SZ", "510300.SH"],
+                "trade_date": [defect_day, defect_day],
+                "open": [0.692, 2.20],
+                "high": [0.692, 2.22],
+                "low": [0.692, 2.18],
+                "close": [0.692, 2.21],
+                "volume": pd.Series([1, 123456], dtype="Int64"),
+                "amount": [0.7, 272837.76],
+                "adjfactor": [1.0, 1.05],
+            }
+        )
+        ad_df = primary_df.copy()
+        ad_df.loc[ad_df["ticker"] == "159910.SZ", "amount"] = 0.0
+        res_ok = cross_source_check(
+            primary_df,
+            ad_df,
+            "cn_etf_bars_daily",
+            defect_day,
+            secondary_source="amazingdata",
+        )
+        assert res_ok.mismatched_fields == {}
+        assert respond(res_ok) == "silent"
+
+        # Non-exempt date still flags amount mismatch
+        primary_other = primary_df.copy()
+        primary_other["trade_date"] = TRADE_DATE
+        ad_other = ad_df.copy()
+        ad_other["trade_date"] = TRADE_DATE
+        res_err = cross_source_check(
+            primary_other,
+            ad_other,
+            "cn_etf_bars_daily",
+            TRADE_DATE,
+            secondary_source="amazingdata",
+        )
+        assert set(res_err.mismatched_fields) == {"amount"}

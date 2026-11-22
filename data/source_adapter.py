@@ -75,6 +75,11 @@ class FetchTimeoutError(TimeoutError):
 #: 数据源适配器与标准化器的数据集标识字面量类型。
 SourceDataset = Literal[
     "stock",
+    "stock_minute",
+    "stock_basic",
+    "fundamental",
+    "daily_status",
+    "corporate_actions",
     "etf",
     "index",
     "convertible",

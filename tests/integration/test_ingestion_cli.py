@@ -280,6 +280,7 @@ class TestIngestOrchestrator:
         assert list(cal_df["trade_date"]) == [date(2025, 2, 28), TRADE_DATE]
 
     def test_index_table_fills_missing_nullable_columns(self, tmp_path: Path):
+        _seed_reference_data(tmp_path, [TRADE_DATE])
         idx_raw = pd.DataFrame(
             [
                 {
@@ -815,6 +816,7 @@ class TestAmazingPullAndAdapters:
     def test_etf_sparse_null_ohlc_drops_without_fallback_and_high_null_falls_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        _seed_reference_data(tmp_path, [date(2026, 11, 13)])
         date_ms = 1794528000000  # 2026-11-13 Asia/Shanghai
         n = 10
         qdc_sparse = pd.DataFrame(
@@ -896,6 +898,7 @@ class TestAmazingPullAndAdapters:
         self, tmp_path: Path
     ):
         trade_day = date(2022, 8, 22)
+        _seed_reference_data(tmp_path, [trade_day])
         date_ms = 1661097600000  # 2022-08-22 00:00:00 Asia/Shanghai
         qdc_raw = pd.DataFrame(
             {
@@ -1018,3 +1021,125 @@ class TestAmazingPullAndAdapters:
             / "cn_stock_index_bars_daily"
             / "2026-11-13.parquet"
         ).exists()
+
+    def test_amazing_pull_minute_uses_hist_code_list_and_chunks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("USER", "demo_user")
+        monkeypatch.setenv("PASSWORD", "demo_secret")
+        monkeypatch.setenv("HOST", "127.0.0.1")
+        monkeypatch.setenv("PORT", "8000")
+
+        hist_calls: list[tuple[str, int, int]] = []
+        query_calls: list[tuple[int, int, tuple[str, ...]]] = []
+
+        class MinuteBaseData:
+            def get_calendar(self):
+                return [20130104, 20130107, 20130108]
+
+            def get_hist_code_list(
+                self,
+                security_type=None,
+                start_date=None,
+                end_date=None,
+                local_path=None,
+            ):
+                hist_calls.append((str(security_type), int(start_date), int(end_date)))
+                return ["000001.SZ", "000004.SZ"]
+
+            def get_code_list(self, security_type=None):
+                raise AssertionError("minute must prefer get_hist_code_list")
+
+        class MinuteMarketData:
+            def __init__(self, _cal):
+                pass
+
+            def query_kline(self, code_list, begin_date=None, end_date=None, **_kwargs):
+                query_calls.append((int(begin_date), int(end_date), tuple(code_list)))
+                dates_by_window = {
+                    (20130104, 20130107): [
+                        "2013-01-04 09:31:00",
+                        "2013-01-07 09:31:00",
+                    ],
+                    (20130108, 20130108): ["2013-01-08 09:31:00"],
+                }
+                times = dates_by_window[(int(begin_date), int(end_date))]
+                return {
+                    code: pd.DataFrame(
+                        {
+                            "kline_time": times,
+                            "open": [10.0] * len(times),
+                            "high": [10.2] * len(times),
+                            "low": [9.9] * len(times),
+                            "close": [10.1] * len(times),
+                            "volume": [1000] * len(times),
+                            "amount": [10100.0] * len(times),
+                        }
+                    )
+                    for code in code_list
+                }
+
+        fake_ad = types.ModuleType("AmazingData")
+        fake_ad.constant = SimpleNamespace(
+            Period=SimpleNamespace(
+                day=SimpleNamespace(value="day"),
+                min1=SimpleNamespace(value="min1"),
+            )
+        )
+        fake_ad.login = MagicMock()
+        fake_ad.logout = MagicMock()
+        fake_ad.BaseData = MinuteBaseData
+        fake_ad.MarketData = MinuteMarketData
+        fake_ad.InfoData = lambda: object()
+        monkeypatch.setitem(sys.modules, "AmazingData", fake_ad)
+
+        rc = amazing_pull.main(
+            [
+                "--tables",
+                "cn_stock_bars_minute",
+                "--start",
+                "2013-01-04",
+                "--end",
+                "2013-01-08",
+                "--chunk-days",
+                "2",
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        assert hist_calls == [
+            ("EXTRA_STOCK_A", 20130104, 20130107),
+            ("EXTRA_STOCK_A", 20130108, 20130108),
+        ]
+        assert len(query_calls) == 2
+        for day_s in ("2013-01-04", "2013-01-07", "2013-01-08"):
+            out = (
+                tmp_path
+                / "raw"
+                / "amazingdata"
+                / "cn_stock_bars_minute"
+                / f"{day_s}.parquet"
+            )
+            assert out.exists()
+            df_day = pd.read_parquet(out)
+            assert set(df_day["code"]) == {"000001.SZ", "000004.SZ"}
+
+        # 再次执行不传 --force 应整块跳过、不再查询 SDK
+        query_calls.clear()
+        rc2 = amazing_pull.main(
+            [
+                "--tables",
+                "cn_stock_bars_minute",
+                "--start",
+                "2013-01-04",
+                "--end",
+                "2013-01-08",
+                "--chunk-days",
+                "2",
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+        assert rc2 == 0
+        assert query_calls == []

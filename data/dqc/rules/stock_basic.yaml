@@ -1,0 +1,94 @@
+# DQC rules — stock_basic (cn_stock_basic)
+
+rules:
+  # ---- Completeness ----
+  - id: C13
+    name: required_non_null
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_required_non_null"
+    params: {}
+    applicability: [reference]
+    threshold: "schema non-nullable columns have zero nulls"
+    threshold_source: fixed
+    boundary: "notnull: any missing required column or null value fails"
+    description: "Required schema columns must not contain nulls"
+
+  # ---- Legality ----
+  - id: L13
+    name: ticker_format
+    severity: HARD
+    type: column_check
+    columns: [ticker]
+    condition: "regex"
+    value: "^([036]\\d{5}\\.(SH|SZ)|(43|83|87|92)\\d{4}\\.BJ)$"
+    applicability: [daily, minute, fund, factor, reference]
+    threshold: "regex ^([036]\\d{5}\\.(SH|SZ)|(43|83|87|92)\\d{4}\\.BJ)$"
+    threshold_source: fixed
+    boundary: "full regex match: partial match or mismatch fails"
+    description: "Ticker format validation"
+
+  - id: L15
+    name: enum_values_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_enum_values"
+    params: {}
+    applicability: [reference]
+    threshold: "enum columns match schema allowed sets"
+    threshold_source: fixed
+    boundary: "in allowed set: any value outside allowed enum set fails"
+    description: "Enum value validation"
+
+  - id: L16
+    name: date_columns_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_columns_valid"
+    params: {}
+    applicability: [reference]
+    threshold: "non-null date/datetime columns parse cleanly"
+    threshold_source: fixed
+    boundary: "valid date/datetime: any non-null unparseable value fails"
+    description: "Multi-column date format validation"
+
+  # ---- Consistency ----
+  - id: K13
+    name: unique_key_no_duplicates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_unique_key"
+    params: {}
+    applicability: [reference]
+    threshold: "schema unique key has zero duplicate rows"
+    threshold_source: fixed
+    boundary: "eq 0 duplicates: any duplicated primary key fails"
+    description: "Primary key uniqueness validation"
+
+  - id: K14
+    name: date_order_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_order_pair"
+    params:
+      start_col: list_date
+      end_col: delist_date
+    applicability: [reference]
+    threshold: "delist_date >= list_date when both non-null"
+    threshold_source: fixed
+    boundary: "ge: delist_date equal to list_date passes, delist_date < list_date fails"
+    description: "Delist date must not precede list date"
+
+  # ---- Timeliness ----
+  - id: T10
+    name: no_future_ref_date
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_date_col"
+    params:
+      column: list_date
+    applicability: [reference]
+    threshold: "list_date <= today"
+    threshold_source: fixed
+    boundary: "le today: list_date == today passes, future date fails"
+    description: "No future list_date in stock_basic"

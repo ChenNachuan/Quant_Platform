@@ -10,11 +10,11 @@ rules:
     type: custom_check
     function: "checks.custom_checks.check_minute_bar_count"
     params:
-      expected_bars: 240
+      expected_bars: [240, 241]
     applicability: [minute]
-    threshold: "240 bars per ticker per day (A-shares) / per contract spec"
+    threshold: "240 or 241 bars per ticker per day (A-shares) / per contract spec"
     threshold_source: fixed
-    boundary: "eq 240: exactly 240 bars; 239 or 241 both fail"
+    boundary: "in [240, 241]: 240 or 241 PASSES; 239 or 242 FAILS"
     description: "Minute bar count per ticker per day"
 
   - id: C04

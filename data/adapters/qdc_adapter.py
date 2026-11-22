@@ -6,7 +6,8 @@
 协议要点：
 * CLI 模式通过 ``qdc-cli config`` 解析目录（或使用 ``local_dir=`` / ``QDC_DATA_DIR``），
   按需同步年度 Parquet 分片。
-* 本地 Parquet 按 ``Asia/Shanghai`` 日界毫秒过滤 ``ts``（避免 ``TRY_CAST(ts AS DATE)`` 返回 NULL）。
+* 本地 Parquet 按 ``Asia/Shanghai`` 日界毫秒过滤 ``ts``（避免 ``TRY_CAST(ts AS DATE)`` 返回 NULL），
+  对 ``string`` / ``date32`` 日期列启用 PyArrow ``filters`` 下推加速单日查询。
 * HTTP 模式从环境变量或 ``config/.env`` 读取 ``QDC_API_KEY`` / ``QDC_DEVICE``，请求
   ``GET /v1/query``（``format=parquet`` + 游标分页）。
 """
@@ -25,6 +26,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
@@ -39,10 +41,15 @@ _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _DEFAULT_BASE_URL = "https://data.qdc-data.com"
 _DEFAULT_CLI_BIN = "qdc-cli"
 _DAY_MS = 86_400_000
+_BSE_PREFIXES = ("43", "83", "87", "92")
 
-# 平台 dataset -> (QDC sku, 默认子表名或 None)
+# 平台 dataset -> (QDC sku, 默认子表路径或 None -> 'full')
 _DATASET_TO_SKU: dict[str, tuple[str, str | None]] = {
     "stock": ("cn_daily_full", None),
+    "stock_minute": ("stocks_1m", None),
+    "fundamental": ("cn_valuation_1d", None),
+    "daily_status": ("cn_limit_flag", "limits/full"),
+    "corporate_actions": ("cn_dividend", None),
     "etf": ("cn_etf_1d", None),
     "index": ("cn_index_1d", None),
     "convertible": ("cn_cb_1d", None),
@@ -80,8 +87,21 @@ def _normalize_qdc_root(root: Path) -> Path:
     return root
 
 
+def _canonicalize_qdc_code(value: str, *, fix_bse_xshe: bool = False) -> str:
+    val = str(value).strip()
+    if fix_bse_xshe and val.endswith(".XSHE") and val[:2] in _BSE_PREFIXES:
+        return val[: -len(".XSHE")] + ".BJ"
+    if val.endswith(".XSHG"):
+        return val[: -len(".XSHG")] + ".SH"
+    if val.endswith(".XSHE"):
+        return val[: -len(".XSHE")] + ".SZ"
+    if val.endswith(".XBSE"):
+        return val[: -len(".XBSE")] + ".BJ"
+    return val
+
+
 class QdcAdapter(SourceAdapter):
-    """通过 ``qdc-cli`` 或 HTTP API 拉取 QDCData 原始行情。"""
+    """通过 ``qdc-cli`` 或 HTTP API 拉取 QDCData 原始行情与基础状态。"""
 
     requests_per_second = 5.0
 
@@ -294,21 +314,25 @@ class QdcAdapter(SourceAdapter):
         self._run_cli_json(["get", sku, "--years", str(trade_date.year)])
         self._synced_keys.add(key)
 
-    def _fetch_cli(self, dataset: str, trade_date: date) -> pd.DataFrame:
-        data_root = self._resolve_cli_data_root()
-        sku, table = _DATASET_TO_SKU[dataset]
-        subtable = table or "full"
-
-        self._maybe_sync_cli(data_root, sku, subtable, trade_date)
-
-        dataset_dir = data_root / sku / subtable
-        if not dataset_dir.is_dir():
-            raise FileNotFoundError(
-                f"QDC local dataset directory not found: {dataset_dir}"
-            )
-
+    @staticmethod
+    def _select_cli_files(dataset_dir: Path, trade_date: date) -> list[Path]:
+        """优先定位单日/单月/单年切片 Parquet，避免扫描多余分片文件。"""
+        day_file = dataset_dir / f"{trade_date.strftime('%Y-%m-%d')}.parquet"
+        if day_file.is_file():
+            return [day_file]
+        month_file = dataset_dir / f"{trade_date.strftime('%Y-%m')}.parquet"
+        if month_file.is_file():
+            return [month_file]
+        year_file = dataset_dir / f"{trade_date.year}.parquet"
+        if year_file.is_file():
+            return [year_file]
         year_files = sorted(dataset_dir.glob(f"{trade_date.year}*.parquet"))
-        files = year_files if year_files else sorted(dataset_dir.glob("*.parquet"))
+        if year_files:
+            return year_files
+        return sorted(dataset_dir.glob("*.parquet"))
+
+    def _read_cli_date_slice(self, dataset_dir: Path, trade_date: date) -> pd.DataFrame:
+        files = self._select_cli_files(dataset_dir, trade_date)
         if not files:
             return pd.DataFrame()
 
@@ -317,7 +341,8 @@ class QdcAdapter(SourceAdapter):
         frames: list[pd.DataFrame] = []
 
         for path in files:
-            schema_names = set(pq.read_schema(path).names)
+            schema = pq.read_schema(path)
+            schema_names = set(schema.names)
             if "ts" in schema_names:
                 filters: list[tuple[str, str, Any]] = [
                     ("ts", ">=", start_ms),
@@ -325,14 +350,33 @@ class QdcAdapter(SourceAdapter):
                 ]
                 df = pd.read_parquet(path, filters=filters)
             else:
-                df = pd.read_parquet(path)
-                for col in ("trade_date", "trade_day", "d", "date"):
-                    if col in df.columns:
-                        parsed = pd.to_datetime(df[col], errors="coerce").dt.strftime(
-                            "%Y-%m-%d"
+                date_col = next(
+                    (
+                        c
+                        for c in ("trade_date", "trade_day", "d", "date")
+                        if c in schema_names
+                    ),
+                    None,
+                )
+                if date_col is not None:
+                    field_type = schema.field(date_col).type
+                    if pa.types.is_string(field_type) or pa.types.is_large_string(
+                        field_type
+                    ):
+                        df = pd.read_parquet(path, filters=[(date_col, "==", date_iso)])
+                    elif pa.types.is_date(field_type):
+                        df = pd.read_parquet(
+                            path, filters=[(date_col, "==", trade_date)]
                         )
+                    else:
+                        df = pd.read_parquet(path)
+                        parsed = pd.to_datetime(
+                            df[date_col], errors="coerce"
+                        ).dt.strftime("%Y-%m-%d")
                         df = df[parsed == date_iso]
-                        break
+                else:
+                    df = pd.read_parquet(path)
+
             if len(df) > 0:
                 if self._symbols:
                     for sym_col in ("symbol", "ts_code", "code"):
@@ -345,6 +389,145 @@ class QdcAdapter(SourceAdapter):
         if frames:
             return pd.concat(frames, ignore_index=True)
         return pd.DataFrame()
+
+    def _fetch_cli_corporate_actions(
+        self, data_root: Path, trade_date: date
+    ) -> pd.DataFrame:
+        self._maybe_sync_cli(data_root, "cn_dividend", "full", trade_date)
+        dataset_dir = data_root / "cn_dividend" / "full"
+        if not dataset_dir.is_dir():
+            raise FileNotFoundError(
+                f"QDC local dataset directory not found: {dataset_dir}"
+            )
+        all_file = dataset_dir / "all.parquet"
+        files = (
+            [all_file] if all_file.is_file() else sorted(dataset_dir.glob("*.parquet"))
+        )
+        if not files:
+            return pd.DataFrame()
+        df = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+        if df.empty:
+            return df
+        if "progress" in df.columns:
+            df = df[df["progress"].astype(str) == "实施分配"].copy()
+        if "ex_date" in df.columns:
+            ex_parsed = pd.to_datetime(df["ex_date"], errors="coerce").dt.date
+            df = df[ex_parsed.notna() & (ex_parsed <= trade_date)].copy()
+        if self._symbols:
+            for sym_col in ("symbol", "ts_code", "code"):
+                if sym_col in df.columns:
+                    df = df[df[sym_col].isin(self._symbols)].copy()
+                    break
+        return df.reset_index(drop=True)
+
+    def _fetch_cli_daily_status(
+        self, data_root: Path, trade_date: date
+    ) -> pd.DataFrame:
+        self._maybe_sync_cli(data_root, "cn_limit_flag", "limits/full", trade_date)
+        limits_dir = data_root / "cn_limit_flag" / "limits" / "full"
+        status_dir = data_root / "cn_limit_flag" / "status" / "full"
+        if not limits_dir.is_dir() and not status_dir.is_dir():
+            raise FileNotFoundError(
+                f"QDC local dataset directory not found: {limits_dir}"
+            )
+
+        lim_df = (
+            self._read_cli_date_slice(limits_dir, trade_date)
+            if limits_dir.is_dir()
+            else pd.DataFrame()
+        )
+        stat_df = (
+            self._read_cli_date_slice(status_dir, trade_date)
+            if status_dir.is_dir()
+            else pd.DataFrame()
+        )
+
+        if lim_df.empty and stat_df.empty:
+            return pd.DataFrame()
+
+        if not lim_df.empty and not stat_df.empty:
+            join_cols = [
+                c
+                for c in ("date", "symbol")
+                if c in lim_df.columns and c in stat_df.columns
+            ]
+            if not join_cols:
+                join_cols = ["symbol"]
+            extra_stat_cols = [
+                c for c in stat_df.columns if c in join_cols or c not in lim_df.columns
+            ]
+            out = lim_df.merge(
+                stat_df[extra_stat_cols].drop_duplicates(join_cols),
+                on=join_cols,
+                how="outer",
+            )
+        elif not lim_df.empty:
+            out = lim_df.copy()
+        else:
+            out = stat_df.copy()
+
+        norm_syms = (
+            out["symbol"]
+            .astype(str)
+            .map(lambda v: _canonicalize_qdc_code(v, fix_bse_xshe=True))
+        )
+
+        st_set: set[str] = set()
+        st_path = data_root / "cn_st" / "full" / "all.parquet"
+        if st_path.is_file():
+            st_df = pd.read_parquet(st_path)
+            if not st_df.empty and "st_start" in st_df.columns:
+                st_start = pd.to_datetime(st_df["st_start"], errors="coerce").dt.date
+                st_end = (
+                    pd.to_datetime(st_df["st_end"], errors="coerce").dt.date
+                    if "st_end" in st_df.columns
+                    else pd.Series(pd.NaT, index=st_df.index)
+                )
+                active = (st_start <= trade_date) & (
+                    st_end.isna() | (st_end >= trade_date)
+                )
+                code_col = "ts_code" if "ts_code" in st_df.columns else "symbol"
+                if code_col in st_df.columns:
+                    st_set = {
+                        _canonicalize_qdc_code(str(c), fix_bse_xshe=True)
+                        for c in st_df.loc[active, code_col].dropna()
+                    }
+        out["is_st"] = norm_syms.isin(st_set)
+
+        xr_set: set[str] = set()
+        div_path = data_root / "cn_dividend" / "full" / "all.parquet"
+        if div_path.is_file():
+            div_df = pd.read_parquet(div_path)
+            if not div_df.empty and "ex_date" in div_df.columns:
+                if "progress" in div_df.columns:
+                    div_df = div_df[div_df["progress"].astype(str) == "实施分配"]
+                ex_dt = pd.to_datetime(div_df["ex_date"], errors="coerce").dt.date
+                sym_col = "symbol" if "symbol" in div_df.columns else "ts_code"
+                if sym_col in div_df.columns:
+                    xr_set = {
+                        _canonicalize_qdc_code(str(c), fix_bse_xshe=True)
+                        for c in div_df.loc[ex_dt == trade_date, sym_col].dropna()
+                    }
+        out["is_xr"] = norm_syms.isin(xr_set)
+        return out
+
+    def _fetch_cli(self, dataset: str, trade_date: date) -> pd.DataFrame:
+        data_root = self._resolve_cli_data_root()
+        if dataset == "corporate_actions":
+            return self._fetch_cli_corporate_actions(data_root, trade_date)
+        if dataset == "daily_status":
+            return self._fetch_cli_daily_status(data_root, trade_date)
+
+        sku, table = _DATASET_TO_SKU[dataset]
+        subtable = table or "full"
+        self._maybe_sync_cli(data_root, sku, subtable, trade_date)
+
+        dataset_dir = data_root / sku / subtable
+        if not dataset_dir.is_dir():
+            raise FileNotFoundError(
+                f"QDC local dataset directory not found: {dataset_dir}"
+            )
+        return self._read_cli_date_slice(dataset_dir, trade_date)
 
     def _health_check_cli(self) -> bool:
         if self._local_dir is not None:
@@ -398,7 +581,7 @@ class QdcAdapter(SourceAdapter):
             "format": "parquet",
         }
         if table:
-            params["table"] = table
+            params["table"] = table.split("/")[0]
         if self._symbols:
             params["code"] = ",".join(self._symbols)
 

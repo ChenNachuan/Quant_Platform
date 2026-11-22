@@ -16,7 +16,9 @@ cn_calendar:
 
 # --- 2. A 股基础信息与行情状态 (6) ---
 cn_stock_basic:
-  priority: [straightflush, amazingdata, tushare]  # QDC 无独立全市场基础表；TODO(TushareAdapter): 接入 stock_basic 补充 market/list_status/is_hs
+  priority: [tushare, amazingdata, straightflush]  # Tushare stock_basic 提供完整 market/list_status/is_hs；old_code 取自 AD
+  field_override:
+    old_code: amazingdata  # AmazingData get_bj_code_mapping 提供北交所平移旧代码
 
 cn_stock_bars_daily:
   priority: [straightflush, qdc, amazingdata]  # TODO(TushareAdapter): stock 适配器已就绪（含 adj_factor/suspend_d）；因 should_cross_check 要求全部备源到达，暂不列入默认列表，可按需显式指定 --source tushare 校验
@@ -27,10 +29,7 @@ cn_stock_bars_minute:
   priority: [qdc, amazingdata]  # TODO(StraightFlushAdapter/QdcAdapter): 接入 SF Market Dumps 与 QDC stocks_1m 后评估追加 straightflush 作第三校验源
 
 cn_stock_fundamental:
-  priority: [qdc, straightflush]  # QDC cn_valuation_1d 提供完整日频历史估值（避免 SF 快照前视偏差）；TODO(TushareAdapter): 接入 daily_basic 后追加 tushare 作第三校验源（注意 total_mv/circ_mv 万元->元）
-  field_override:
-    total_market_cap: straightflush  # SF 实时盘面总市值更准（QDC 盘后才入库）
-    float_market_cap: straightflush
+  priority: [qdc, tushare]  # QDC cn_valuation_1d 与 Tushare daily_basic 均提供完整无前视偏差日频历史估值（注意 Tushare total_mv/circ_mv 万元->元）
 
 cn_stock_daily_status:
   priority: [qdc, amazingdata]
@@ -200,6 +199,8 @@ cross_check:
   # 显式口径豁免：已知跨源统计口径差异字段不计入不一致
   exemptions:
     cn_etf_bars_daily:
+      "2014-05-05":
+        159910.SZ: [amount]   # 1 股成交额 0.7 元被 AD 截断为 0.0；asset 已用 Tushare 修复为 0.7 元，豁免该日 amount 跨源比对
       "2022-08-22..2022-08-31":
         "*": [open]           # 仅历史段跳过 open 比对（AD 低成交 ETF open=0.0 缺陷，asset 保留 QDC open）
       "2022-11-09":

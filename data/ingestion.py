@@ -901,11 +901,21 @@ def cross_source_check(
             f"no NUMERIC_FIELDS entry for {table!r} — define it in "
             "data/ingestion.py before cross-checking it"
         )
-    join_keys = (
-        ["ticker", "trade_date"]
-        if "trade_date" in df_a.columns and "trade_date" in df_b.columns
-        else ["ticker"]
-    )
+    if {"ticker", "ex_date", "event_type"} <= set(df_a.columns) and {
+        "ticker",
+        "ex_date",
+        "event_type",
+    } <= set(df_b.columns):
+        join_keys = ["ticker", "ex_date", "event_type"]
+    elif {"ticker", "ex_date"} <= set(df_a.columns) and {
+        "ticker",
+        "ex_date",
+    } <= set(df_b.columns):
+        join_keys = ["ticker", "ex_date"]
+    elif "trade_date" in df_a.columns and "trade_date" in df_b.columns:
+        join_keys = ["ticker", "trade_date"]
+    else:
+        join_keys = ["ticker"]
     canonical = resolve_table_name(table)
     df_a, df_b = _apply_skip_rules(df_a, df_b, canonical)
 
@@ -1438,7 +1448,12 @@ def should_cross_check(
 TABLE_TO_ADAPTER_DATASET: dict[str, str] = _AliasedDict(
     {
         "cn_calendar": "calendar",
+        "cn_stock_basic": "stock_basic",
         "cn_stock_bars_daily": "stock",
+        "cn_stock_bars_minute": "stock_minute",
+        "cn_stock_fundamental": "fundamental",
+        "cn_stock_daily_status": "daily_status",
+        "cn_stock_corporate_actions": "corporate_actions",
         "cn_etf_bars_daily": "etf",
         "cn_stock_index_bars_daily": "index",
         "cn_futures_bars_daily": "futures",
@@ -1448,9 +1463,66 @@ TABLE_TO_ADAPTER_DATASET: dict[str, str] = _AliasedDict(
 
 TABLE_TO_DQC_GROUP: dict[str, str] = _AliasedDict(
     {
+        # 日历与股票核心表 (7)
+        "cn_calendar": "calendar",
+        "cn_stock_basic": "stock_basic",
         "cn_stock_bars_daily": "bars_daily",
         "cn_stock_bars_minute": "bars_minute",
         "cn_stock_fundamental": "fundamental",
+        "cn_stock_daily_status": "daily_status",
+        "cn_stock_corporate_actions": "corporate_actions",
+        # 指数 / 行业 / 成分权重 (4)
+        "cn_stock_index_basic": "tabular",
+        "cn_stock_index_bars_daily": "index_bars_daily",
+        "cn_stock_industry": "tabular",
+        "cn_stock_index_weights": "tabular",
+        # 股票基本面 PIT (7)
+        "cn_stock_fundamental_income": "tabular",
+        "cn_stock_fundamental_balance": "tabular",
+        "cn_stock_fundamental_cashflow": "tabular",
+        "cn_stock_fundamental_indicator": "tabular",
+        "cn_stock_fundamental_segment": "tabular",
+        "cn_stock_fundamental_earnings": "tabular",
+        "cn_stock_fundamental_consensus": "tabular",
+        # 资金流 / 情绪 / 筹码 (9)
+        "cn_stock_auction": "tabular",
+        "cn_stock_moneyflow": "tabular",
+        "cn_stock_hsgt_market_flow": "tabular",
+        "cn_stock_hsgt_hold": "tabular",
+        "cn_stock_margin": "tabular",
+        "cn_stock_lhb": "tabular",
+        "cn_stock_lhb_seats": "tabular",
+        "cn_stock_limit_pool": "tabular",
+        "cn_stock_chips_perf": "tabular",
+        # 股东与资本运作事件 (8)
+        "cn_stock_holder_num": "tabular",
+        "cn_stock_top_holders": "tabular",
+        "cn_stock_restricted_release": "tabular",
+        "cn_stock_block_trade": "tabular",
+        "cn_stock_repurchase": "tabular",
+        "cn_stock_holder_trade": "tabular",
+        "cn_stock_pledge": "tabular",
+        "cn_stock_research_visits": "tabular",
+        # 股票逐笔与 L2 盘口 (2)
+        "cn_stock_tick": "tabular",
+        "cn_stock_tick_l2": "tabular",
+        # 独立 ETF 域 (5)
+        "cn_etf_basic": "tabular",
+        "cn_etf_bars_daily": "etf_bars_daily",
+        "cn_etf_bars_minute": "etf_bars_minute",
+        "cn_etf_fundamental": "tabular",
+        "cn_etf_tick": "tabular",
+        # 场外与上市公募基金 (5)
+        "cn_fund_basic": "tabular",
+        "cn_fund_managers": "tabular",
+        "cn_fund_nav": "tabular",
+        "cn_fund_dividend": "tabular",
+        "cn_fund_portfolio": "tabular",
+        # 期货 (4) 与因子 (1)
+        "cn_futures_bars_daily": "futures_bars_daily",
+        "cn_futures_tick_l2": "tabular",
+        "cn_futures_contract_specs": "tabular",
+        "cn_futures_continuous": "tabular",
         "factor": "factor",
     }
 )
@@ -1648,7 +1720,7 @@ def _apply_field_overrides(
         ov_norm = get_normalizer(ov_src)(norm_dataset, ov_raw)
         join_keys = [
             c
-            for c in ("ticker", "trade_date")
+            for c in ("ticker", "ex_date", "event_type", "trade_date")
             if c in out.columns and c in ov_norm.columns
         ]
         valid_fields = [f for f in fields if f in ov_norm.columns]
@@ -1666,6 +1738,114 @@ def _apply_field_overrides(
                     merged[field] = combined
                 merged = merged.drop(columns=[ov_col])
         out = merged
+    return out
+
+
+def _repair_etf_k02_from_tushare(
+    df: pd.DataFrame,
+    trade_date: date,
+    *,
+    data_root: str | os.PathLike[str],
+    from_raw: bool,
+) -> pd.DataFrame:
+    """用 Tushare ``fund_daily`` 补齐 ETF 日线中违反 K02（``volume > 0`` 与 ``amount > 0`` 不一致）的量额。
+
+    仅在主源（含 ``field_override`` 后）存在 K02 冲突行时触发；仅覆写冲突行上的 ``volume`` 与 ``amount``，
+    保持 OHLC 价格、复权因子与其余标的完全不变。无 Tushare raw 或拉取失败时安全保留原值。
+    """
+    if df.empty or not {"ticker", "volume", "amount"} <= set(df.columns):
+        return df
+
+    vol = pd.to_numeric(df["volume"], errors="coerce")
+    amt = pd.to_numeric(df["amount"], errors="coerce")
+    bad_mask = vol.notna() & amt.notna() & ((vol > 0) != (amt > 0))
+    if not bool(bad_mask.any()):
+        return df
+
+    from data.normalizers import get_normalizer
+
+    canonical = "cn_etf_bars_daily"
+    ts_raw = _load_raw_any("tushare", canonical, trade_date, data_root)
+    if ts_raw is None or ts_raw.empty:
+        if from_raw:
+            logger.warning(
+                "cn_etf_bars_daily %s has %d K02 mismatch row(s); tushare raw missing",
+                trade_date,
+                int(bad_mask.sum()),
+            )
+            return df
+        try:
+            ts_raw, _ = _obtain_raw(
+                "tushare", canonical, trade_date, data_root=data_root, from_raw=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "cn_etf_bars_daily %s K02 repair via tushare failed (%s); keeping original values",
+                trade_date,
+                exc,
+            )
+            return df
+
+    ts_norm = get_normalizer("tushare")("etf", ts_raw)
+    if ts_norm.empty or not {"ticker", "volume", "amount"} <= set(ts_norm.columns):
+        return df
+
+    ts_vol = pd.to_numeric(ts_norm["volume"], errors="coerce")
+    ts_amt = pd.to_numeric(ts_norm["amount"], errors="coerce")
+    ts_valid = ts_vol.notna() & ts_amt.notna() & ((ts_vol > 0) == (ts_amt > 0))
+    ts_clean = ts_norm.loc[ts_valid]
+    if ts_clean.empty:
+        return df
+
+    bad_lookup = pd.DataFrame({"_ticker": df.loc[bad_mask, "ticker"].astype(str)})
+    ts_lookup = pd.DataFrame(
+        {
+            "_ticker": ts_clean["ticker"].astype(str),
+            "_vol_ts": ts_clean["volume"],
+            "_amt_ts": ts_clean["amount"],
+        }
+    )
+    if "trade_date" in df.columns and "trade_date" in ts_clean.columns:
+        bad_lookup["_td"] = pd.to_datetime(
+            df.loc[bad_mask, "trade_date"], errors="coerce"
+        ).dt.date
+        ts_lookup["_td"] = pd.to_datetime(
+            ts_clean["trade_date"], errors="coerce"
+        ).dt.date
+        keys = ["_ticker", "_td"]
+    else:
+        keys = ["_ticker"]
+    ts_lookup = ts_lookup.drop_duplicates(keys)
+    merged = bad_lookup.merge(ts_lookup, on=keys, how="left", sort=False)
+
+    matched_idx = df.index[bad_mask]
+    rep_vol = merged["_vol_ts"].to_numpy()
+    rep_amt = merged["_amt_ts"].to_numpy()
+    has_fix = pd.notna(rep_vol) & pd.notna(rep_amt)
+    if not bool(has_fix.any()):
+        return df
+
+    fix_idx = matched_idx[has_fix]
+    out = df.copy()
+    if str(out["volume"].dtype) == "Int64":
+        out.loc[fix_idx, "volume"] = (
+            pd.to_numeric(pd.Series(rep_vol[has_fix], index=fix_idx), errors="coerce")
+            .round()
+            .astype("Int64")
+        )
+    else:
+        out.loc[fix_idx, "volume"] = pd.Series(
+            rep_vol[has_fix], index=fix_idx, dtype=out["volume"].dtype
+        )
+    out.loc[fix_idx, "amount"] = pd.to_numeric(
+        pd.Series(rep_amt[has_fix], index=fix_idx), errors="coerce"
+    ).astype("float64")
+    logger.info(
+        "repaired %d cn_etf_bars_daily K02 row(s) on %s via tushare: %s",
+        len(fix_idx),
+        trade_date,
+        list(out.loc[fix_idx, "ticker"].astype(str)),
+    )
     return out
 
 
@@ -1812,6 +1992,10 @@ def run_cross_check_for_date(
                 data_root=data_root,
                 from_raw=True,
             )
+            if canonical == "cn_etf_bars_daily":
+                primary_df = _repair_etf_k02_from_tushare(
+                    primary_df, trade_date, data_root=data_root, from_raw=True
+                )
     primary_df = primary_df.copy()
     primary_df.attrs["source"] = effective_primary
 
@@ -1919,6 +2103,10 @@ def ingest_table(
                     data_root=data_root,
                     from_raw=from_raw,
                 )
+                if canonical == "cn_etf_bars_daily":
+                    norm_df = _repair_etf_k02_from_tushare(
+                        norm_df, trade_date, data_root=data_root, from_raw=from_raw
+                    )
 
             dqc_group = TABLE_TO_DQC_GROUP.get(canonical)
             target = _resolve_asset_target_path(canonical, trade_date, data_root)
@@ -1926,12 +2114,23 @@ def ingest_table(
                 ref = build_reference_overrides(data_root, canonical, trade_date)
                 if overrides:
                     ref.update(overrides)
+                cross_df: pd.DataFrame | None = None
+                if canonical in ("cn_stock_bars_minute", "cn_etf_bars_minute"):
+                    daily_table = (
+                        "cn_stock_bars_daily"
+                        if canonical == "cn_stock_bars_minute"
+                        else "cn_etf_bars_daily"
+                    )
+                    daily_path = partition_path(daily_table, trade_date, data_root)
+                    if daily_path.exists():
+                        cross_df = pd.read_parquet(daily_path)
                 df_clean = ingest_with_dqc(
                     norm_df,
                     trade_date,
                     dqc_group,
                     table=canonical,
                     overrides=ref,
+                    cross_df=cross_df,
                     data_root=data_root,
                     source_tag=source_tag,
                     run_type=run_type,

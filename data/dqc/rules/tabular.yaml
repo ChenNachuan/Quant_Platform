@@ -1,0 +1,78 @@
+# DQC rules — tabular (generic schema-driven rules for auxiliary tables)
+
+rules:
+  # ---- Completeness ----
+  - id: C13
+    name: required_non_null
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_required_non_null"
+    params: {}
+    applicability: [reference]
+    threshold: "schema non-nullable columns have zero nulls"
+    threshold_source: fixed
+    boundary: "notnull: any missing required column or null value fails"
+    description: "Required schema columns must not contain nulls"
+
+  # ---- Legality ----
+  - id: L15
+    name: enum_values_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_enum_values"
+    params: {}
+    applicability: [reference]
+    threshold: "enum columns match schema allowed sets"
+    threshold_source: fixed
+    boundary: "in allowed set: any value outside allowed enum set fails"
+    description: "Enum value validation"
+
+  - id: L16
+    name: date_columns_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_date_columns_valid"
+    params: {}
+    applicability: [reference]
+    threshold: "non-null date/datetime columns parse cleanly"
+    threshold_source: fixed
+    boundary: "valid date/datetime: any non-null unparseable value fails"
+    description: "Multi-column date format validation"
+
+  - id: L26
+    name: schema_contract_valid
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_schema_contract"
+    params: {}
+    applicability: [reference]
+    threshold: "columns satisfy schema ticker regex, enums, and numeric constraints"
+    threshold_source: fixed
+    boundary: "strict contract: any non-null violation of schema check fails"
+    description: "Generic schema contract validation"
+
+  # ---- Consistency ----
+  - id: K13
+    name: unique_key_no_duplicates
+    severity: HARD
+    type: custom_check
+    function: "checks.custom_checks.check_unique_key"
+    params: {}
+    applicability: [reference]
+    threshold: "schema unique key has zero duplicate rows"
+    threshold_source: fixed
+    boundary: "eq 0 duplicates: any duplicated primary key fails"
+    description: "Primary key uniqueness validation"
+
+  # ---- Timeliness ----
+  - id: T12
+    name: no_future_primary_date
+    severity: SOFT
+    type: custom_check
+    function: "checks.custom_checks.check_no_future_date_col"
+    params: {}
+    applicability: [reference]
+    threshold: "primary date > today triggers soft flag"
+    threshold_source: fixed
+    boundary: "le today: dates <= today pass, future dates flag soft warning"
+    description: "Generic primary date future check"

@@ -173,12 +173,28 @@ def test_batch_reject_config_defaults():
 
 def test_disposition_table_spot_checks():
     expected = (
-        {f"C{i:02d}" for i in range(1, 13)}
-        | {f"L{i:02d}" for i in range(1, 15)}
-        | {f"K{i:02d}" for i in range(1, 13)}
-        | {f"T{i:02d}" for i in range(1, 10)}
+        {f"C{i:02d}" for i in range(1, 16)}
+        | {f"L{i:02d}" for i in range(1, 28)}
+        | {f"K{i:02d}" for i in range(1, 16)}
+        | {f"T{i:02d}" for i in range(1, 13)}
     )
-    assert set(severity.SEVERITY_CONFIGS) == expected  # all 47 rules
+    assert (
+        set(severity.SEVERITY_CONFIGS) == expected
+    )  # 47 core + 22 extended = 69 rules
+    assert (
+        severity_config_for("C15").row_action,
+        severity_config_for("C15").granularity,
+    ) == ("pass", "batch")
+    assert severity_config_for("L20").row_action == "flag"
+    assert (
+        severity_config_for("L23").row_action,
+        severity_config_for("L23").escalation_threshold,
+    ) == ("drop", 0.01)
+    assert (
+        severity_config_for("K13").row_action,
+        severity_config_for("K13").escalation_threshold,
+    ) == ("drop", 0.0)
+    assert severity_config_for("T11").row_action == "flag"
     l04 = severity_config_for("L04")
     assert (l04.row_action, l04.escalation_threshold) == ("flag", None)
     t03 = severity_config_for("T03")

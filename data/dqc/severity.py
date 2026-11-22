@@ -90,6 +90,9 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
     "C10": DQCSeverityConfig("pass", 0.0, "batch"),
     "C11": DQCSeverityConfig("flag", None, "batch"),
     "C12": DQCSeverityConfig("flag", None, "batch"),
+    "C13": DQCSeverityConfig("drop", 0.01),  # Schema 必填列缺失
+    "C14": DQCSeverityConfig("flag", None, "batch"),  # 非停牌状态空值率软告警
+    "C15": DQCSeverityConfig("pass", 0.0, "batch"),  # 交易日历内部断档门禁
     # 合法性
     "L01": DQCSeverityConfig("drop", 0.01),  # 负价格视为数据损坏
     "L02": DQCSeverityConfig("drop", 0.01),
@@ -105,6 +108,19 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
     "L12": DQCSeverityConfig("flag"),
     "L13": DQCSeverityConfig("drop", 0.01),  # 上游格式变更
     "L14": DQCSeverityConfig("drop", 0.01),
+    "L15": DQCSeverityConfig("drop", 0.01),  # 枚举值非法
+    "L16": DQCSeverityConfig("drop", 0.01),  # 多日期列格式非法
+    "L17": DQCSeverityConfig("drop", 0.01),  # 权益代码格式校验
+    "L18": DQCSeverityConfig("drop", 0.01),  # 可空数值正负性校验
+    "L19": DQCSeverityConfig("drop", 0.01),  # ETF 代码格式校验
+    "L20": DQCSeverityConfig("flag"),  # ETF 涨跌幅软告警
+    "L21": DQCSeverityConfig("drop", 0.01),  # 指数代码格式校验
+    "L22": DQCSeverityConfig("flag"),  # 指数严格 OHLC 软告警
+    "L23": DQCSeverityConfig("drop", 0.01),  # 指数相对容差 OHLC 门禁
+    "L24": DQCSeverityConfig("drop", 0.01),  # 期货合约代码校验
+    "L25": DQCSeverityConfig("drop", 0.01),  # 期货结算价与持仓量校验
+    "L26": DQCSeverityConfig("drop", 0.01),  # 通用 Schema 契约校验
+    "L27": DQCSeverityConfig("drop", 0.01),  # 每日状态 7 布尔列校验
     # 一致性
     "K01": DQCSeverityConfig("flag"),
     "K02": DQCSeverityConfig("drop", 0.05),
@@ -118,6 +134,9 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
     "K10": DQCSeverityConfig("pass", 0.0, "batch"),
     "K11": DQCSeverityConfig("flag"),
     "K12": DQCSeverityConfig("flag", None, "batch"),
+    "K13": DQCSeverityConfig("drop", 0.0),  # 主键唯一性校验
+    "K14": DQCSeverityConfig("drop", 0.01),  # 上市/退市日期顺序校验
+    "K15": DQCSeverityConfig("drop", 0.01),  # 每日状态涨跌停/停牌自洽校验
     # 时效性
     "T01": DQCSeverityConfig("pass", 0.0, "batch"),  # 数据过期拒绝入库
     "T02": DQCSeverityConfig("pass", 0.0, "batch"),
@@ -128,6 +147,9 @@ SEVERITY_CONFIGS: dict[str, DQCSeverityConfig] = {
     "T07": DQCSeverityConfig("flag"),
     "T08": DQCSeverityConfig("flag"),
     "T09": DQCSeverityConfig("flag"),
+    "T10": DQCSeverityConfig("drop", 0.0),  # 参考表主日期禁止未来日期
+    "T11": DQCSeverityConfig("flag"),  # 公司行为除权日预告软告警
+    "T12": DQCSeverityConfig("flag"),  # 通用表未来日期软告警
 }
 
 
